@@ -496,6 +496,7 @@ void MetalRenderTargetCache::Shutdown() {
     release_compute_pipeline(pipelines.pack);
     release_compute_pipeline(pipelines.pack_cov);
     release_compute_pipeline(pipelines.pack_range);
+    release_compute_pipeline(pipelines.pack_ms_range_px);
     release_render_pipeline(pipelines.mat_depth_range);
     release_render_pipeline(pipelines.mat_sten_range);
     release_compute_pipeline(pipelines.pack_ms_range);
@@ -556,8 +557,13 @@ void MetalRenderTargetCache::Shutdown() {
     (void)released;
   }
   attachment_clear_pipelines_.clear();
+  release_compute_pipeline(attachment_clear_cs_pipeline_);
   release_compute_pipeline(canonical_depth_raw_resolve_pipeline_);
   release_compute_pipeline(canonical_color_packed_resolve_pipeline_);
+  release_compute_pipeline(canonical_depth_raw_fwd_pipeline_);
+  release_compute_pipeline(canonical_color_packed_fwd_pipeline_);
+  release_compute_pipeline(direct_color_packed_fwd_pipelines_[0]);
+  release_compute_pipeline(direct_color_packed_fwd_pipelines_[1]);
   release_compute_pipeline(canonical_resolve_clear_pipeline_);
   if (canonical_color_msaa_pack_pipeline_) {
     id<MTLComputePipelineState> released =
@@ -697,6 +703,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
   RenderTarget* const* used = last_update_used_render_targets();
   RenderTarget* const* accumulated = last_update_accumulated_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const uint32_t* starts = last_update_used_render_target_starts_tiles();
   static const bool s_memo_enabled =
       IsMetalEnvironmentFlagEnabled("XE_METAL_MSAA_COMPANION_MEMO", true);
   constexpr size_t kSlots = xenos::kMaxColorRenderTargets + 1;
@@ -746,7 +753,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
         requested_height,
         ComputeCanonicalRangeTextureHeight(
             key.base_tiles, key.GetPitchTiles(), y_shift,
-            key.base_tiles + lengths[slot], full_height,
+            key.base_tiles + starts[slot] + lengths[slot], full_height,
             draw_resolution_scale_y()));
   }
   if (!sample_count || !requested_height || !full_height) {
@@ -873,10 +880,12 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
 bool MetalRenderTargetCache::Update(bool is_rasterization_done,
                                     reg::RB_DEPTHCONTROL normalized_depth_control,
                                     uint32_t normalized_color_mask,
-                                    const Shader& vertex_shader) {
+                                    const Shader& vertex_shader,
+                                    int32_t window_offset_tiles) {
   if (!RenderTargetCache::Update(is_rasterization_done,
                                  normalized_depth_control,
-                                 normalized_color_mask, vertex_shader)) {
+                                 normalized_color_mask, vertex_shader,
+                                 window_offset_tiles)) {
     return false;
   }
   if (!EnsureCurrentMsaaCompanions()) {
@@ -894,6 +903,14 @@ bool MetalRenderTargetCache::Update(bool is_rasterization_done,
     }
   }
   return true;
+}
+
+bool MetalRenderTargetCache::IsWindowOffsetInEdramSupported() const {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_WINDOW_OFFSET_IN_EDRAM");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return s_enabled;
 }
 
 void* MetalRenderTargetCache::current_depth_texture() const {
@@ -1091,13 +1108,17 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
   }
   RenderTarget* const* used = last_update_used_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const uint32_t* starts = last_update_used_render_target_starts_tiles();
   id<MTLCommandBuffer> command_buffer = nil;
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
     RenderTarget* render_target = used[slot];
     if (!render_target || !lengths[slot]) {
       continue;
     }
-    const uint32_t start_tiles = render_target->key().base_tiles;
+    // The used span may start past the base (window offset in the EDRAM
+    // bases); draw rows are still counted from the base (texture row 0).
+    const uint32_t rt_base_tiles = render_target->key().base_tiles;
+    const uint32_t start_tiles = rt_base_tiles + starts[slot];
     const uint32_t end_tiles = start_tiles + lengths[slot];
     const uint64_t attachment = GetCanonicalAttachmentId(render_target);
     static const bool s_sync_skip =
@@ -1167,8 +1188,47 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
         !clear_load_format) {
       clear_load_decline("format", 0, 0);
     }
+    // Overwrite skip: this draw writes every sample of the whole span, so the
+    // materialized content is never observed (any format: the clear value is
+    // arbitrary).
+    bool overwrite = false;
+    if (((draw_overwrite_slots_ >> slot) & 1) &&
+        materialize_first < operations.size() && end_tiles > start_tiles &&
+        end_tiles <= xenos::kEdramTileCount) {
+      const RenderTargetKey& rt_key = render_target->key();
+      const uint32_t pitch = rt_key.GetPitchTiles();
+      const uint32_t tile_width =
+          xenos::kEdramTileWidthSamples >>
+          uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k4X);
+      const uint32_t tile_height =
+          xenos::kEdramTileHeightSamples >>
+          uint32_t(rt_key.msaa_samples >= xenos::MsaaSamples::k2X);
+      if (pitch && start_tiles >= rt_base_tiles) {
+        const float y0 =
+            float((start_tiles - rt_base_tiles) / pitch * tile_height);
+        const float y1 = float(
+            (end_tiles - rt_base_tiles + pitch - 1) / pitch * tile_height);
+        overwrite = draw_overwrite_rect_[0] <= 0.0f &&
+                    draw_overwrite_rect_[2] >= float(pitch * tile_width) &&
+                    draw_overwrite_rect_[1] <= y0 &&
+                    draw_overwrite_rect_[3] >= y1;
+        static const bool s_ow_log =
+            std::getenv("XE_METAL_OVERWRITE_LOG") != nullptr;
+        static uint32_t s_ow_logs[1 + xenos::kMaxColorRenderTargets] = {};
+        if (s_ow_log && s_ow_logs[slot] < 100) {
+          ++s_ow_logs[slot];
+          XELOGW("MetalOverwrite slot={} {} rect=[{},{})x[{},{}) region "
+                 "w={} rows=[{},{}) msaa={} ops={} first_mat={}",
+                 slot, overwrite ? "COVERED" : "short", draw_overwrite_rect_[0],
+                 draw_overwrite_rect_[2], draw_overwrite_rect_[1],
+                 draw_overwrite_rect_[3], pitch * tile_width, y0, y1,
+                 uint32_t(rt_key.msaa_samples), operations.size(),
+                 materialize_first);
+        }
+      }
+    }
     PendingClearLoad defer_value;
-    if (ClearLoadEnabled() && clear_load_format &&
+    if (((ClearLoadEnabled() && clear_load_format) || overwrite) &&
         materialize_first < operations.size() && end_tiles > start_tiles &&
         end_tiles <= xenos::kEdramTileCount) {
       // Encode the packs (they precede the materializes), then judge.
@@ -1203,7 +1263,14 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
         clear_load_decline("coverage", cursor,
                            uint32_t(operations.size() - materialize_first));
       }
-      if (covered) {
+      if (covered && overwrite) {
+        defer_value = PendingClearLoad{};
+        defer_clear = true;
+        ++pack_census_.overwrite_skips;
+        pack_census_.overwrite_skip_tiles += end_tiles - start_tiles;
+      } else if (covered && !(ClearLoadEnabled() && clear_load_format)) {
+        // Overwrite-only candidate whose materializes are not one clean run.
+      } else if (covered) {
         const TileClear& first = tile_clear_[start_tiles];
         bool uniform = first.uniform != 0;
         uint32_t first_bad = start_tiles;
@@ -1264,6 +1331,16 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
         NoteMaterializeFate(slot, attachment, operation.start_tiles,
                             operation.end_tiles);
       }
+      // Attribution probe (frame output is wrong):
+      // XE_METAL_PROBE_SKIP_MATERIALIZE=1 drops raster-view materializes to
+      // size their GPU cost (GTA IV M4 mini 55.5 -> 60 fps cap, 2026-10-29).
+      static const bool s_skip_materialize =
+          std::getenv("XE_METAL_PROBE_SKIP_MATERIALIZE") != nullptr;
+      if (s_skip_materialize &&
+          operation.kind == MetalEdramAuthorityTracker::SyncKind::
+                                kMaterializeFromCanonical) {
+        continue;
+      }
       if (!command_buffer) {
         command_buffer = (__bridge id<MTLCommandBuffer>)
             command_processor_.PrepareTransferCommandBuffer(uint32_t(MetalTransferSite::kRasterViews));
@@ -1286,6 +1363,7 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
     memo = {attachment, start_tiles, end_tiles, canonical_authority_.version(),
             true};
   }
+  draw_overwrite_slots_ = 0;
   return true;
 }
 
@@ -1400,6 +1478,7 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
   }
   RenderTarget* const* used = last_update_used_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const uint32_t* starts = last_update_used_render_target_starts_tiles();
   const bool census = MetalCommandProcessor::PassCensusEnabled();
   ++pack_census_.mark_calls;
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
@@ -1410,7 +1489,10 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
     if (!written || !render_target || !lengths[slot]) {
       continue;
     }
-    uint32_t start_tiles = render_target->key().base_tiles;
+    // The used span may start past the base (window offset in the EDRAM
+    // bases); draw rows are still counted from the base (texture row 0).
+    const uint32_t rt_base_tiles = render_target->key().base_tiles;
+    uint32_t start_tiles = rt_base_tiles + starts[slot];
     uint32_t end_tiles = start_tiles + lengths[slot];
     const uint64_t attachment = GetCanonicalAttachmentId(render_target);
     // Tile rows covered by the draw's host scissor rows (whole rows). The
@@ -1425,11 +1507,11 @@ void MetalRenderTargetCache::MarkCurrentRasterTargetsWritten(
          uint32_t(render_target->key().msaa_samples >=
                   xenos::MsaaSamples::k2X)) *
         draw_resolution_scale_y();
-    uint32_t d0 = start_tiles + (host_y0 / rows_per_tile) * pitch;
+    uint32_t d0 = rt_base_tiles + (host_y0 / rows_per_tile) * pitch;
     uint32_t d1 = host_y1 == UINT32_MAX
                       ? end_tiles
-                      : start_tiles + ((host_y1 + rows_per_tile - 1) /
-                                       rows_per_tile) * pitch;
+                      : rt_base_tiles + ((host_y1 + rows_per_tile - 1) /
+                                         rows_per_tile) * pitch;
     d0 = std::max(d0, start_tiles);
     d1 = std::min(std::min(d1, end_tiles), uint32_t(xenos::kEdramTileCount));
     // Draw-row marking (2026-10-04 introduced for USF4, DEFAULT ON
@@ -1608,6 +1690,7 @@ void MetalRenderTargetCache::NoteMaterializeFirstUse(
     uint32_t host_y1) {
   RenderTarget* const* used = last_update_used_render_targets();
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const uint32_t* starts = last_update_used_render_target_starts_tiles();
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
     MaterializeFate& fate = materialize_fate_[slot];
     RenderTarget* render_target = used[slot];
@@ -1627,7 +1710,10 @@ void MetalRenderTargetCache::NoteMaterializeFirstUse(
         !reads && full_width && (slot == 0 || nibble == 0xFu);
     // The tile rows the draw's scissor covers, as in
     // MarkCurrentRasterTargetsWritten.
-    const uint32_t start_tiles = render_target->key().base_tiles;
+    // The used span may start past the base (window offset in the EDRAM
+    // bases); draw rows are still counted from the base (texture row 0).
+    const uint32_t rt_base_tiles = render_target->key().base_tiles;
+    const uint32_t start_tiles = rt_base_tiles + starts[slot];
     const uint32_t end_tiles = start_tiles + lengths[slot];
     const uint32_t pitch = render_target->key().GetPitchTiles();
     const uint32_t rows_per_tile =
@@ -1635,11 +1721,11 @@ void MetalRenderTargetCache::NoteMaterializeFirstUse(
          uint32_t(render_target->key().msaa_samples >=
                   xenos::MsaaSamples::k2X)) *
         draw_resolution_scale_y();
-    uint32_t d0 = start_tiles + (host_y0 / rows_per_tile) * pitch;
+    uint32_t d0 = rt_base_tiles + (host_y0 / rows_per_tile) * pitch;
     uint32_t d1 = host_y1 == UINT32_MAX
                       ? end_tiles
-                      : start_tiles + ((host_y1 + rows_per_tile - 1) /
-                                       rows_per_tile) * pitch;
+                      : rt_base_tiles + ((host_y1 + rows_per_tile - 1) /
+                                         rows_per_tile) * pitch;
     // A partly covered first or last tile row counts as read.
     const uint32_t partial_first =
         host_y0 % rows_per_tile ? start_tiles + (host_y0 / rows_per_tile) * pitch
@@ -1710,6 +1796,9 @@ std::string MetalRenderTargetCache::FormatPackCensus(bool reset) {
                      double(c.clear_loads) / frames,
                      double(c.clear_load_tiles) / frames,
                      double(c.clear_load_flushes) / frames);
+  out += fmt::format(" | overwrite-skip: {:.2f}/frame ({:.0f} tiles/frame)",
+                     double(c.overwrite_skips) / frames,
+                     double(c.overwrite_skip_tiles) / frames);
   if (c.fate_tiles) {
     out += fmt::format(
         " | materialize fate: tiles/frame {:.0f} read {:.1f}% overwritten "
@@ -2619,6 +2708,7 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
   id<MTLRenderPipelineState> mat_depth_range = nil;
   id<MTLRenderPipelineState> mat_sten_range = nil;
   id<MTLComputePipelineState> pack_ms_range = nil;
+  id<MTLComputePipelineState> pack_ms_range_px = nil;
   id<MTLRenderPipelineState> mat_depth_ms_range = nil;
   id<MTLRenderPipelineState> mat_sten_ms_range = nil;
   if (!ms) {
@@ -2632,6 +2722,10 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
     pack_ms_range = [device
         newComputePipelineStateWithFunction:
             [lib newFunctionWithName:@"pack_depth_ms_range"]
+                                      error:&err];
+    pack_ms_range_px = [device
+        newComputePipelineStateWithFunction:
+            [lib newFunctionWithName:@"pack_depth_ms_range_px"]
                                       error:&err];
     rpd.fragmentFunction =
         [lib newFunctionWithName:@"materialize_depth_ms_range_fs"];
@@ -2665,7 +2759,8 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
   if (!matd || !mats || !pack ||
       (!ms &&
        (!pack_cov || !pack_range || !mat_depth_range || !mat_sten_range)) ||
-      (ms && (!pack_ms_range || !mat_depth_ms_range || !mat_sten_ms_range))) {
+      (ms && (!pack_ms_range || !pack_ms_range_px || !mat_depth_ms_range ||
+              !mat_sten_ms_range))) {
     XELOGE("MetalShadow: pipeline build failed sc={}: {}", sample_count,
            err ? err.localizedDescription.UTF8String : "?");
     shadow_pipelines_[sample_count] = ShadowDepthPipelines{};  // poison
@@ -2700,6 +2795,8 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
       mat_sten_range ? (__bridge_retained void*)mat_sten_range : nullptr;
   p.pack_ms_range =
       pack_ms_range ? (__bridge_retained void*)pack_ms_range : nullptr;
+  p.pack_ms_range_px =
+      pack_ms_range_px ? (__bridge_retained void*)pack_ms_range_px : nullptr;
   p.mat_depth_ms_range = mat_depth_ms_range
                              ? (__bridge_retained void*)mat_depth_ms_range
                              : nullptr;
@@ -2735,6 +2832,15 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
   }
   auto ins = shadow_pipelines_.emplace(sample_count, p);
   return &ins.first->second;
+}
+
+// 2x/4x packs to canonical EDRAM run one thread per pixel, packing all of its
+// samples (2026-10-29; GTA IV at 2x2 on the M4 mini 19.0 -> 21.3 fps).
+// Default on; XE_METAL_MSAA_PACK_PER_PIXEL=0 packs one thread per sample.
+static bool MsaaPackPerPixel() {
+  static const bool enabled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_MSAA_PACK_PER_PIXEL"), true);
+  return enabled;
 }
 
 // Depth materialize writes the stencil byte from the fragment shader
@@ -3155,8 +3261,11 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  const bool per_pixel = MsaaPackPerPixel();
   id<MTLComputePipelineState> pipeline =
-      (__bridge id<MTLComputePipelineState>)pipelines->pack_ms_range;
+      (__bridge id<MTLComputePipelineState>)(per_pixel
+                                                 ? pipelines->pack_ms_range_px
+                                                 : pipelines->pack_ms_range);
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
   encoder.label = @"rtcache:canonical-depth-pack-msaa-range";
   [encoder setComputePipelineState:pipeline];
@@ -3194,7 +3303,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   }
   [encoder setBytes:&row_start length:sizeof(row_start) atIndex:5];
   [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start,
-                                       texture.sampleCount)
+                                       per_pixel ? 1 : texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   if ((HostLaneMode(/*materialize=*/false) & 1u) && depth_format == 2u) {
@@ -4713,7 +4822,8 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
     const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
     uint32_t rows, uint32_t span_pitch, uint32_t span_msaa_samples,
     void* dest_snapshot, uint64_t dest_pixel_format, uint32_t width,
-    uint32_t height, uint32_t dest_y_offset, float exp_bias_scale) {
+    uint32_t height, uint32_t dest_y_offset, float exp_bias_scale,
+    uint32_t dest_int_bits) {
   if (!command_buffer || !dest_snapshot) {
     return false;
   }
@@ -4736,7 +4846,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
       struct Params {
         uint src_base; uint src_pitch; uint span_base; uint span_pitch;
         uint start_tiles; uint end_tiles; uint y_offset; uint shifts;
-        uint tile_w; float exp_bias_scale; uint pad2; uint pad3;
+        uint tile_w; float exp_bias_scale; uint dest_int_bits; uint pad3;
       };
       struct VOut { float4 pos [[position]]; };
       vertex VOut xe_rcp_vs(uint vid [[vertex_id]]) {
@@ -4770,7 +4880,15 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
         if (sp.x >= src.get_width() || sp.y >= src.get_height()) {
           discard_fragment();
         }
-        return src.read(sp, 0) * p.exp_bias_scale;
+        float4 v = src.read(sp, 0) * p.exp_bias_scale;
+        // Integer-number-format destination in a float snapshot: see
+        // CanonicalResolveParams::dest_int_bits.
+        if (p.dest_int_bits != 0u) {
+          uint4 bits =
+              (uint4(p.dest_int_bits) >> uint4(0u, 8u, 16u, 24u)) & 0xFFu;
+          v /= max(exp2(float4(bits)) - 1.0, 1.0);
+        }
+        return v;
       }
     )METAL";
     NSError* err = nil;
@@ -4861,7 +4979,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
       uint32_t start_tiles, end_tiles, y_offset, shifts;
       uint32_t tile_w;
       float exp_bias_scale;
-      uint32_t pad2, pad3;
+      uint32_t dest_int_bits, pad3;
     } params{owner_base,
              owner_pitch,
              span_base,
@@ -4872,7 +4990,7 @@ bool MetalRenderTargetCache::ResolveColorToSnapshot(
              oxs | (oys << 4) | (oxs << 8) | (oys << 12),
              tile_w,
              exp_bias_scale,
-             0,
+             dest_int_bits,
              0};
     MTLRenderPassDescriptor* pass =
         [MTLRenderPassDescriptor renderPassDescriptor];
@@ -4917,7 +5035,7 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
     void* dest_snapshot,
     uint64_t dest_pixel_format, uint32_t width, uint32_t height,
     uint32_t dest_y_offset, float exp_bias_scale,
-    uint32_t dest_x_offset) {
+    uint32_t dest_x_offset, uint32_t dest_int_bits) {
   xenos::ColorRenderTargetFormat storage_format =
       is_depth
           ? xenos::ColorRenderTargetFormat::k_8_8_8_8
@@ -4998,6 +5116,13 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
     float exp_bias_scale;
     uint32_t width, height;
     uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
+    // Scatter fields (unused by the snapshot fragment path) and the integer
+    // destination widths; the MSL struct is shared with the packed path.
+    uint32_t scatter_enable;
+    uint32_t dest_base, dest_pitch_aligned;
+    uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
+    uint32_t dest_number;
+    uint32_t dest_int_bits;
   } params{surface,
            // A destination x offset (an assembled column) shifts the shader's
            // destination->source mapping and bound; the scissor excludes the
@@ -5008,8 +5133,8 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
            uint32_t(!is_depth && raw_copy &&
                     dest_pixel_format == uint64_t(MTLPixelFormatR32Float)),
            exp_bias_scale, dest_x_offset + clipped_width, clipped_height, 0u,
-           0u, 0u, 0u};
-  static_assert(sizeof(ResolveParams) == 20u * sizeof(uint32_t));
+           0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, dest_int_bits};
+  static_assert(sizeof(ResolveParams) == 28u * sizeof(uint32_t));
   static const bool s_canonical_resolve_log =
       std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
   if (s_canonical_resolve_log && width >= 512) {
@@ -5112,12 +5237,47 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
   return true;
 }
 
+bool MetalRenderTargetCache::EnsureResolveForwardPipeline(void*& slot,
+                                                          const char* name) {
+  if (slot) {
+    return true;
+  }
+  id<MTLLibrary> library =
+      (__bridge id<MTLLibrary>)canonical_materialize_library_;
+  id<MTLFunction> function =
+      [library newFunctionWithName:[NSString stringWithUTF8String:name]];
+  NSError* error = nil;
+  id<MTLComputePipelineState> pipeline =
+      function ? [(__bridge id<MTLDevice>)device_
+                     newComputePipelineStateWithFunction:function
+                                                   error:&error]
+               : nil;
+  if (!pipeline) {
+    XELOGE("MetalRenderTargetCache: resolve forward pipeline {} failed: {}",
+           name, error ? error.localizedDescription.UTF8String : "?");
+    return false;
+  }
+  slot = (__bridge_retained void*)pipeline;
+  return true;
+}
+
+void MetalRenderTargetCache::BindResolveForward(void* encoder,
+                                                ResolveForward& forward) {
+  id<MTLComputeCommandEncoder> compute =
+      (__bridge id<MTLComputeCommandEncoder>)encoder;
+  const uint32_t params[5] = {forward.kind, forward.endian, forward.width,
+                              forward.height, forward.origin_y};
+  [compute setTexture:(__bridge id<MTLTexture>)forward.texture atIndex:2];
+  [compute setBytes:params length:sizeof(params) atIndex:5];
+  forward.encoded = true;
+}
+
 bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
     const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
     uint32_t msaa_samples, uint32_t format, uint32_t source_x,
     uint32_t source_y, uint32_t sample_select, void* destination_buffer,
     uint32_t width, uint32_t height, uint32_t dest_endian,
-    const CanonicalScatterDest* scatter) {
+    const CanonicalScatterDest* scatter, ResolveForward* forward) {
   if (!sample_edram_raster_enabled_ || !canonical_edram_ || !command_buffer ||
       !destination_buffer || !width || !height ||
       !EnsureCanonicalMaterializePipeline()) {
@@ -5159,6 +5319,7 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
     uint32_t dest_base, dest_pitch_aligned;
     uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
     uint32_t dest_number;
+    uint32_t dest_int_bits;
   } params{surface,
            source_x,
            source_y,
@@ -5180,8 +5341,9 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
            scatter ? scatter->dest_offset_x : 0u,
            scatter ? scatter->dest_offset_y : 0u,
            scatter ? scatter->dest_extent_bytes : 0u,
+           0u,
            0u};
-  static_assert(sizeof(ResolveParams) == 27u * sizeof(uint32_t));
+  static_assert(sizeof(ResolveParams) == 28u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
@@ -5190,6 +5352,13 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
   id<MTLComputePipelineState> pipeline =
       (__bridge id<MTLComputePipelineState>)
           canonical_depth_raw_resolve_pipeline_;
+  if (scatter && forward &&
+      EnsureResolveForwardPipeline(canonical_depth_raw_fwd_pipeline_,
+                                   "resolve_canonical_depth_raw_fwd")) {
+    pipeline =
+        (__bridge id<MTLComputePipelineState>)canonical_depth_raw_fwd_pipeline_;
+    BindResolveForward((__bridge void*)encoder, *forward);
+  }
   [encoder setComputePipelineState:pipeline];
   [encoder setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
               offset:0
@@ -5212,7 +5381,8 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
     bool dest_swap, float exp_bias_scale, uint32_t dest_format,
     uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
     void* destination_buffer, uint32_t width, uint32_t height,
-    const CanonicalScatterDest* scatter, uint32_t dest_number) {
+    const CanonicalScatterDest* scatter, uint32_t dest_number,
+    ResolveForward* forward) {
   xenos::ColorRenderTargetFormat storage_format =
       xenos::GetStorageColorFormat(xenos::ColorRenderTargetFormat(format));
   if (storage_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
@@ -5262,6 +5432,7 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
     uint32_t dest_base, dest_pitch_aligned;
     uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
     uint32_t dest_number;
+    uint32_t dest_int_bits;
   } params{surface,
            source_x,
            source_y,
@@ -5283,8 +5454,9 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
            scatter ? scatter->dest_offset_x : 0u,
            scatter ? scatter->dest_offset_y : 0u,
            scatter ? scatter->dest_extent_bytes : 0u,
-           dest_number};
-  static_assert(sizeof(ResolveParams) == 27u * sizeof(uint32_t));
+           dest_number,
+           0u};
+  static_assert(sizeof(ResolveParams) == 28u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   const bool direct = direct_color_source_ != nullptr;
@@ -5295,6 +5467,19 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
       (__bridge id<MTLComputePipelineState>)(
           direct ? direct_color_packed_pipelines_[direct_color_ms_ ? 1 : 0]
                  : canonical_color_packed_resolve_pipeline_);
+  if (scatter && forward && (dest_bpp_log2 == 2u || dest_bpp_log2 == 3u)) {
+    void*& fwd_slot =
+        direct ? direct_color_packed_fwd_pipelines_[direct_color_ms_ ? 1 : 0]
+               : canonical_color_packed_fwd_pipeline_;
+    if (EnsureResolveForwardPipeline(
+            fwd_slot,
+            direct ? (direct_color_ms_ ? "resolve_direct_color_packed_fwd_ms"
+                                       : "resolve_direct_color_packed_fwd_1x")
+                   : "resolve_canonical_color_packed_fwd")) {
+      pipeline = (__bridge id<MTLComputePipelineState>)fwd_slot;
+      BindResolveForward((__bridge void*)encoder, *forward);
+    }
+  }
   [encoder setComputePipelineState:pipeline];
   if (direct) {
     [encoder setTexture:(__bridge id<MTLTexture>)direct_color_texture_
@@ -5749,6 +5934,71 @@ bool MetalRenderTargetCache::PerformAttachmentColorResolveClear(
   if (uint64_t(x0) + w > texture.width || uint64_t(y0) + h > texture.height) {
     return false;
   }
+  const uint32_t clear[4] = {clear_lo, clear_hi, uint32_t(color_format),
+                             uint32_t(is_64bpp)};
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  auto mark_cleared = [&]() {
+    if (MetalCommandProcessor::PassCensusEnabled()) {
+      ++pack_census_.attachment_clears;
+    }
+    for (uint32_t row = 0; row < rows; ++row) {
+      const uint32_t start = span_base + row * span_pitch;
+      canonical_authority_.MarkAttachment(attachment, start,
+                                          start + row_length_used,
+                                          ++canonical_authority_order_);
+    }
+    ++s_taken;
+    if ((s_taken & (s_taken - 1)) == 0) {
+      XELOGI("MetalAttachmentClear: taken={} of attempts={} (latest base={} "
+             "pitch={} msaa={} fmt={} {}x{})",
+             s_taken, s_attempts, base_tiles, surface_pitch_tiles,
+             msaa_samples, uint32_t(color_format), width, height);
+    }
+  };
+  // Single-sample attachments: write only the rectangle from compute instead
+  // of opening a render pass that loads and stores the whole (EDRAM-height)
+  // attachment. XE_METAL_ATTACHMENT_CLEAR_CS=0 keeps the render pass.
+  static const bool s_compute = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_ATTACHMENT_CLEAR_CS"), true);
+  if (s_compute && !ms && (texture.usage & MTLTextureUsageShaderWrite)) {
+    if (!attachment_clear_cs_pipeline_) {
+      id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+      id<MTLLibrary> library =
+          (__bridge id<MTLLibrary>)canonical_materialize_library_;
+      id<MTLFunction> function =
+          [library newFunctionWithName:@"clear_color_attachment_cs"];
+      NSError* error = nil;
+      id<MTLComputePipelineState> pipeline =
+          function ? [device newComputePipelineStateWithFunction:function
+                                                           error:&error]
+                   : nil;
+      if (!pipeline) {
+        XELOGE("MetalRenderTargetCache: attachment clear compute pipeline "
+               "failed: {}",
+               error ? error.localizedDescription.UTF8String : "no function");
+        return false;
+      }
+      attachment_clear_cs_pipeline_ = (__bridge_retained void*)pipeline;
+    }
+    id<MTLComputePipelineState> pipeline =
+        (__bridge id<MTLComputePipelineState>)attachment_clear_cs_pipeline_;
+    const uint32_t rect[4] = {x0, y0, w, h};
+    id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
+    compute.label = @"rtcache:attachment-resolve-clear-color-cs";
+    [compute setComputePipelineState:pipeline];
+    [compute setTexture:texture atIndex:0];
+    [compute setBytes:clear length:sizeof(clear) atIndex:0];
+    [compute setBytes:rect length:sizeof(rect) atIndex:1];
+    const NSUInteger tw = pipeline.threadExecutionWidth;
+    const NSUInteger th =
+        std::max<NSUInteger>(1, pipeline.maxTotalThreadsPerThreadgroup / tw);
+    [compute dispatchThreads:MTLSizeMake(w, h, 1)
+        threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+    [compute endEncoding];
+    mark_cleared();
+    return true;
+  }
   const uint64_t pipeline_key =
       uint64_t(texture.pixelFormat) | (uint64_t(texture.sampleCount) << 32u);
   void*& pipeline_slot = attachment_clear_pipelines_[pipeline_key];
@@ -5781,8 +6031,6 @@ bool MetalRenderTargetCache::PerformAttachmentColorResolveClear(
   pass.colorAttachments[0].texture = texture;
   pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-  id<MTLCommandBuffer> command =
-      (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLRenderCommandEncoder> encoder = [command
       renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(
                                              pass)];
@@ -5790,27 +6038,10 @@ bool MetalRenderTargetCache::PerformAttachmentColorResolveClear(
   [encoder setScissorRect:MTLScissorRect{x0, y0, w, h}];
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
                                       pipeline_slot];
-  const uint32_t clear[4] = {clear_lo, clear_hi, uint32_t(color_format),
-                             uint32_t(is_64bpp)};
   [encoder setFragmentBytes:clear length:sizeof(clear) atIndex:0];
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [encoder endEncoding];
-  if (MetalCommandProcessor::PassCensusEnabled()) {
-    ++pack_census_.attachment_clears;
-  }
-  for (uint32_t row = 0; row < rows; ++row) {
-    const uint32_t start = span_base + row * span_pitch;
-    canonical_authority_.MarkAttachment(attachment, start,
-                                        start + row_length_used,
-                                        ++canonical_authority_order_);
-  }
-  ++s_taken;
-  if ((s_taken & (s_taken - 1)) == 0) {
-    XELOGI("MetalAttachmentClear: taken={} of attempts={} (latest base={} "
-           "pitch={} msaa={} fmt={} {}x{})",
-           s_taken, s_attempts, base_tiles, surface_pitch_tiles, msaa_samples,
-           uint32_t(color_format), width, height);
-  }
+  mark_cleared();
   return true;
 }
 
@@ -6072,10 +6303,57 @@ void* MetalRenderTargetCache::EnsureResolveSnapshot(uint32_t dest_base,
   if (width >= 1280 && height < 720) {
     height = 720;
   }
-  return EnsureSnapshotTexture(
+  const uint64_t key =
       (uint64_t(dest_base) << 1) |
-          (pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0),
-      width, height, pixel_format);
+      (pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0);
+  // Other widths: the height later strips were seen to continue to.
+  auto strips = snapshot_strip_heights_.find(key);
+  if (strips != snapshot_strip_heights_.end() &&
+      strips->second.first == width && strips->second.second > height) {
+    height = strips->second.second;
+  }
+  return EnsureSnapshotTexture(key, width, height, pixel_format);
+}
+
+void MetalRenderTargetCache::NoteSnapshotStripContinuation(
+    uint32_t dest_base, uint32_t width, uint32_t height,
+    uint64_t pixel_format) {
+  // Default on; XE_METAL_SNAPSHOT_STRIPS=0 keeps every strip its own snapshot.
+  static const bool s_enabled =
+      ParseMetalEnvironmentFlag(std::getenv("XE_METAL_SNAPSHOT_STRIPS"), true);
+  if (!s_enabled) {
+    return;
+  }
+  const uint64_t format_bit =
+      pixel_format == uint64_t(MTLPixelFormatR32Float) ? 1 : 0;
+  for (const auto& pair : resolve_snapshots_) {
+    const Snapshot& snap = pair.second;
+    if ((pair.first & kAssemblySnapshotKeyFlag) ||
+        (pair.first & 1) != format_bit || !snap.texture ||
+        snap.pixel_format != pixel_format || snap.width != width) {
+      continue;
+    }
+    // The same 4-byte row layout FindContainingSnapshot assumes.
+    const uint32_t snap_base = uint32_t(pair.first >> 1);
+    if (uint64_t(snap_base) + uint64_t(snap.width) * 4 * snap.height !=
+        dest_base) {
+      continue;
+    }
+    const uint32_t full_height = snap.height + height;
+    if (full_height > 2048) {
+      return;
+    }
+    auto& strips = snapshot_strip_heights_[pair.first];
+    if (strips.first != width || strips.second < full_height) {
+      strips = {width, full_height};
+      XELOGI(
+          "MetalResolve: strip {:08X} {}x{} continues the {}x{} snapshot at "
+          "{:08X}; its next resolve allocates {} rows",
+          dest_base, width, height, snap.width, snap.height, snap_base,
+          full_height);
+    }
+    return;
+  }
 }
 
 void* MetalRenderTargetCache::EnsureAssemblySnapshot(uint32_t base,
@@ -6117,8 +6395,17 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
   if (!s_enabled) {
     return false;
   }
+  // Draw resolution scaling: the direct kernels read the representative host
+  // pixel of each guest pixel (xe_resolve_host_pixel, and every host pixel of
+  // it for snapshots) exactly as the canonical ones do, so only the bounds
+  // below change. XE_METAL_DIRECT_COLOR_RESOLVE_SCALED=0 keeps scaled resolves
+  // on the pack-first path.
+  static const bool s_scaled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_DIRECT_COLOR_RESOLVE_SCALED"), true);
+  const bool scaled =
+      draw_resolution_scale_x() != 1 || draw_resolution_scale_y() != 1;
   if (!sample_edram_raster_enabled_ || !canonical_edram_ || is_64bpp ||
-      draw_resolution_scale_x() != 1 || draw_resolution_scale_y() != 1 ||
+      (scaled && !s_scaled) ||
       !span_row_length || !span_rows || !width || !height ||
       (snapshot && !(((__bridge id<MTLTexture>)snapshot).usage &
                      MTLTextureUsageShaderWrite)) ||
@@ -6225,8 +6512,11 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
       y_extra = std::max(y_extra, sample & 1u);
     }
   }
-  if (uint64_t(source_x) + width + x_extra > texture.width ||
-      uint64_t(source_y) + height + y_extra > texture.height) {
+  // Host pixels: guest pixels times the draw resolution scale.
+  if ((uint64_t(source_x) + width) * draw_resolution_scale_x() + x_extra >
+          texture.width ||
+      (uint64_t(source_y) + height) * draw_resolution_scale_y() + y_extra >
+          texture.height) {
     note(3);
     return false;
   }
@@ -6813,14 +7103,17 @@ void* MetalRenderTargetCache::EnsureCanonicalColorMsaaMaterializePipeline(
           : (is_64bpp ? canonical_color64_msaa_pack_pipeline_
                       : canonical_color_msaa_pack_pipeline_);
   if (!pack_pipeline) {
+    NSString* pack_name = raw_view
+                              ? (is_64bpp ? @"pack_color64_raw_ms_range"
+                                          : @"pack_color_raw_ms_range")
+                              : (is_64bpp ? @"pack_color64_ms_range"
+                                          : @"pack_color_ms_range");
+    if (MsaaPackPerPixel()) {
+      pack_name = [pack_name stringByAppendingString:@"_px"];
+    }
     id<MTLComputePipelineState> pack = [device
-        newComputePipelineStateWithFunction:
-            [library newFunctionWithName:
-                         raw_view
-                             ? (is_64bpp ? @"pack_color64_raw_ms_range"
-                                         : @"pack_color_raw_ms_range")
-                             : (is_64bpp ? @"pack_color64_ms_range"
-                                         : @"pack_color_ms_range")]
+        newComputePipelineStateWithFunction:[library
+                                                newFunctionWithName:pack_name]
                                       error:&error];
     if (!pack) {
       XELOGE("MetalRenderTargetCache: canonical color MSAA pack pipeline "
@@ -7133,7 +7426,8 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaPack(
       texture.height, draw_resolution_scale_y()));
   [encoder setBytes:&row_start length:sizeof(row_start) atIndex:7];
   [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start,
-                                       texture.sampleCount)
+                                       MsaaPackPerPixel() ? 1
+                                                          : texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
   [encoder endEncoding];
   return true;

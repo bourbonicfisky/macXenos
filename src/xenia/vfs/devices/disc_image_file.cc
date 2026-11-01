@@ -10,6 +10,7 @@
 #include "xenia/vfs/devices/disc_image_file.h"
 
 #include "xenia/base/logging.h"
+#include "xenia/vfs/devices/disc_image_device.h"
 #include "xenia/vfs/devices/disc_image_entry.h"
 namespace xe {
 namespace vfs {
@@ -35,7 +36,11 @@ X_STATUS DiscImageFile::ReadSync(std::span<uint8_t> buffer, size_t byte_offset,
   size_t real_offset = entry_->data_offset() + byte_offset;
   size_t real_length =
       std::min(buffer.size(), entry_->data_size() - byte_offset);
-  std::memcpy(buffer.data(), entry_->mmap()->data() + real_offset, real_length);
+  if (!static_cast<DiscImageDevice*>(entry_->device())
+           ->ReadImage(real_offset, buffer.data(), real_length)) {
+    *out_bytes_read = 0;
+    return X_STATUS_UNSUCCESSFUL;
+  }
   *out_bytes_read = real_length;
   return X_STATUS_SUCCESS;
 }

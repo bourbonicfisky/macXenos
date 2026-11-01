@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 
+#include "xenia/base/filesystem.h"
 #include "xenia/base/mapped_memory.h"
 #include "xenia/vfs/device.h"
 
@@ -45,6 +46,12 @@ class DiscImageDevice : public Device {
   uint32_t sectors_per_allocation_unit() const override { return 1; }
   uint32_t bytes_per_sector() const override { return 0x200; }
 
+  // Copies image bytes for a guest read through file reads, not the mapping:
+  // on a network volume a page-in of the mapping can fail, and a fault on a
+  // guest thread is a guest crash (GTA IV stopped at boot on the M4 Pro),
+  // while a failed read is retried. False if the read keeps failing.
+  bool ReadImage(size_t offset, void* buffer, size_t length);
+
  private:
   enum class Error {
     kSuccess = 0,
@@ -58,6 +65,9 @@ class DiscImageDevice : public Device {
   std::filesystem::path host_path_;
   std::unique_ptr<Entry> root_entry_;
   std::unique_ptr<MappedMemory> mmap_;
+  // The same image for ReadImage; null if it could not be opened (reads then
+  // copy from the mapping).
+  std::unique_ptr<xe::filesystem::FileHandle> file_;
 
   typedef struct {
     uint8_t* ptr;

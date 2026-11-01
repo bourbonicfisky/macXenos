@@ -12,6 +12,8 @@
 
 #include <atomic>
 #include <memory>
+#include <utility>
+#include <vector>
 #include <string>
 
 #include "xenia/base/threading.h"
@@ -89,6 +91,13 @@ class TracePlayer : public TraceReader {
   // frame-initial playback boundary. Created and used on the CP thread only.
   std::unique_ptr<TracePlayerRamJournalBinding> ram_journal_;
   int ram_journal_frame_index_ = -1;
+  // Free-running ranges (XE_TRACE_FREERUN=<hexbase>:<hexlen>[,...]): guest
+  // physical ranges whose bytes are NOT re-delivered by the trace's
+  // kMemoryRead restores after the first frame-initial playback, so a GPU
+  // feedback loop (memexport -> vfetch, resolve -> tfetch) iterates on its
+  // own output across --replay_loops. Pair with XE_GPU_RAM_ROLLBACK=0.
+  std::vector<std::pair<uint32_t, uint32_t>> freerun_ranges_;
+  uint32_t frame_initial_playbacks_ = 0;
 };
 
 }  // namespace gpu

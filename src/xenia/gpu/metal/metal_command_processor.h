@@ -46,6 +46,7 @@
 
 namespace xe {
 namespace gpu {
+class ShaderInterpreter;
 namespace metal {
 
 class MetalEncodeStream;
@@ -276,6 +277,7 @@ class MetalCommandProcessor : public CommandProcessor {
                                uint32_t title_id, bool blocking,
                                std::function<void()> completion_callback =
                                    nullptr) override;
+  void SaveShaderStorageToDisk() override;
 
   // Converges completed resolve writebacks and memexports to guest RAM. The
   // promoted selected executor supplies a unique authority sequence, allowing
@@ -326,8 +328,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // Closes the open command buffer when it holds a GPU-current resolve or
   // memexport record armed for CPU faults, so a fault behind the fence the
   // guest is about to see can wait for committed work. `wait` also waits for
-  // the buffer to complete (completion signals).
-  void CommitOpenFaultableWork(bool wait);
+  // the buffer to complete (completion signals); `wait_for_exports` waits
+  // only when the open buffer holds a memexport record.
+  void CommitOpenFaultableWork(bool wait, bool wait_for_exports = false);
   bool FlushPendingWritebacksForWait(uint32_t guest_address) override;
 
   bool ResolveRamConsumerDependencies(
@@ -389,6 +392,17 @@ class MetalCommandProcessor : public CommandProcessor {
   // XE_METAL_PASS_CENSUS=1 (exact-1, default OFF): observational draw-pass
   // census (reduce-metal-draw-pass-traffic task 0.1).
   static bool PassCensusEnabled();
+  // Materialize overwrite skip (XE_METAL_OVERWRITE_SKIP): for a single guest
+  // rectangle, the render target slots (bit 0 depth and stencil, 1 + i colour
+  // i) whose every sample it writes, and the guest pixel rectangle it covers
+  // (the vertex shader runs on the CPU for its 3 vertices).
+  uint32_t ComputeDrawOverwrite(xenos::PrimitiveType prim_type,
+                                const Shader* vertex_shader,
+                                const Shader* pixel_shader,
+                                uint32_t normalized_color_mask,
+                                reg::RB_DEPTHCONTROL normalized_depth_control,
+                                float rect_out[4]);
+  std::unique_ptr<ShaderInterpreter> overwrite_interpreter_;
   // reduce-metal-draw-pass-traffic D2: a draw pass binds only the attachments
   // its draws can read or write (metal_pass_attachment_use.h). Config
   // metal_pass_attachments_by_use, XE_METAL_PASS_ATTACHMENTS=0/1 override,
@@ -463,6 +477,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // GPU ordering (kOrderAgainstGpuProducers) instead of a wait+drain; the
   // serve site fails a routed fetch's legacy fallback closed under it.
   bool draw_gpu_ordering_active_ = false;
+  // Render encoder (identity only) that holds a routed rasterizing memexport
+  // producer; draws ordered against a pending export in it take an in-encoder
+  // buffer barrier. Stale identities only cost a redundant barrier.
+  uintptr_t raster_export_encoder_ = 0;
   // Corridor test shared by the route mask and the serve site: does this
   // fetch's guest range overlap a pending GPU-current record? Signed
   // bindings route only in that case (the snorm-view serve carries a
@@ -712,6 +730,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // on the M1 Max, mostly repeats of the previous draw.
   struct EncoderFixedState {
     void* pipeline = nullptr;
+    // A deferred pipeline request `pipeline` points at, kept alive so its
+    // address cannot be recycled while it is the dedupe key.
+    std::shared_ptr<void> pipeline_owner;
     bool viewport_valid = false, scissor_valid = false;
     bool depth_bias_valid = false, blend_color_valid = false;
     int32_t depth_clip = -1, cull = -1, winding = -1, fill = -1;
@@ -787,6 +808,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // Number of swaps issued; drives the bring-up test pattern color so on-device
   // it's visually obvious that frames are flowing through the guest-output path.
   uint32_t swap_count_ = 0;
+  // metal_async_pipelines attribution: draws that could not use a stand-in
+  // and waited (target not recurring, small target, memexport).
+  uint64_t async_wait_counts_[3] = {};
+  double async_wait_ms_[3] = {};
+  uint32_t async_wait_logged_swap_ = UINT32_MAX;
   // The previous swap's frontbuffer (guest base, bytes): resolve census and
   // the snapshot policy use it to tell frontbuffer resolves apart.
   uint32_t last_frontbuffer_base_ = 0;
@@ -1005,6 +1031,9 @@ class MetalCommandProcessor : public CommandProcessor {
   std::unordered_set<uint64_t> faulted_submissions_;
   void PublishCompletedSubmission(uint64_t submission);
   void PumpCompletedActions();
+  void DumpBoundColorRtDiagnostic(const Shader* pixel_shader);
+  void ServiceLazyCommitRequest();
+  void OnIdlePoll() override { ServiceLazyCommitRequest(); }
 
   // S8 — async submission. EndFrameEncoder commits WITHOUT waiting (unless
   // XE_METAL_SYNC_WAIT=1 restores the old synchronous behavior for A/B);
@@ -1168,7 +1197,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // Draws by guest primitive type and the path that issued them (census):
   // 0 native, 1 auto quad->tri, 2 DMA quad->tri, 3 auto line loop,
   // 4 geometry emulation, 5 tessellation, 6 unmappable (skipped).
-  uint32_t prim_census_[32][7] = {};
+  uint32_t prim_census_[32][8] = {};
   uint32_t geo_pipeline_fail_count_ = 0;
   // How many indexed triangle-list draws we've dumped diagnostics for.
   uint32_t tri_log_count_ = 0;
@@ -1422,12 +1451,33 @@ class MetalCommandProcessor : public CommandProcessor {
       metal::ConsumerDecision decision;
     } memo;
     uint64_t memo_hits = 0;
+    // Work per indexed decision (logged with the counters above): page
+    // entries visited by the seed walk and by the predecessor closure, and
+    // the selected records.
+    uint64_t seed_steps = 0, closure_steps = 0, selected_total = 0;
+    // Per-producer predecessor closure as bitsets over producer indices
+    // (XE_METAL_CLOSURE_BITS): closure(i) = {i} and the closures of every
+    // older producer overlapping i. It depends only on the snapshot, so it
+    // is built once per rebuild (lazily, in index order) instead of walked
+    // again by every decision. closure_words bits per producer; the first
+    // closure_ready producers are built.
+    std::vector<uint64_t> closure_bits, selected_bits;
+    uint32_t closure_words = 0, closure_ready = 0;
+    // Per occupied page, the bitset of producers on it (mask_words per page,
+    // at page_mask_slot[page]); 0 mask_words = not built (over 1024 records
+    // or XE_METAL_CLOSURE_BITS=0). A seed or closure step ORs its pages'
+    // masks and tests each candidate once, instead of visiting a record on
+    // every page it spans (Far Cry 2: 17 pages per record).
+    std::vector<uint64_t> page_masks, candidate_bits;
+    std::vector<uint32_t> page_mask_slot;
+    uint32_t mask_words = 0;
   };
   mutable ProducerIndex producer_index_;
   const std::vector<metal::PendingProducer>& IndexedPendingProducers(
       bool* any_page_hit, const metal::ConsumerRequest& request) const;
   // DecideConsumer over the page index: identical result, O(candidates).
   static bool LeanDecisionEnabled();
+  static bool ClosureBitsEnabled();
   metal::ConsumerDecision DecideConsumerIndexedImpl(
       metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
       uint64_t completed_submission) const;
@@ -1451,6 +1501,11 @@ class MetalCommandProcessor : public CommandProcessor {
   metal::MetalLazyPublication lazy_publication_;
   void* lazy_read_callback_handle_ = nullptr;
   std::atomic<bool> lazy_rearm_needed_{false};
+  // A guest thread that WRITES over bytes a pending GPU producer still owns
+  // while that producer sits in the OPEN (uncommitted) command buffer asks
+  // the GPU thread to commit it (the submission id it needs committed); the
+  // GPU thread services the request at its next draw/copy boundary.
+  std::atomic<uint64_t> lazy_commit_request_{0};
   // Stale-read attribution: the last guest-visible signal since the open
   // command buffer began (0 = none, else GuestSignalKind + 1; 5 = completion
   // exposure), and stale fault reads counted by that signal.

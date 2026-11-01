@@ -58,6 +58,13 @@ DEFINE_int32(scribble_heap_value, 0,
              "Value used to fill all allocated heap memory. 0 - Random value. "
              "Valid range: [1-255]",
              "Memory");
+DEFINE_bool(exact_write_fault_invalidation, true,
+            "Invalidate only the faulting page on a guest write to watched "
+            "memory instead of the surrounding 256 KB block, so per-frame "
+            "dynamic writes stop invalidating neighbouring static textures "
+            "and vertex data (GTA IV: ~230 needless texture revalidations "
+            "per frame).",
+            "Memory");
 
 namespace xe {
 uint32_t get_page_count(uint32_t value, uint32_t page_size) {
@@ -756,9 +763,9 @@ bool Memory::AccessViolationCallback(
   // lock; the read callbacks this pass repeats under the lock must not wait
   // again, or every other global-lock user (the GPU thread's per-draw range
   // requests) stalls behind the GPU (GTA IV: ~3 ms/frame on the M4).
-  return physical_heap->TriggerCallbacks(std::move(global_lock_locked_once),
-                                         virtual_address, 1, is_write, false,
-                                         true, false, false, false);
+  return physical_heap->TriggerCallbacks(
+      std::move(global_lock_locked_once), virtual_address, 1, is_write,
+      cvars::exact_write_fault_invalidation, true, false, false, false);
 }
 
 bool Memory::AccessViolationCallbackThunk(
@@ -840,6 +847,14 @@ global_unique_lock_type Memory::LockPhysicalMemoryInvalidationCallbacks() {
   // that acquires it here is ordered against every callback, not merely against
   // the list.
   return global_critical_region_.Acquire();
+}
+
+std::string Memory::DescribePhysicalWatch(uint32_t physical_address) {
+  auto global_lock = global_critical_region_.Acquire();
+  return fmt::format("A0[{}] C0[{}] E0[{}]",
+                     heaps_.vA0000000.DescribeAccessState(physical_address),
+                     heaps_.vC0000000.DescribeAccessState(physical_address),
+                     heaps_.vE0000000.DescribeAccessState(physical_address));
 }
 
 void Memory::EnablePhysicalMemoryAccessCallbacks(
@@ -1971,6 +1986,26 @@ void PhysicalHeap::Initialize(Memory* memory, uint8_t* membase,
   system_page_flags_.resize((system_page_count_ + 63) / 64);
 }
 
+namespace {
+// A physical range can be uploaded to the GPU and write-watched through one
+// view (0xA0000000 / 0xC0000000 / 0xE0000000) while another view of the same
+// memory has no watch: a page unallocated or read-only in a view when the
+// watch was armed is skipped there (EnableAccessCallbacks). Allocating it in
+// that view, or making it writable there, must then invalidate the range even
+// though this view watches nothing, or the guest's writes through it are never
+// seen. F.E.A.R. frees and reallocates a 4 KB-page (0xE0000000) block between
+// frames while the GPU still reads it; its next texture landed in the block
+// unnoticed and the GPU kept sampling the old one (the gun rendered red).
+// XE_INVALIDATE_UNWATCHED=0 invalidates watched pages only, as before.
+bool InvalidateUnwatchedEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_INVALIDATE_UNWATCHED");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return enabled;
+}
+}  // namespace
+
 bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
                          uint32_t allocation_type, uint32_t protect,
                          bool top_down, uint32_t* out_address) {
@@ -2022,7 +2057,7 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
   // Fresh allocation: whatever a read watch still owed these pages is
   // irrelevant now (kDiscard); unwatched pages are untouched.
   TriggerCallbacks(std::move(global_lock), address, size, true, true, true,
-                   false, true);
+                   InvalidateUnwatchedEnabled(), true);
   ReconcileHostProtection(address, size);
   *out_address = address;
   return true;
@@ -2071,7 +2106,7 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size,
     return false;
   }
   TriggerCallbacks(std::move(global_lock), address, size, true, true, true,
-                   false, true);
+                   InvalidateUnwatchedEnabled(), true);
   ReconcileHostProtection(address, size);
   return true;
 }
@@ -2125,7 +2160,7 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address,
     return false;
   }
   TriggerCallbacks(std::move(global_lock), address, size, true, true, true,
-                   false, true);
+                   InvalidateUnwatchedEnabled(), true);
   ReconcileHostProtection(address, size);
   *out_address = address;
   return true;
@@ -2185,9 +2220,12 @@ bool PhysicalHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
   auto global_lock = global_critical_region_.Acquire();
 
   // Only invalidate if making writable again, for simplicity - not when simply
-  // marking some range as immutable, for instance.
+  // marking some range as immutable, for instance. Read-only pages carry no
+  // write watch in this view (EnableAccessCallbacks skips them), so the range
+  // is invalidated even unwatched (see InvalidateUnwatchedEnabled).
   if (protect & kMemoryProtectWrite) {
-    TriggerCallbacks(std::move(global_lock), address, size, true, true, false);
+    TriggerCallbacks(std::move(global_lock), address, size, true, true, false,
+                     InvalidateUnwatchedEnabled());
   }
 
   if (!parent_heap_->Protect(GetPhysicalAddress(address), size, protect,
@@ -2396,6 +2434,37 @@ XE_NOINLINE void PhysicalHeap::EnableAccessCallbacksInner(
         protect_access);
   }
 }
+
+std::string PhysicalHeap::DescribeAccessState(uint32_t physical_address) const {
+  const uint32_t physical_address_offset = GetPhysicalAddress(heap_base_);
+  if (physical_address < physical_address_offset ||
+      physical_address - physical_address_offset >= heap_size_) {
+    return "-";
+  }
+  const uint32_t relative = physical_address - physical_address_offset;
+  const uint32_t system_page =
+      (relative + host_address_offset()) >> system_page_shift_;
+  if (system_page >= system_page_count_) {
+    return "-";
+  }
+  const SystemPageFlagsBlock& flags = system_page_flags_[system_page >> 6];
+  const uint64_t bit = uint64_t(1) << (system_page & 63);
+  void* host =
+      membase_ + heap_base_ + (size_t(system_page) << system_page_shift_);
+  size_t length = system_page_size_;
+  xe::memory::PageAccess host_access = xe::memory::PageAccess::kNoAccess;
+  const bool queried = xe::memory::QueryProtect(host, length, host_access);
+  const uint32_t guest_page = relative >> page_size_shift_;
+  const PageEntry& entry = page_table_[guest_page];
+  return fmt::format(
+      "inv={} read={} host={} guest_state={:X} guest_protect={:X} "
+      "system_access={}",
+      (flags.notify_on_invalidation & bit) ? 1 : 0,
+      (flags.notify_on_read & bit) ? 1 : 0,
+      queried ? int(host_access) : -1, uint32_t(entry.state),
+      uint32_t(entry.current_protect), int(SystemPageGuestAccess(system_page)));
+}
+
 xe::memory::PageAccess PhysicalHeap::SystemPageGuestAccess(
     uint32_t system_page_number) const {
   uint32_t offset = host_address_offset();
@@ -2437,14 +2506,27 @@ xe::memory::PageAccess PhysicalHeap::SystemPageGuestAccess(
     uint32_t physical_first = GetPhysicalAddress(heap_base_) + relative_address;
     uint32_t physical_last =
         physical_first + (system_last - offset + 1 - relative_address) - 1;
-    xe::memory::PageAccess parent_access =
-        parent_heap_->QueryRangeAccess(physical_first, physical_last);
-    if (parent_access == xe::memory::PageAccess::kReadWrite) {
-      return xe::memory::PageAccess::kReadWrite;
-    }
-    if (parent_access == xe::memory::PageAccess::kReadOnly &&
-        access == xe::memory::PageAccess::kNoAccess) {
-      access = parent_access;
+    // Most permissive parent page, as for this view's own pages above: every
+    // window aliases the same physical memory, so a host page is reachable if
+    // any physical page it covers is. The strictest page (QueryRangeAccess
+    // over the whole host page) made a 16 KB host page in the 0xC0000000
+    // window no-access when only one of its four 4 KB physical pages was
+    // allocated (through 0xE0000000), and Gears of War: Judgment's read of
+    // that page through 0xC0000000 crashed its game thread.
+    const uint32_t parent_page_size = parent_heap_->page_size();
+    for (uint32_t physical_page = physical_first & ~(parent_page_size - 1);
+         physical_page <= physical_last; physical_page += parent_page_size) {
+      xe::memory::PageAccess parent_access = parent_heap_->QueryRangeAccess(
+          physical_page, physical_page + (parent_page_size - 1));
+      if (parent_access == xe::memory::PageAccess::kReadWrite) {
+        return xe::memory::PageAccess::kReadWrite;
+      }
+      if (parent_access == xe::memory::PageAccess::kReadOnly) {
+        access = parent_access;
+      }
+      if (physical_page + parent_page_size < physical_page) {
+        break;
+      }
     }
   }
   return access;
@@ -2486,7 +2568,8 @@ void PhysicalHeap::ProvideReadWatchedPage(
           physical_address_offset - physical_address_start,
       heap_size_ - (physical_address_start - physical_address_offset));
   Memory::PhysicalAccess access =
-      is_write ? Memory::PhysicalAccess::kWrite : Memory::PhysicalAccess::kRead;
+      is_write ? Memory::PhysicalAccess::kWriteUnlocked
+               : Memory::PhysicalAccess::kRead;
   global_lock_locked_once.unlock();
   for (size_t i = 0; i < callback_count; ++i) {
     callbacks[i].first(callbacks[i].second, physical_address_start,
@@ -2847,20 +2930,23 @@ bool PhysicalHeap::TriggerCallbacks(
                                access);
         }
       };
+      // The global lock is held here: a write fault's repeat pass must not
+      // wait (its unlocked first pass already did).
+      const Memory::PhysicalAccess write_access =
+          read_callbacks_may_wait ? Memory::PhysicalAccess::kWrite
+                                  : Memory::PhysicalAccess::kWriteNoWait;
       if (discard_first > discard_last || discard_last < dropped_first ||
           discard_first > dropped_last) {
-        notify(dropped_first, dropped_last, Memory::PhysicalAccess::kWrite);
+        notify(dropped_first, dropped_last, write_access);
       } else {
         if (discard_first > dropped_first) {
-          notify(dropped_first, discard_first - 1,
-                 Memory::PhysicalAccess::kWrite);
+          notify(dropped_first, discard_first - 1, write_access);
         }
         notify(std::max(dropped_first, discard_first),
                std::min(dropped_last, discard_last),
                Memory::PhysicalAccess::kDiscard);
         if (discard_last < dropped_last) {
-          notify(discard_last + 1, dropped_last,
-                 Memory::PhysicalAccess::kWrite);
+          notify(discard_last + 1, dropped_last, write_access);
         }
       }
     }

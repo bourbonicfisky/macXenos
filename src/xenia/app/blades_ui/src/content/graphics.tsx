@@ -350,14 +350,13 @@ export function graphics(state: NativeState): BladeDef {
   }
 
   // Guest-thread QoS (also under CPU). A Graphics row because it is the
-  // single biggest frame-rate switch on Apple Silicon and has no safe default:
-  // 2026-10-15 A/Bs, M4 mini: priority + user_interactive Mafia II 34 -> 57,
-  // GTA IV 32 -> 38, Banjo/Judgment 0, JC2 29.8 -> 27.5, RE5 13.7 -> 12.3;
-  // M1 Max (8 P-cores): no loser.
+  // single biggest frame-rate switch on Apple Silicon. Default "all" since
+  // 6a14e43bc (M4 Pro Mafia II 35.6 -> 150.6, GTA IV 39.8 -> 60); 2026-10-15
+  // M4 mini A/Bs: JC2 29.8 -> 27.5, RE5 13.7 -> 12.3; M1 Max: no loser.
   const qosPolicies: Option[] = [
-    { value: "off", label: t("graphics.qos.off"), short: t("graphics.qos.off"), recommended: true },
+    { value: "off", label: t("graphics.qos.off"), short: t("graphics.qos.off") },
     { value: "priority", label: t("graphics.qos.priority"), short: t("graphics.qos.priorityShort") },
-    { value: "all", label: t("graphics.qos.all"), short: t("graphics.qos.allShort") }
+    { value: "all", label: t("graphics.qos.all"), short: t("graphics.qos.allShort"), recommended: true }
   ];
   menu.push({
     id: "performance-cores",
@@ -408,6 +407,10 @@ export function graphics(state: NativeState): BladeDef {
               ]}
             />
             <Aside>{t("graphics.experimental.rasterExportsAside")}</Aside>
+            <p className="pref-group">{t("graphics.serialize.heading")}</p>
+            <p className="m-0">{t("graphics.serialize.body")}</p>
+            <Check name="metal_completion_wait_exports" label={t("graphics.serialize.label")} />
+            <Aside>{t("graphics.serialize.aside")}</Aside>
           </>
         ) : null}
         {rendererShown(state, "vulkan") ? (
@@ -425,6 +428,7 @@ export function graphics(state: NativeState): BladeDef {
             "metal_raster_mark_skip",
             "metal_fsr_half_precision",
             "metal_memexport_raster_mode",
+            "metal_completion_wait_exports",
             "mvk_config_defaults"
           ]}
         />
@@ -438,6 +442,7 @@ export function graphics(state: NativeState): BladeDef {
             "metal_raster_mark_skip",
             "metal_fsr_half_precision",
             "metal_memexport_raster_mode",
+            "metal_completion_wait_exports",
             "mvk_config_defaults"
           ]}
         />

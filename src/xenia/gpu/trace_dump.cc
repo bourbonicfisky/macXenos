@@ -20,6 +20,7 @@
 #include "xenia/base/profiling.h"
 #include "xenia/base/string.h"
 #include "xenia/base/threading.h"
+#include "xenia/config.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -47,6 +48,14 @@
 #endif
 
 DEFINE_path(target_trace_file, "", "Specifies the trace file to load.", "GPU");
+DEFINE_bool(trace_dump_game_config, true,
+            "Load the traced title's per-title config (game_configs/ beside "
+            "the binary, then the storage root's config/) before replaying, "
+            "exactly as a live launch does. Without it a title whose config "
+            "changes rendering (Rise of the Tomb Raider's force_depth_clamp "
+            "keeps its colour-LUT slices from being clipped) replays wrong "
+            "while live is right.",
+            "GPU");
 DEFINE_path(trace_dump_path, "", "Output path for dumped files.", "GPU");
 DEFINE_path(
     trace_dump_cache_root, "",
@@ -247,6 +256,16 @@ bool TraceDump::Load(const std::filesystem::path& trace_file_path) {
   if (!player_->Open(xe::path_to_utf8(trace_file_path_))) {
     XELOGE("Could not load trace file");
     return false;
+  }
+  if (cvars::trace_dump_game_config) {
+    const TraceHeader* header = player_->header();
+    const uint32_t title_id = header ? header->title_id : 0;
+    if (title_id) {
+      XELOGI("TraceDump: loading per-title config for {:08X}", title_id);
+      config::LoadGameConfig(fmt::format("{:08X}", title_id));
+    } else {
+      XELOGW("TraceDump: trace carries no title ID; per-title config not loaded");
+    }
   }
 
   return true;

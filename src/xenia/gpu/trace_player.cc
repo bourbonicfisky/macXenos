@@ -9,6 +9,11 @@
 
 #include "xenia/gpu/trace_player.h"
 
+#include <algorithm>
+#include <cstring>
+#include <string>
+#include <vector>
+
 #include "xenia/base/logging.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
@@ -181,6 +186,34 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
   }
 
   if (frame_initial) {
+    static const bool s_freerun_parsed = [this] {
+      const char* v = std::getenv("XE_TRACE_FREERUN");
+      if (!v) return false;
+      std::string s(v);
+      size_t pos = 0;
+      while (pos < s.size()) {
+        size_t comma = s.find(',', pos);
+        std::string item = s.substr(pos, comma == std::string::npos
+                                             ? std::string::npos
+                                             : comma - pos);
+        size_t colon = item.find(':');
+        if (colon != std::string::npos) {
+          uint32_t base = uint32_t(strtoul(item.substr(0, colon).c_str(),
+                                           nullptr, 16));
+          uint32_t len = uint32_t(
+              strtoul(item.substr(colon + 1).c_str(), nullptr, 16));
+          if (len) {
+            freerun_ranges_.emplace_back(base, len);
+            XELOGW("TracePlayer: free-running range {:08X}+{:X}", base, len);
+          }
+        }
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+      }
+      return true;
+    }();
+    (void)s_freerun_parsed;
+    ++frame_initial_playbacks_;
     // Quiescent replay-boundary retirement, BEFORE the frame's restore
     // commands re-deliver authoritative RAM + EDRAM: nothing GPU-derived
     // (resolve snapshots, bridge registrations, RT-pool lineage) may survive
@@ -277,9 +310,48 @@ void TracePlayer::PlayTraceOnThread(const uint8_t* trace_data,
       case TraceCommandType::kMemoryRead: {
         auto cmd = reinterpret_cast<const MemoryCommand*>(trace_ptr);
         trace_ptr += sizeof(*cmd);
-        DecompressMemory(cmd->encoding_format, trace_ptr, cmd->encoded_length,
-                         memory->TranslatePhysical(cmd->base_ptr),
-                         cmd->decoded_length);
+        bool freerun_overlap = false;
+        if (frame_initial_playbacks_ > 1) {
+          for (const auto& r : freerun_ranges_) {
+            if (cmd->base_ptr < r.first + r.second &&
+                r.first < cmd->base_ptr + cmd->decoded_length) {
+              freerun_overlap = true;
+              break;
+            }
+          }
+        }
+        if (freerun_overlap) {
+          // Deliver the restore around the free-running ranges only.
+          std::vector<uint8_t> staged(cmd->decoded_length);
+          DecompressMemory(cmd->encoding_format, trace_ptr,
+                           cmd->encoded_length, staged.data(),
+                           cmd->decoded_length);
+          uint8_t* dst = memory->TranslatePhysical(cmd->base_ptr);
+          for (uint32_t i = 0; i < cmd->decoded_length;) {
+            uint32_t addr = cmd->base_ptr + i;
+            uint32_t skip_to = 0;
+            for (const auto& r : freerun_ranges_) {
+              if (addr >= r.first && addr < r.first + r.second) {
+                skip_to = std::max(skip_to, r.first + r.second);
+              }
+            }
+            if (skip_to) {
+              i = std::min(cmd->decoded_length, skip_to - cmd->base_ptr);
+              continue;
+            }
+            uint32_t next = cmd->base_ptr + cmd->decoded_length;
+            for (const auto& r : freerun_ranges_) {
+              if (r.first > addr) next = std::min(next, r.first);
+            }
+            std::memcpy(dst + i, staged.data() + i, next - addr);
+            i = next - cmd->base_ptr;
+          }
+        } else {
+          DecompressMemory(cmd->encoding_format, trace_ptr,
+                           cmd->encoded_length,
+                           memory->TranslatePhysical(cmd->base_ptr),
+                           cmd->decoded_length);
+        }
         trace_ptr += cmd->encoded_length;
         command_processor->TracePlaybackWroteMemory(cmd->base_ptr,
                                                     cmd->decoded_length);

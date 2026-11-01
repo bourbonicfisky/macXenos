@@ -113,6 +113,62 @@ TEST_CASE("rasterizing memexport routing decides on inputs, not on the gate "
   }
 }
 
+TEST_CASE("pixel-stage memexport routes under its own gate",
+          "[memexport][raster][route][pixel]") {
+  using metal::DecideMetalMemexportRoute;
+  // No render target: never this class, whatever the gates.
+  for (bool vg : {false, true}) {
+    for (bool pg : {false, true}) {
+      CHECK(DecideMetalMemexportRoute(vg, pg, /*rt=*/false, true, true, true,
+                                      false) ==
+            MetalMemexportRasterRoute::kNotRasterizing);
+    }
+  }
+  // Pixel gate off: the old exclusion, identical whatever the vertex gate.
+  for (bool vg : {false, true}) {
+    CHECK(DecideMetalMemexportRoute(vg, /*pixel_gate=*/false, true,
+                                    /*vs_ranges=*/false, /*ps=*/true,
+                                    /*ps_ranges=*/true, false) ==
+          MetalMemexportRasterRoute::kUnroutedPixelStage);
+  }
+  // Pixel gate on, PS-only exporter with ranges: routed without the vertex
+  // raster gate.
+  CHECK(DecideMetalMemexportRoute(/*vertex_gate=*/false, true, true, false,
+                                  true, true, false) ==
+        MetalMemexportRasterRoute::kRouted);
+  // ...but not without a valid range.
+  CHECK(DecideMetalMemexportRoute(false, true, true, false, true, false,
+                                  false) ==
+        MetalMemexportRasterRoute::kUnroutedNoRanges);
+  // ...and never tessellated.
+  CHECK(DecideMetalMemexportRoute(true, true, true, true, true, true, true) ==
+        MetalMemexportRasterRoute::kUnroutedTessellated);
+  // Both stages export: binding the UAV routes both, so the vertex gate is
+  // required too.
+  CHECK(DecideMetalMemexportRoute(/*vertex_gate=*/false, true, true,
+                                  /*vs_ranges=*/true, true, true, false) ==
+        MetalMemexportRasterRoute::kUnroutedGateOff);
+  CHECK(DecideMetalMemexportRoute(true, true, true, true, true, true, false) ==
+        MetalMemexportRasterRoute::kRouted);
+  // With the pixel gate off, the seven-input decision is exactly the original
+  // five-input one over every input.
+  for (bool vg : {false, true}) {
+    for (bool rt : {false, true}) {
+      for (bool vr : {false, true}) {
+        for (bool ps : {false, true}) {
+          for (bool pr : {false, true}) {
+            for (bool tess : {false, true}) {
+              CHECK(DecideMetalMemexportRoute(vg, false, rt, vr, ps, pr,
+                                              tess) ==
+                    DecideMetalMemexportRasterRoute(vg, rt, vr, ps, tess));
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST_CASE("gate-off routing is bit-identical across every other input",
           "[memexport][raster][route]") {
   // The OFF arm must never route, whatever else is true -- the property that

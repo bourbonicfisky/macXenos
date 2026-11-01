@@ -76,6 +76,20 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   bool Initialize();
   void Shutdown();
 
+  // The canonical EDRAM pack/materialize/resolve kernels address a render
+  // target's rows from its base within one addressing period.
+  bool AreNextPeriodRenderTargetsSupported() const override { return false; }
+  // The canonical EDRAM authority (marking, packs, ownership, fates) and the
+  // pack/unpack addresser stop at the last EDRAM tile: an attachment whose
+  // base-shifted rows wrap the ring would never publish its wrapped rows.
+  bool AreWrappedWindowOffsetBasesSupported() const override { return false; }
+  // Off: predicated tiles reuse one base, so the base with a tile's offset
+  // lands before tile 0 and the attachment wraps the EDRAM ring, which the
+  // canonical authority cannot publish (LEGO Star Wars II's three tiles all
+  // showed the top tile). With the wrap guard above, XE_METAL_WINDOW_OFFSET_
+  // IN_EDRAM=1 is safe but engages nothing: 0 of 398 corpus window-offset draws
+  // reach the bases (xenia-mac-evidence/window-offset-20261026/).
+  bool IsWindowOffsetInEdramSupported() const override;
   Path GetPath() const override {
     return Path::kHostRenderTargets;
   }
@@ -87,8 +101,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
 
   bool Update(bool is_rasterization_done,
               reg::RB_DEPTHCONTROL normalized_depth_control,
-              uint32_t normalized_color_mask,
-              const Shader& vertex_shader) override;
+              uint32_t normalized_color_mask, const Shader& vertex_shader,
+              int32_t window_offset_tiles) override;
 
   // --- Metal accessors for the command processor (valid after Update) ---
   // id<MTLTexture> of the bound depth / color-0 target, or nullptr.
@@ -105,6 +119,18 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // canonical per-sample EDRAM before the render pass opens. Returns false if
   // a required scheduled conversion couldn't be encoded.
   bool PrepareCurrentRasterViews();
+  // Materialize overwrite skip: the current draw provably writes every sample
+  // of `slots` (bit 0 depth and stencil, 1 + i colour i) inside the guest
+  // pixel rectangle [rect[0], rect[2]) x [rect[1], rect[3]). A slot whose
+  // whole materialized span lies inside opens on a clear instead of the
+  // materialize (the deferred clear load path). Set before
+  // PrepareCurrentRasterViews, consumed by it.
+  void SetDrawOverwrite(uint32_t slots, const float rect[4]) {
+    draw_overwrite_slots_ = slots;
+    for (uint32_t i = 0; i < 4; ++i) {
+      draw_overwrite_rect_[i] = rect[i];
+    }
+  }
   // Clear load action (XE_METAL_CLEAR_LOAD, default on; =0 rolls back): a
   // colour attachment whose whole tile range would be materialized from a
   // canonical EDRAM region that still holds an untouched, whole-tile resolve
@@ -234,7 +260,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                               uint32_t span_pitch, uint32_t span_msaa_samples,
                               void* dest_snapshot, uint64_t dest_pixel_format,
                               uint32_t width, uint32_t height,
-                              uint32_t dest_y_offset, float exp_bias_scale);
+                              uint32_t dest_y_offset, float exp_bias_scale,
+                              uint32_t dest_int_bits = 0);
   bool ResolveCanonicalToSnapshot(
       const void* command_buffer, bool is_depth, uint32_t base_tiles,
       uint32_t pitch_tiles, uint32_t msaa_samples, uint32_t format,
@@ -243,7 +270,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       void* dest_snapshot,
       uint64_t dest_pixel_format, uint32_t width, uint32_t height,
       uint32_t dest_y_offset, float exp_bias_scale,
-      uint32_t dest_x_offset = 0);
+      uint32_t dest_x_offset = 0, uint32_t dest_int_bits = 0);
   struct CanonicalScatterDest;
   // Direct colour resolve (reduce-edram-pass-traffic Lever 4, default on;
   // XE_METAL_DIRECT_COLOR_RESOLVE=0 rolls back): between Begin
@@ -251,10 +278,10 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // ResolveCanonicalColorToBuffer read the open 32bpp colour attachment
   // instead of canonical EDRAM, and the caller skips
   // PrepareCanonicalEdramForResolve. Begin succeeds only when that attachment
-  // (same base, pitch, format and MSAA as the resolve; not a raw-view format;
-  // no draw scale) holds the newest value of every tile of the span and
-  // contains every pixel the resolve's samples read; the tracker is left
-  // untouched.
+  // (same base, pitch, format and MSAA as the resolve; not a raw-view format)
+  // holds the newest value of every tile of the span and contains every host
+  // pixel the resolve's samples read (at the draw resolution scale too); the
+  // tracker is left untouched.
   bool BeginDirectColorResolve(uint32_t base_tiles, uint32_t pitch_tiles,
                                uint32_t msaa_samples, uint32_t format,
                                bool is_64bpp, uint32_t span_base,
@@ -275,12 +302,26 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     return source;
   }
   void ResumeDirectColorResolve(void* source) { direct_color_source_ = source; }
+  // Resolve forwarding: a texture of the shared texture cache that a scatter
+  // resolve also writes (xe_resolve_forward_store), with the load's
+  // conversion (kind 1 RGBA8Unorm, 2 RGBA16Float, 3 R32Float) and the
+  // texture's fetch endianness. `encoded` is set when the dispatch wrote it.
+  struct ResolveForward {
+    void* texture = nullptr;  // id<MTLTexture>
+    uint32_t kind = 0;
+    uint32_t endian = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t origin_y = 0;  // texture row of the destination's row 0
+    bool encoded = false;
+  };
   bool ResolveCanonicalDepthToBuffer(
       const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
       uint32_t msaa_samples, uint32_t format, uint32_t source_x,
       uint32_t source_y, uint32_t sample_select, void* destination_buffer,
       uint32_t width, uint32_t height, uint32_t dest_endian = 0,
-      const CanonicalScatterDest* scatter = nullptr);
+      const CanonicalScatterDest* scatter = nullptr,
+      ResolveForward* forward = nullptr);
   // Stage B (implement-metal-gpu-visible-resolve-authority): when supplied,
   // the packed resolve dispatch writes GUEST-TILED into `destination_buffer`
   // (which must then be the shared-memory buffer, whose offset is the guest
@@ -309,7 +350,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       const CanonicalScatterDest* scatter = nullptr,
       // RB_COPY_DEST_INFO copy_dest_number: fixed-point destinations pack
       // as unsigned/signed fraction or integer accordingly.
-      uint32_t dest_number = 0);
+      uint32_t dest_number = 0, ResolveForward* forward = nullptr);
   bool PerformCanonicalResolveClear(
       const void* command_buffer, uint32_t span_base,
       uint32_t row_length_used, uint32_t rows, uint32_t span_pitch,
@@ -357,6 +398,15 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                uint64_t pixel_format);
   void* GetResolveSnapshot(uint32_t dest_base) const;
   void* FindContainingSnapshot(uint32_t dest_base, uint32_t* y_offset_out) const;
+  // A resolve that FindContainingSnapshot did not place, whose destination
+  // starts exactly where a snapshot of the same width and format ends, is the
+  // next vertical strip of one buffer (Ridge Racer Unbounded renders 1152x720
+  // as 1152x384 + 1152x336 predicated tiles, the second at base + 384 rows).
+  // Remembers the combined height so the parent's next resolve allocates it
+  // and later strips land inside; EnsureResolveSnapshot only assumes the full
+  // 720 rows for 1280-wide scenes.
+  void NoteSnapshotStripContinuation(uint32_t dest_base, uint32_t width,
+                                     uint32_t height, uint64_t pixel_format);
 
   // Frees textures retired mid-frame (a snapshot that had to grow). They cannot
   // be released at retire time because draws already encoded into the open frame
@@ -736,6 +786,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     void* mat_depth_range = nullptr; // canonical authority: materialize depth, ranged
     void* mat_sten_range = nullptr;  // canonical authority: materialize stencil, ranged
     void* pack_ms_range = nullptr;   // real-MSAA canonical authority, ranged
+    void* pack_ms_range_px = nullptr;  // the same, one thread per pixel
     void* mat_depth_ms_range = nullptr;
     // Stage B: host-lane provenance refresh from a SELECTED source
     // (lane_store_range for 1x sources, lane_store_ms_range for 2x/4x).
@@ -852,6 +903,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     kCount,
   };
   CanonicalSyncRequester sync_requester_ = CanonicalSyncRequester::kOther;
+  uint32_t draw_overwrite_slots_ = 0;
+  float draw_overwrite_rect_[4] = {};
   std::unordered_map<uint64_t, std::vector<uint8_t>> pack_dirty_tiles_;
   struct PackCensus {
     uint64_t pack_ops[4] = {}, pack_tiles[4] = {}, pack_tiles_redundant[4] = {};
@@ -874,6 +927,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     // Clear load actions taken / materialize tiles they replaced / deferred
     // loads flushed back to a materialize (unbound attachment).
     uint64_t clear_loads = 0, clear_load_tiles = 0, clear_load_flushes = 0;
+    uint64_t overwrite_skips = 0, overwrite_skip_tiles = 0;
     // Materialize fate: raster-view tiles materialized from canonical, by
     // what the first draw touching them did. read = it could see the old
     // content (depth/stencil test, blending, partial write mask, pixel
@@ -992,6 +1046,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   std::unordered_map<uint64_t, void*> canonical_resolve_pipelines_;
   // Lever 2 attachment clear PSOs keyed by host pixel format and samples.
   std::unordered_map<uint64_t, void*> attachment_clear_pipelines_;
+  // Its compute form for single-sample attachments (one generic kernel).
+  void* attachment_clear_cs_pipeline_ = nullptr;
   void* canonical_depth_raw_resolve_pipeline_ = nullptr;
   // XE_METAL_SNAPSHOT_COMPUTE: compute twins of the snapshot resolve passes.
   void* canonical_color_snapshot_cs_pipeline_ = nullptr;
@@ -1005,12 +1061,20 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* direct_color_cs_pipelines_[2] = {};
   void* direct_color_packed_pipelines_[2] = {};
   void* canonical_color_packed_resolve_pipeline_ = nullptr;
+  // Resolve forwarding variants of the scatter kernels.
+  void* direct_color_packed_fwd_pipelines_[2] = {};
+  void* canonical_color_packed_fwd_pipeline_ = nullptr;
+  void* canonical_depth_raw_fwd_pipeline_ = nullptr;
   void* canonical_resolve_clear_pipeline_ = nullptr;
   void* canonical_color_msaa_pack_pipeline_ = nullptr;
   void* canonical_color64_msaa_pack_pipeline_ = nullptr;
   void* canonical_color_raw_msaa_pack_pipeline_ = nullptr;
   void* canonical_color64_raw_msaa_pack_pipeline_ = nullptr;
   bool EnsureCanonicalMaterializePipeline();
+  // Resolve forwarding: the *_fwd kernel `name` into `slot`, and its texture
+  // and parameter bindings on a compute encoder.
+  bool EnsureResolveForwardPipeline(void*& slot, const char* name);
+  void BindResolveForward(void* encoder, ResolveForward& forward);
   void* EnsureCanonicalColorMsaaMaterializePipeline(
       MetalRenderTarget* render_target);
   // Full-view single-sample conversion primitives. Task 3.5 supplies dirty
@@ -1098,6 +1162,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // same guest base coexist (JC2 resolves both to one base). Assembly
   // snapshots (draw resolution scaling) also carry kAssemblySnapshotKeyFlag.
   std::unordered_map<uint64_t, Snapshot> resolve_snapshots_;
+  // NoteSnapshotStripContinuation: snapshot key -> {width, full height}.
+  std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>>
+      snapshot_strip_heights_;
   static constexpr uint64_t kAssemblySnapshotKeyFlag = uint64_t(1) << 40;
   // The snapshot texture at `snap_key`, created or replaced (exact-size reuse,
   // in-flight-safe retirement) at the draw resolution scale.

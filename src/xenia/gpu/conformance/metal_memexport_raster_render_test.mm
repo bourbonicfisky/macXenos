@@ -189,6 +189,61 @@ std::vector<uint32_t> BuildPixelUcode() {
   return u;
 }
 
+// Guest pixel program that rasterizes AND exports (2026-10-26, pixel-stage
+// memexport):
+//   0: alloc colors
+//   1: exec addr=4 count=1     -> @4: max oC0, c0, c0
+//   2: alloc export memory
+//   3: execEnd addr=5 count=2  -> @5: mad eA, r0.xxxx, c0, c1
+//                                @6: max eM0, c2, c2
+// No interpolators are written, so r0.x is 0 in every pixel: every covered
+// pixel stores the same element (index 0 of the c1 stream) with the same
+// value c2, which makes the oracle race-free.
+std::vector<uint32_t> BuildPixelExporterUcode() {
+  std::vector<uint32_t> u(21, 0);
+  auto exec = [](uint32_t address, uint32_t count, bool end) {
+    return std::make_pair(
+        address | (count << 12),
+        uint32_t(end ? ucode::ControlFlowOpcode::kExecEnd
+                     : ucode::ControlFlowOpcode::kExec)
+            << 12);
+  };
+  auto alloc = [](ucode::AllocType type) {
+    return std::make_pair(
+        uint32_t(0),
+        (uint32_t(type) << 9) |
+            (uint32_t(ucode::ControlFlowOpcode::kAlloc) << 12));
+  };
+  auto cf0 = alloc(ucode::AllocType::kPsColors);
+  PackControlFlow(u, 0, cf0.first, cf0.second);
+  auto cf1 = exec(4, 1, false);
+  PackControlFlow(u, 1, cf1.first, cf1.second);
+  auto cf2 = alloc(ucode::AllocType::kMemory);
+  PackControlFlow(u, 2, cf2.first, cf2.second);
+  auto cf3 = exec(5, 2, true);
+  PackControlFlow(u, 3, cf3.first, cf3.second);
+  const uint32_t kmax = uint32_t(ucode::AluVectorOpcode::kMax) << 24;
+  const uint32_t kmad = uint32_t(ucode::AluVectorOpcode::kMad) << 24;
+  const uint32_t src1_temp = 1u << 31;
+  // @4: max oC0, c0, c0 (the same color write as BuildPixelUcode).
+  u[12] = 0u /*oC0*/ | (1u << 15) | (0xFu << 16) | (0b1100u << 20) |
+          kAluRetainPrev;
+  u[13] = 0;
+  u[14] = kmax;
+  // @5: mad eA, r0.xxxx, c0, c1
+  u[15] = uint32_t(ucode::ExportRegister::kExportAddress) | (1u << 15) |
+          (0b1111u << 16) | kAluRetainPrev;
+  u[16] = 0u | (0u << 8) | (kSwizzleXXXX << 16);
+  u[17] = 1u /*src3=c1 (stream constant)*/ | (0u << 8) /*src2=c0*/ |
+          (0u << 16) /*src1=r0*/ | kmad | src1_temp;
+  // @6: max eM0, c2, c2
+  u[18] = uint32_t(ucode::ExportRegister::kExportData0) | (1u << 15) |
+          (0b1111u << 16) | kAluRetainPrev;
+  u[19] = 0;
+  u[20] = kmax | (2u << 8) /*src2=c2*/ | (2u << 16) /*src1=c2*/;
+  return u;
+}
+
 // LoadShader takes GUEST ucode (big-endian dwords).
 std::vector<uint32_t> ToGuestEndian(const std::vector<uint32_t>& host_words) {
   std::vector<uint32_t> guest(host_words.size());
@@ -229,6 +284,19 @@ std::array<uint32_t, 4> BuildStreamConstant() {
               (uint32_t(xenos::SurfaceNumberFormat::kFloat) << 16) |
               (0x4B0u << 20);                          // const_0x4b0
   stream[3] = kStreamIndexCount | (0x96u << 23);       // const_0x96
+  return stream;
+}
+
+// The pixel exporter's stream: element 0 at kPixelStreamBaseBytes holds c2.
+constexpr uint32_t kPixelStreamBaseBytes = 0x2000;
+constexpr uint32_t kPixelStreamIndexCount = 4;
+constexpr uint32_t kPixelStreamBytes = kPixelStreamIndexCount * kElementBytes;
+const std::array<float, 4> kPixelExportValue = {3.5f, -2.0f, 7.0f, 1.0f};
+
+std::array<uint32_t, 4> BuildPixelStreamConstant() {
+  std::array<uint32_t, 4> stream = BuildStreamConstant();
+  stream[0] = (1u << 30) | (kPixelStreamBaseBytes >> 2);
+  stream[3] = kPixelStreamIndexCount | (0x96u << 23);
   return stream;
 }
 
@@ -282,8 +350,14 @@ struct ExportHarness {
     return buffer;
   }
 
-  MetalShader::MetalTranslation* MakePixelTranslation() {
-    static const std::vector<uint32_t> ucode = ToGuestEndian(BuildPixelUcode());
+  MetalShader::MetalTranslation* MakePixelTranslation(
+      bool pixel_exporter = false) {
+    static const std::vector<uint32_t> plain_ucode =
+        ToGuestEndian(BuildPixelUcode());
+    static const std::vector<uint32_t> exporter_ucode =
+        ToGuestEndian(BuildPixelExporterUcode());
+    const std::vector<uint32_t>& ucode =
+        pixel_exporter ? exporter_ucode : plain_ucode;
     MetalShader* shader = cache->LoadShader(xenos::ShaderType::kPixel,
                                             ucode.data(),
                                             uint32_t(ucode.size()));
@@ -325,7 +399,8 @@ struct ExportHarness {
   // `uav_bound` models BOTH halves of the production gate: u0/space0 points at
   // the writable shared-memory descriptor AND kSysFlag_SharedMemoryIsUAV is
   // published. Gate-off is the exact complement.
-  ExportArmResult Run(bool geometry_emulated, bool uav_bound) {
+  ExportArmResult Run(bool geometry_emulated, bool uav_bound,
+                      bool pixel_exporter = false) {
     ExportArmResult result;
 
     MetalShader* vertex_shader = LoadExporterShader();
@@ -333,7 +408,7 @@ struct ExportHarness {
       result.error = "fixture VS does not write eM#";
       return result;
     }
-    MetalShader::MetalTranslation* pixel = MakePixelTranslation();
+    MetalShader::MetalTranslation* pixel = MakePixelTranslation(pixel_exporter);
     if (!pixel) {
       result.error = "guest PS translation failed";
       return result;
@@ -497,6 +572,11 @@ struct ExportHarness {
       c0[1] = 1.0f;
       c0[2] = 0.0f;
       c0[3] = 1.0f;
+      // The pixel exporter's c1 (stream descriptor) and c2 (export data);
+      // the plain pixel program reads only c0.
+      std::array<uint32_t, 4> stream = BuildPixelStreamConstant();
+      std::memcpy(c0 + 4, stream.data(), sizeof(stream));
+      std::memcpy(c0 + 8, kPixelExportValue.data(), sizeof(kPixelExportValue));
     }
 
     // --- Descriptor heaps. ---
@@ -831,7 +911,116 @@ void RunPoisonThenProve(bool geometry_emulated) {
   CHECK(on.covered > 0);
 }
 
+// Pixel-stage producer: the fragment stage's eM0 store lands through the same
+// top-level argument buffer slot (u0/space0) and residency the vertex route
+// uses, and the gate-off arm writes nothing.
+void RunPixelPoisonThenProve(bool geometry_emulated) {
+  ExportHarness& h = H();
+  INFO(h.error);
+  REQUIRE(h.ok);
+  const char* name = geometry_emulated ? "pixel-geometry-emulated" : "pixel";
+  ExportArmResult off =
+      h.Run(geometry_emulated, /*uav_bound=*/false, /*pixel_exporter=*/true);
+  ExportArmResult on =
+      h.Run(geometry_emulated, /*uav_bound=*/true, /*pixel_exporter=*/true);
+  if (!off.ok || !on.ok) {
+    std::printf("MXRASTER|%s|ERROR|off=%s on=%s\n", name,
+                off.ok ? "-" : off.error.c_str(),
+                on.ok ? "-" : on.error.c_str());
+    std::fflush(stdout);
+    CHECK(off.ok);
+    CHECK(on.ok);
+    return;
+  }
+  uint32_t off_total = 0;
+  const bool off_untouched =
+      PoisonIntactOutside(off.shared, 0, 0, &off_total) == off_total;
+  std::array<uint32_t, 4> oracle;
+  std::memcpy(oracle.data(), kPixelExportValue.data(), sizeof(oracle));
+  std::array<uint32_t, 4> actual = {};
+  std::memcpy(actual.data(), on.shared.data() + kPixelStreamBaseBytes,
+              sizeof(actual));
+  // Elements 1..3 of the pixel stream are never indexed.
+  uint32_t unindexed_intact = 0;
+  const uint32_t unindexed_bytes = kPixelStreamBytes - kElementBytes;
+  for (uint32_t i = 0; i < unindexed_bytes; ++i) {
+    if (on.shared[kPixelStreamBaseBytes + kElementBytes + i] == kPoisonByte) {
+      ++unindexed_intact;
+    }
+  }
+  // The vertex exporter's stream holds its oracle too (both stages route
+  // together), and nothing outside the two streams is touched.
+  uint32_t vertex_lanes = 0;
+  for (uint32_t i = 0; i < kDrawVertexCount; ++i) {
+    std::array<uint32_t, 4> v = {};
+    std::memcpy(v.data(),
+                on.shared.data() + kStreamBaseBytes + i * kElementBytes,
+                sizeof(v));
+    vertex_lanes += v == OracleElement(i) ? 1 : 0;
+  }
+  uint32_t outside_total = 0, outside_intact = 0;
+  for (uint32_t i = 0; i < on.shared.size(); ++i) {
+    if ((i >= kStreamBaseBytes && i < kStreamBaseBytes + kStreamBytes) ||
+        (i >= kPixelStreamBaseBytes &&
+         i < kPixelStreamBaseBytes + kPixelStreamBytes)) {
+      continue;
+    }
+    ++outside_total;
+    outside_intact += on.shared[i] == kPoisonByte ? 1 : 0;
+  }
+  const bool color_identical = on.rgba == off.rgba;
+  std::printf(
+      "MXRASTER|%s|%s|off_poison=%u/%u element0=%d unindexed_poison=%u/%u "
+      "vertex_lanes=%u/%u outside_poison=%u/%u covered=%u color_same=%d\n",
+      name,
+      (off_untouched && actual == oracle &&
+       unindexed_intact == unindexed_bytes &&
+       vertex_lanes == kDrawVertexCount && outside_intact == outside_total &&
+       color_identical && on.covered > 0)
+          ? "PASS"
+          : "FAIL",
+      PoisonIntactOutside(off.shared, 0, 0, &off_total), off_total,
+      actual == oracle ? 1 : 0, unindexed_intact, unindexed_bytes,
+      vertex_lanes, kDrawVertexCount, outside_intact, outside_total,
+      on.covered, color_identical ? 1 : 0);
+  std::fflush(stdout);
+  CHECK(off_untouched);
+  INFO("element0 got " << actual[0] << "," << actual[1] << "," << actual[2]
+                       << "," << actual[3]);
+  CHECK(actual == oracle);
+  CHECK(unindexed_intact == unindexed_bytes);
+  CHECK(vertex_lanes == kDrawVertexCount);
+  CHECK(outside_intact == outside_total);
+  CHECK(color_identical);
+  CHECK(on.covered > 0);
+}
+
 }  // namespace
+
+TEST_CASE("pixel exporter fixture writes eA and eM0",
+          "[memexport][raster][pixel][fixture]") {
+  std::vector<uint32_t> host = BuildPixelExporterUcode();
+  MetalShader shader(xenos::ShaderType::kPixel, 0x4D58504958454C31ull,
+                     host.data(), host.size(), std::endian::little);
+  StringBuffer disasm;
+  shader.AnalyzeUcode(disasm);
+  std::string text = disasm.to_string();
+  INFO(text);
+  CHECK(shader.memexport_eM_written() == 0b1);
+  REQUIRE(shader.memexport_stream_constants().size() == 1);
+  CHECK(*shader.memexport_stream_constants().begin() == 1u);
+  CHECK(text.find("oC0") != std::string::npos);
+}
+
+TEST_CASE("poison-then-prove: pixel-stage producer",
+          "[memexport][raster][pixel][render][device]") {
+  RunPixelPoisonThenProve(/*geometry_emulated=*/false);
+}
+
+TEST_CASE("poison-then-prove: pixel-stage producer, geometry-emulated",
+          "[memexport][raster][pixel][render][device]") {
+  RunPixelPoisonThenProve(/*geometry_emulated=*/true);
+}
 
 TEST_CASE("rasterizing exporter fixture writes eA and eM0",
           "[memexport][raster][fixture]") {

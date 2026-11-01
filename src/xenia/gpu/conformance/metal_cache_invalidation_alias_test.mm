@@ -280,7 +280,9 @@ TEST_CASE(
   std::sort(sorted_slots.begin(), sorted_slots.end());
   REQUIRE(std::adjacent_find(sorted_slots.begin(), sorted_slots.end()) ==
           sorted_slots.end());
-  REQUIRE(h.cache->ConsumeUploadCount() == 7u);
+  // Six uploads for seven slots: the signed alias_b is the signed twin of
+  // alias_a (a93072192) and is served from its upload as a format view.
+  REQUIRE(h.cache->ConsumeUploadCount() == 6u);
 
   std::vector<void*> live;
   h.cache->AppendAllTextures(live);
@@ -455,7 +457,7 @@ TEST_CASE(
   uint32_t disjoint_slot = legacy.GetTextureSlot(legacy_disjoint, false);
   REQUIRE(adjacent_slot != 0u);
   REQUIRE(disjoint_slot != 0u);
-  REQUIRE(legacy.ConsumeUploadCount() == 4u);
+  REQUIRE(legacy.ConsumeUploadCount() == 3u);
 
   struct GlobalProbe {
     uint32_t calls = 0;
@@ -505,7 +507,7 @@ TEST_CASE(
   shared->MemoryInvalidationCallback(kBase + 0x100, 0x20, true);
   REQUIRE(legacy.GetTextureSlot(legacy_a, false) != 0u);
   REQUIRE(legacy.GetTextureSlot(legacy_b, true) != 0u);
-  REQUIRE(legacy.ConsumeUploadCount() == 2u);
+  REQUIRE(legacy.ConsumeUploadCount() == 1u);
 
   // GPU-written publication uses the same real FireWatches path and must
   // reach both subscriber classes before marking the shared bytes valid.
@@ -566,7 +568,7 @@ TEST_CASE(
   REQUIRE(legacy.GetTextureSlot(legacy_b, true) != 0u);
   uint32_t adjacent_slot = legacy.GetTextureSlot(legacy_adjacent, false);
   REQUIRE(adjacent_slot != 0u);
-  REQUIRE(legacy.ConsumeUploadCount() == 3u);
+  REQUIRE(legacy.ConsumeUploadCount() == 2u);
 
   legacy.SetTracePlayback();
   shared->MemoryInvalidationCallback(kBase + 0x100, 0x20, true);
@@ -702,7 +704,7 @@ TEST_CASE("Cache alias 5.3: guest CPU and memexport publication watch sets conta
     for (uint32_t slot : slots) {
       REQUIRE(slot != 0u);
     }
-    REQUIRE(cache.ConsumeUploadCount() == 4u);
+    REQUIRE(cache.ConsumeUploadCount() == 3u);
     return slots;
   };
   auto watch_slots = seed(watch_cache);
@@ -794,7 +796,7 @@ TEST_CASE("Cache alias 5.3: resolve direct RAM-only retirement precedes suppress
   REQUIRE(legacy.GetTextureSlot(alias, true) != 0u);
   uint32_t survivor_slot = legacy.GetTextureSlot(survivor, false);
   REQUIRE(survivor_slot != 0u);
-  REQUIRE(legacy.ConsumeUploadCount() == 3u);
+  REQUIRE(legacy.ConsumeUploadCount() == 2u);
 
   id<MTLTexture> bridge = MakeBridgeTexture(h.device);
   REQUIRE(bridge != nil);
@@ -876,7 +878,7 @@ TEST_CASE("Cache alias 5.3: memexport full lifecycle direct convergence and "
     for (uint32_t slot : slots) {
       REQUIRE(slot != 0u);
     }
-    REQUIRE(cache.ConsumeUploadCount() == 4u);
+    REQUIRE(cache.ConsumeUploadCount() == 3u);
     return slots;
   };
   auto current_slots = seed(current);
@@ -979,7 +981,7 @@ TEST_CASE("Cache alias 5.3: memexport trace playback fires shared range fan-out 
   REQUIRE(legacy.GetTextureSlot(alias, true) != 0u);
   uint32_t survivor_slot = legacy.GetTextureSlot(survivor, false);
   REQUIRE(survivor_slot != 0u);
-  REQUIRE(legacy.ConsumeUploadCount() == 3u);
+  REQUIRE(legacy.ConsumeUploadCount() == 2u);
 
   id<MTLTexture> bridge = MakeBridgeTexture(h.device);
   REQUIRE(bridge != nil);
@@ -1058,7 +1060,7 @@ TEST_CASE("Cache alias 5.3: trace restore has shared range fan-out but an empty 
   auto alias = MakeLinearFetch(kBase, xenos::TextureFormat::k_8_8_8_8);
   REQUIRE(legacy.GetTextureSlot(alias, false) != 0u);
   REQUIRE(legacy.GetTextureSlot(alias, true) != 0u);
-  REQUIRE(legacy.ConsumeUploadCount() == 2u);
+  REQUIRE(legacy.ConsumeUploadCount() == 1u);
   id<MTLTexture> bridge = MakeBridgeTexture(h.device);
   REQUIRE(bridge != nil);
   legacy.RegisterResolvedTarget(kBase, (__bridge void*)bridge, 16, 16, false, false, kBase,

@@ -692,6 +692,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
   // must be called with absolute values of operands - use GetAbsoluteOperand!
   spv::Id ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs,
                                  spv::Id operand_1_abs);
+  // Pack/unpack two floats as Xbox 360 extended-range float16, where exponent
+  // 31 is a large finite value (up to +-131008), not Inf/NaN.
+  spv::Id PackFloat16x2ExtendedRange(spv::Id float2_value);
+  spv::Id UnpackFloat16x2ExtendedRange(spv::Id packed_uint);
   // Conditionally discard the current fragment. Changes the build point.
   void KillPixel(spv::Id condition,
                  uint8_t memexport_eM_potentially_written_before);
@@ -702,6 +706,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
   spv::Id ProcessVectorAluOperation(
       const ParsedAluInstruction& instr,
       uint8_t memexport_eM_potentially_written_before, bool& predicate_written);
+  // Reduces finite host approximations to a chosen mantissa width.
+  // We still don't know the exact precision or rounding.
+  spv::Id ReduceFloatPrecision(spv::Id value, uint32_t mantissa_bits);
   // Returns a float value to write to the previous scalar register and to the
   // destination. If the return value is ps itself (in the retain_prev case),
   // returns spv::NoResult (handled as a special case, so if it's retain_prev,

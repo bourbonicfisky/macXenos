@@ -11,12 +11,14 @@
 #define XENIA_GPU_PRIMITIVE_PROCESSOR_H_
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -610,6 +612,63 @@ class PrimitiveProcessor {
     }
   }
 
+  // Triangle strips as triangle lists (tessellated strips only, Canary
+  // 3eab2b8b3). A strip with N vertices produces N - 2 triangles, alternating
+  // the order of the first two vertices of every odd triangle so all
+  // triangles keep the winding of the first: (v0, v1, v2), (v2, v1, v3),
+  // (v2, v3, v4), (v4, v3, v5), ...
+  static constexpr uint32_t GetTriangleStripListIndexCount(
+      uint32_t strip_index_count) {
+    return strip_index_count > 2 ? (strip_index_count - 2) * 3 : 0;
+  }
+  template <typename Index, typename IndexTransform>
+  static void TriangleStripToList(Index* dest, const Index* source,
+                                  uint32_t source_index_count,
+                                  const IndexTransform& index_transform) {
+    for (uint32_t i = 2; i < source_index_count; ++i) {
+      Index index_2 = index_transform(source[i - 2]);
+      Index index_1 = index_transform(source[i - 1]);
+      if (i & 1) {
+        *(dest++) = index_1;
+        *(dest++) = index_2;
+      } else {
+        *(dest++) = index_2;
+        *(dest++) = index_1;
+      }
+      *(dest++) = index_transform(source[i]);
+    }
+  }
+  // Auto-indexed (vertex i is index i) runtime conversions for backends that
+  // don't provision the built-in tables, written as 16-bit host indices.
+  static void AutoTriangleStripToList(uint16_t* dest,
+                                      uint32_t source_index_count) {
+    for (uint32_t i = 2; i < source_index_count; ++i) {
+      if (i & 1) {
+        *(dest++) = uint16_t(i - 1);
+        *(dest++) = uint16_t(i - 2);
+      } else {
+        *(dest++) = uint16_t(i - 2);
+        *(dest++) = uint16_t(i - 1);
+      }
+      *(dest++) = uint16_t(i);
+    }
+  }
+  static void AutoTriangleFanToList(uint16_t* dest,
+                                    uint32_t source_index_count,
+                                    bool first_provoking = false) {
+    for (uint32_t i = 2; i < source_index_count; ++i) {
+      if (first_provoking) {
+        *(dest++) = 0;
+        *(dest++) = uint16_t(i - 1);
+        *(dest++) = uint16_t(i);
+      } else {
+        *(dest++) = uint16_t(i - 1);
+        *(dest++) = uint16_t(i);
+        *(dest++) = 0;
+      }
+    }
+  }
+
   // Public so backend fail-closed shape guards and device-free conformance use
   // the shared line-loop count oracle rather than replicating it.
   static constexpr uint32_t GetLineLoopStripIndexCount(
@@ -734,10 +793,46 @@ class PrimitiveProcessor {
           dest_write_ptr += range_it->host_index_count;
         }
         break;
+      case xenos::PrimitiveType::kTriangleStrip:
+        // Tessellated strips; each reset-separated strip restarts the winding
+        // parity at its own first vertex.
+        for (PrimitiveRangeIterator range_it = ranges_beginning;
+             range_it != ranges_end; ++range_it) {
+          TriangleStripToList(dest_write_ptr,
+                              source + range_it->guest_offset,
+                              range_it->guest_index_count, index_transform);
+          dest_write_ptr += range_it->host_index_count;
+        }
+        break;
       default:
         assert_unhandled_case(source_primitive_type);
     }
   }
+
+  // Hosts that cannot disable primitive restart scan every reset-disabled
+  // 16-bit index buffer for 0xFFFF on every draw (3-5% of the Metal command
+  // processor in GTA IV and Mafia II). Ranges found clean are remembered across
+  // frames while their pages stay uploaded, not GPU-written and not written by
+  // the guest since the scan (per-page sequence numbers bumped by the
+  // invalidation callback). Command processor thread only, except the
+  // sequence numbers.
+  struct WidenScanMemoEntry {
+    uint32_t base;
+    uint32_t count;
+    uint64_t stamp;
+  };
+  static constexpr uint32_t kWidenScanMemoSizeLog2 = 14;
+  static constexpr uint32_t kWidenScanPageSizeLog2 = 12;
+  bool WidenScanMemoEnabled() const;
+  bool WidenScanMemoFind(uint32_t base, uint32_t count) const;
+  void WidenScanMemoStore(uint32_t base, uint32_t count, uint64_t stamp);
+  void WidenScanMemoInvalidate(uint32_t start, uint32_t end);
+  std::unique_ptr<WidenScanMemoEntry[]> widen_scan_memo_;
+  std::unique_ptr<std::atomic<uint64_t>[]> widen_scan_page_seq_;
+  std::atomic<uint64_t> widen_scan_seq_{1};
+  // XE_WIDEN_SCAN_VERIFY census, logged every 600 frames.
+  uint64_t widen_census_scans_ = 0, widen_census_positive_ = 0,
+           widen_census_memo_hits_ = 0, widen_census_frames_ = 0;
 
   const RegisterFile& register_file_;
   Memory& memory_;

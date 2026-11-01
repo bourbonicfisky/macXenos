@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -145,6 +146,32 @@ class MetalSharedTextureCache : public TextureCache {
   // Diagnostic: why GetServedSlot returned 0 for this binding (static
   // string; "served" when it would not have).
   const char* UnservedReason(uint32_t fetch_constant_index, bool is_signed);
+
+  // Resolve forwarding (XE_METAL_RESOLVE_FORWARD=0 disables): a GPU-resident
+  // resolve into one of this cache's single-level tiled 2D textures (same
+  // pitch and texel size, starting a whole number of 32-row tile bands into
+  // it) writes that texture in its scatter dispatch too, and the texture is
+  // then marked current instead of reloading from the buffer (GTA IV: 36 such
+  // reloads, ~75 MB, a frame). A resolve covering only part of the texture
+  // (GTA IV resolves its 1280x720 targets in three strips) is forwarded only
+  // into a texture that was current, whose other texels still match memory.
+  // Any later write to its range fires its watch again and it reloads as
+  // before.
+  struct ResolveForwardTarget {
+    void* texture = nullptr;      // this cache's texture
+    void* mtl_texture = nullptr;  // id<MTLTexture>, an unsigned view of it
+    uint32_t kind = 0;            // xe_resolve_forward_store's kind
+    uint32_t endian = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t origin_y = 0;  // texture row of the destination's row 0
+  };
+  bool FindResolveForward(uint32_t dest_base, uint32_t dest_pitch,
+                          uint32_t bpp_log2, uint32_t offset_x,
+                          uint32_t offset_y, uint32_t width, uint32_t height,
+                          uint32_t extent_bytes, ResolveForwardTarget* out);
+  // After the resolve's own watch invalidation.
+  void CompleteResolveForward(const ResolveForwardTarget& target);
 
   // M4 (mandatory): called by the command processor when fault publication
   // records lost submissions. Every texture whose last load rode one of
@@ -280,6 +307,10 @@ class MetalSharedTextureCache : public TextureCache {
   // encoders go to the side command buffer instead of ending the render pass.
   bool side_load_ = false;
   uint64_t census_side_loads_ = 0;  // loads that took the side command buffer
+  uint64_t census_forwarded_ = 0;   // textures written by their resolve
+  static uint32_t ResolveForwardKind(const TextureKey& key);
+  // Forwardable textures by base address (see FindResolveForward).
+  std::multimap<uint32_t, MetalTexture*> forward_textures_;
   RecentLoad recent_loads_[8] = {};
   uint32_t recent_load_next_ = 0;
   std::function<uint64_t()> submission_provider_;

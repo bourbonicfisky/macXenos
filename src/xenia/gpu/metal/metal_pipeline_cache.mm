@@ -12,16 +12,24 @@
 
 #import <Metal/Metal.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "third_party/xxhash/xxhash.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/string_buffer.h"
+#include "xenia/base/threading.h"
 #include "xenia/gpu/metal/metal_dxbc_clip_relabel.h"
+#include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/metal/metal_artifact_hit_verify.h"
 #include "xenia/gpu/metal/metal_render_target_cache.h"
@@ -40,6 +48,16 @@
 // before any backend is consulted, so it silently disables both durable
 // mechanisms; reported in the effective-state line below.
 DECLARE_bool(store_shaders);
+
+DEFINE_bool(
+    metal_async_pipelines, true,
+    "Metal: create pipelines a game has not used before on background threads. "
+    "Until one is ready, draws into a render target redrawn every frame are "
+    "skipped (an object can be missing for a few frames) instead of the game "
+    "pausing; one-off renders, small render targets and memory exports still "
+    "wait. Off: every new pipeline is built during the frame that needs it. "
+    "XE_METAL_ASYNC_PIPELINES=0/1 overrides.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -67,16 +85,7 @@ bool MetalPipelineCache::Initialize() {
   // (0x5C-range) after gamma encoding + exposure (the "black gameplay" bug).
   // Configuration comes from MetalTranslatorConfig so the durable cache's
   // schema fingerprint (3.3b) cannot drift from what is actually built here.
-  shader_translator_ = std::make_unique<DxbcShaderTranslator>(
-      ui::GraphicsProvider::GpuVendorID::kApple,
-      MetalTranslatorConfig::kBindlessResourcesUsed,
-      MetalTranslatorConfig::kEdramRovUsed,
-      MetalTranslatorConfig::GammaRenderTargetAsUnorm8(),
-      /*msaa_2x_supported=*/true, draw_resolution_scale_x_,
-      draw_resolution_scale_y_);
-  shader_translator_->SetExactScaledPixelPosition(
-      MetalExactScaledPixelPositionEnabled());
-  shader_translator_->SetDeferredKill(MetalDeferredKillEnabled());
+  shader_translator_ = CreateShaderTranslator();
 
   std::string error;
   if (!dxil_converter_raw_.Initialize(&error)) {
@@ -112,6 +121,21 @@ bool MetalPipelineCache::Initialize() {
   return true;
 }
 
+std::unique_ptr<DxbcShaderTranslator>
+MetalPipelineCache::CreateShaderTranslator() const {
+  auto translator = std::make_unique<DxbcShaderTranslator>(
+      ui::GraphicsProvider::GpuVendorID::kApple,
+      MetalTranslatorConfig::kBindlessResourcesUsed,
+      MetalTranslatorConfig::kEdramRovUsed,
+      MetalTranslatorConfig::GammaRenderTargetAsUnorm8(),
+      /*msaa_2x_supported=*/true, draw_resolution_scale_x_,
+      draw_resolution_scale_y_);
+  translator->SetExactScaledPixelPosition(
+      MetalExactScaledPixelPositionEnabled());
+  translator->SetDeferredKill(MetalDeferredKillEnabled());
+  return translator;
+}
+
 void MetalPipelineCache::InitializeDurableStorage(
     const std::filesystem::path& cache_root, uint32_t title_id) {
   ShutdownDurableStorage();
@@ -130,6 +154,7 @@ void MetalPipelineCache::InitializeDurableStorage(
         "continuing with in-memory caches only",
         title_id);
   }
+  OpenBinaryArchive();
 
   // Task 2.2 — the DXIL store, opened independently and with its own identity.
   // Note it is NOT under the title directory and its Open is not conditional on
@@ -160,12 +185,371 @@ void MetalPipelineCache::InitializeDurableStorage(
 }
 
 void MetalPipelineCache::ShutdownDurableStorage() {
+  SaveBinaryArchive("shutdown", true);
+  CloseBinaryArchive();
   storage_.Close();
   dxil_store_.Close();
 }
 
+namespace {
+// M2 storage layout: <title>/archive/NNNNNNNN.metalar segments, each with an
+// NNNNNNNN.keys sidecar listing the pipeline keys it holds. The archive cannot
+// be enumerated, and without the keys every session would re-add every
+// pipeline (one add is a host compile when the macOS cache is cold).
+//
+// WHY SEGMENTS. An MTLBinaryArchive serializes reliably exactly once. Loading
+// one and adding to it, or serializing one a second time after more adds,
+// fails in the packer ("Failed to generate machO ... expecting 'fragment'
+// stage in pipeline no. N", Mafia II on M1 Max, macOS 27) and leaves the
+// in-memory archive empty. So loaded segments are only ever read, new
+// pipelines go to a fresh archive, and every save serializes that fresh archive
+// once as a new segment and starts another.
+constexpr uint32_t kArchiveKeysMagic = 0x4B415845;  // 'EXAK'
+constexpr uint32_t kArchiveKeysVersion = 1;
+// Segments accumulate one per save that had new pipelines, which once a title
+// is warm is about one small segment per session. Past the compaction count a
+// session compacts (FinishBinaryArchiveCompaction); kMaxArchiveSegments is the
+// backstop if compaction keeps finding too little reuse, and rebuilds.
+constexpr size_t kCompactArchiveSegments = 16;
+constexpr size_t kMaxArchiveSegments = 64;
+
+size_t CompactArchiveSegments() {
+  static const size_t count = [] {
+    const char* v = std::getenv("XE_METAL_ARCHIVE_COMPACT_SEGMENTS");
+    return v ? size_t(std::strtoull(v, nullptr, 10)) : kCompactArchiveSegments;
+  }();
+  return count;
+}
+
+bool ReadArchiveKeys(const std::filesystem::path& path,
+                     std::vector<uint64_t>* keys_out) {
+  keys_out->clear();
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) {
+    return false;
+  }
+  uint32_t header[3] = {};
+  bool ok = std::fread(header, sizeof(header), 1, f) == 1 &&
+            header[0] == kArchiveKeysMagic && header[1] == kArchiveKeysVersion;
+  if (ok) {
+    keys_out->resize(header[2]);
+    ok = keys_out->empty() ||
+         std::fread(keys_out->data(), sizeof(uint64_t), keys_out->size(), f) ==
+             keys_out->size();
+  }
+  std::fclose(f);
+  return ok;
+}
+
+id<MTLBinaryArchive> NewEmptyBinaryArchive(id<MTLDevice> device) {
+  MTLBinaryArchiveDescriptor* desc = [[MTLBinaryArchiveDescriptor alloc] init];
+  NSError* error = nil;
+  id<MTLBinaryArchive> archive =
+      [device newBinaryArchiveWithDescriptor:desc error:&error];
+  if (!archive) {
+    XELOGW("MetalPipelineCache: binary archive unavailable: {}",
+           error ? [[error localizedDescription] UTF8String] : "unknown");
+  }
+  return archive;
+}
+}  // namespace
+
+void MetalPipelineCache::RebuildBinaryArchiveLookupList() {
+  NSMutableArray<id<MTLBinaryArchive>>* list = [NSMutableArray array];
+  for (void* segment : binary_archive_segments_) {
+    [list addObject:(__bridge id<MTLBinaryArchive>)segment];
+  }
+  if (binary_archive_lookup_list_) {
+    NSArray* old = (__bridge_transfer NSArray*)binary_archive_lookup_list_;
+    (void)old;
+  }
+  binary_archive_lookup_list_ = (__bridge_retained void*)[list copy];
+}
+
+void MetalPipelineCache::OpenBinaryArchive() {
+  CloseBinaryArchive();
+  GetMetalShaderBuildCensus().archive_enabled = false;
+  if (!cvars::metal_pipeline_binary_archive || !storage_.is_open() ||
+      !device_) {
+    return;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  const std::filesystem::path dir = storage_.binary_archive_path();
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+
+  // Segments in sequence order; a segment without readable keys (a crash
+  // between the archive rename and the keys write) is an orphan and removed.
+  std::vector<std::pair<uint32_t, std::filesystem::path>> segments;
+  for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+    const std::filesystem::path& path = entry.path();
+    if (path.extension() == ".tmp") {
+      std::filesystem::remove(path, ec);
+      continue;
+    }
+    if (path.extension() != ".metalar") {
+      continue;
+    }
+    char* end = nullptr;
+    const std::string stem = path.stem().string();
+    const unsigned long seq = std::strtoul(stem.c_str(), &end, 10);
+    if (end && *end == '\0') {
+      segments.emplace_back(uint32_t(seq), path);
+    }
+  }
+  std::sort(segments.begin(), segments.end());
+  if (segments.size() > kMaxArchiveSegments) {
+    XELOGI(
+        "MetalPipelineCache: {} binary archive segments exceed {}; rebuilding",
+        segments.size(), kMaxArchiveSegments);
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+    segments.clear();
+  }
+
+  const bool compact = segments.size() > CompactArchiveSegments();
+  std::vector<uint64_t> keys;
+  for (const auto& [seq, path] : segments) {
+    binary_archive_next_segment_ = seq + 1;
+    std::filesystem::path keys_path = path;
+    keys_path.replace_extension(".keys");
+    if (!ReadArchiveKeys(keys_path, &keys)) {
+      std::filesystem::remove(path, ec);
+      std::filesystem::remove(keys_path, ec);
+      continue;
+    }
+    MTLBinaryArchiveDescriptor* desc = [[MTLBinaryArchiveDescriptor alloc] init];
+    desc.url =
+        [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
+    NSError* error = nil;
+    id<MTLBinaryArchive> segment =
+        [device newBinaryArchiveWithDescriptor:desc error:&error];
+    if (!segment) {
+      XELOGW("MetalPipelineCache: binary archive segment {} failed to load "
+             "({}); removed",
+             path.filename().string(),
+             error ? [[error localizedDescription] UTF8String] : "unknown");
+      std::filesystem::remove(path, ec);
+      std::filesystem::remove(keys_path, ec);
+      continue;
+    }
+    binary_archive_segments_.push_back((__bridge_retained void*)segment);
+    archived_pipeline_keys_.insert(keys.begin(), keys.end());
+    if (compact) {
+      binary_archive_compacting_.push_back({path, keys});
+    }
+  }
+
+  id<MTLBinaryArchive> fresh = NewEmptyBinaryArchive(device);
+  if (!fresh) {
+    CloseBinaryArchive();
+    return;
+  }
+  binary_archive_ = (__bridge_retained void*)fresh;
+  if (!binary_archive_segments_.empty()) {
+    RebuildBinaryArchiveLookupList();
+  }
+  if (!binary_archive_queue_) {
+    binary_archive_queue_ = (__bridge_retained void*)dispatch_queue_create(
+        "xe.metal.binary_archive_save", DISPATCH_QUEUE_SERIAL);
+  }
+  binary_archive_last_save_ = std::chrono::steady_clock::now();
+  binary_archive_failed_at_open_ =
+      GetMetalShaderBuildCensus().archive_save_failed.load(
+          std::memory_order_relaxed);
+  GetMetalShaderBuildCensus().archive_enabled = true;
+  XELOGI("MetalPipelineCache: binary archive: {} segments, {} pipeline keys{}",
+         binary_archive_segments_.size(), archived_pipeline_keys_.size(),
+         binary_archive_compacting_.empty() ? "" : ", compacting");
+}
+
+void MetalPipelineCache::CloseBinaryArchive() {
+  if (binary_archive_queue_) {
+    dispatch_sync((__bridge dispatch_queue_t)binary_archive_queue_, ^{
+                  });
+  }
+  for (void* segment : binary_archive_segments_) {
+    id<MTLBinaryArchive> archive = (__bridge_transfer id<MTLBinaryArchive>)segment;
+    (void)archive;
+  }
+  binary_archive_segments_.clear();
+  if (binary_archive_) {
+    id<MTLBinaryArchive> archive =
+        (__bridge_transfer id<MTLBinaryArchive>)binary_archive_;
+    (void)archive;
+    binary_archive_ = nullptr;
+  }
+  if (binary_archive_lookup_list_) {
+    NSArray* list = (__bridge_transfer NSArray*)binary_archive_lookup_list_;
+    (void)list;
+    binary_archive_lookup_list_ = nullptr;
+  }
+  archived_pipeline_keys_.clear();
+  binary_archive_pending_keys_.clear();
+  binary_archive_next_segment_ = 0;
+  binary_archive_compacting_.clear();
+  binary_archive_session_keys_.clear();
+}
+
+void MetalPipelineCache::SaveBinaryArchive(const char* reason, bool wait) {
+  if (binary_archive_ && !binary_archive_pending_keys_.empty() &&
+      storage_.is_open() && device_ && binary_archive_queue_) {
+    // Hand the fresh archive to the save queue and start another. Nothing on
+    // this thread reads it again: its pipelines are already in
+    // render_pipeline_states_, so no lookup this session can need it, and the
+    // serialize (476 ms for 222 pipelines on the M1 Max) stays off the frame.
+    id<MTLBinaryArchive> archive =
+        (__bridge_transfer id<MTLBinaryArchive>)binary_archive_;
+    binary_archive_ = nullptr;
+    std::vector<uint64_t> keys = std::move(binary_archive_pending_keys_);
+    binary_archive_pending_keys_.clear();
+    const uint32_t segment = binary_archive_next_segment_++;
+    const std::filesystem::path path =
+        storage_.binary_archive_path() / fmt::format("{:08}.metalar", segment);
+    const std::string reason_copy = reason ? reason : "";
+    dispatch_async(
+        (__bridge dispatch_queue_t)binary_archive_queue_, ^{
+          const auto start = std::chrono::steady_clock::now();
+          std::filesystem::path keys_path = path;
+          keys_path.replace_extension(".keys");
+          std::filesystem::path temp_path = path;
+          temp_path += ".tmp";
+          std::error_code ec;
+          std::filesystem::remove(temp_path, ec);
+          NSError* error = nil;
+          NSURL* temp_url = [NSURL
+              fileURLWithPath:[NSString stringWithUTF8String:temp_path.c_str()]];
+          bool saved = [archive serializeToURL:temp_url error:&error];
+          if (saved) {
+            std::filesystem::rename(temp_path, path, ec);
+            saved = !ec;
+          }
+          MetalShaderBuildCensus& census = GetMetalShaderBuildCensus();
+          if (!saved) {
+            // Those pipelines are simply not on disk; the next session finds
+            // their keys in no sidecar and adds them again.
+            XELOGW("MetalPipelineCache: binary archive save ({}) failed: {}",
+                   reason_copy,
+                   ec ? ec.message()
+                      : (error ? [[error localizedDescription] UTF8String]
+                               : "unknown"));
+            std::filesystem::remove(temp_path, ec);
+            census.archive_save_failed.fetch_add(1, std::memory_order_relaxed);
+            return;
+          }
+          // The sidecar goes after the archive, so keys never claim pipelines
+          // a segment lacks; a segment without one is an orphan at open.
+          std::vector<uint8_t> blob(sizeof(uint32_t) * 3 +
+                                    sizeof(uint64_t) * keys.size());
+          const uint32_t header[3] = {kArchiveKeysMagic, kArchiveKeysVersion,
+                                      uint32_t(keys.size())};
+          std::memcpy(blob.data(), header, sizeof(header));
+          std::memcpy(blob.data() + sizeof(header), keys.data(),
+                      sizeof(uint64_t) * keys.size());
+          MetalPipelineStorage::WriteFileAtomic(keys_path, blob.data(),
+                                                blob.size());
+          const uint64_t bytes = std::filesystem::file_size(path, ec);
+          // Off the frame thread, so Stage::Add rather than RecordBuild: this
+          // is not stall time.
+          census.archive_save.Add(
+              uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           std::chrono::steady_clock::now() - start)
+                           .count()),
+              ec ? 0 : bytes);
+          XELOGI(
+              "MetalPipelineCache: binary archive saved ({}): segment {} with "
+              "{} pipelines, {} KiB",
+              reason_copy, segment, keys.size(), (ec ? 0 : bytes) / 1024);
+        });
+    id<MTLBinaryArchive> fresh =
+        NewEmptyBinaryArchive((__bridge id<MTLDevice>)device_);
+    if (fresh) {
+      binary_archive_ = (__bridge_retained void*)fresh;
+    }
+    binary_archive_last_save_ = std::chrono::steady_clock::now();
+  }
+  if (wait && binary_archive_queue_) {
+    dispatch_sync((__bridge dispatch_queue_t)binary_archive_queue_, ^{
+                  });
+    FinishBinaryArchiveCompaction();
+  }
+}
+
+void MetalPipelineCache::FinishBinaryArchiveCompaction() {
+  // Only once everything this session added is on disk: a failed save means
+  // some of the keys counted below are in no segment.
+  MetalShaderBuildCensus& census = GetMetalShaderBuildCensus();
+  if (binary_archive_compacting_.empty() ||
+      !binary_archive_pending_keys_.empty() ||
+      census.archive_save_failed.load(std::memory_order_relaxed) !=
+          binary_archive_failed_at_open_) {
+    return;
+  }
+  // A session rarely touches every archived pipeline, and the few it skips
+  // are spread across the old segments, so requiring full coverage per
+  // segment removes almost nothing (M1 Max Mafia II: 375 of 415 re-saved, 1 of
+  // 5 segments removable). Once 80% are re-saved, all old segments go: the
+  // rest were unused this session and are rebuilt and re-archived if a later
+  // one needs them.
+  std::unordered_set<uint64_t> old_keys;
+  for (const OldArchiveSegment& old : binary_archive_compacting_) {
+    old_keys.insert(old.keys.begin(), old.keys.end());
+  }
+  size_t resaved = 0;
+  for (uint64_t key : old_keys) {
+    resaved += binary_archive_session_keys_.count(key);
+  }
+  const bool remove_all = resaved * 5 >= old_keys.size() * 4;
+  size_t removed = 0;
+  std::error_code ec;
+  for (const OldArchiveSegment& old : binary_archive_compacting_) {
+    if (!remove_all &&
+        !std::all_of(old.keys.begin(), old.keys.end(), [this](uint64_t key) {
+          return binary_archive_session_keys_.count(key) != 0;
+        })) {
+      continue;
+    }
+    // Sidecar first: a segment left without one is an orphan the next open
+    // removes. The loaded archive keeps its mapping until it is released.
+    std::filesystem::path keys_path = old.path;
+    keys_path.replace_extension(".keys");
+    std::filesystem::remove(keys_path, ec);
+    std::filesystem::remove(old.path, ec);
+    ++removed;
+  }
+  XELOGI("MetalPipelineCache: binary archive compacted: {} of {} old segments "
+         "removed ({} of {} old pipelines saved again)",
+         removed, binary_archive_compacting_.size(), resaved, old_keys.size());
+  binary_archive_compacting_.clear();
+}
+
+void MetalPipelineCache::MaybeSaveBinaryArchiveOnSwap() {
+  // Every save is a new segment, so saves are rare: often enough that a crash
+  // loses at most a few minutes of new pipelines, and only once enough have
+  // accumulated to be worth a segment. Quit saves whatever is left.
+  if (!binary_archive_ || binary_archive_pending_keys_.size() < 16) {
+    return;
+  }
+  static const int64_t s_interval_s = [] {
+    const char* v = std::getenv("XE_METAL_ARCHIVE_SAVE_INTERVAL_S");
+    return v ? int64_t(std::strtoll(v, nullptr, 10)) : int64_t(300);
+  }();
+  if (std::chrono::steady_clock::now() - binary_archive_last_save_ <
+      std::chrono::seconds(s_interval_s)) {
+    return;
+  }
+  SaveBinaryArchive("periodic", false);
+}
+
 void MetalPipelineCache::Shutdown() {
+  StopAsyncPipelineWorkers();
   ShutdownDurableStorage();
+  if (binary_archive_queue_) {
+    dispatch_queue_t queue =
+        (__bridge_transfer dispatch_queue_t)binary_archive_queue_;
+    (void)queue;
+    binary_archive_queue_ = nullptr;
+  }
   for (auto& pair : render_pipeline_states_) {
     if (pair.second) {
       id<MTLRenderPipelineState> state =
@@ -289,7 +673,11 @@ bool MetalPipelineCache::ConvertDxbcToDxilCached(
   if (cache_enabled) {
     std::vector<uint8_t> cached;
     const auto load_start = std::chrono::steady_clock::now();
-    const MetalDxilLoadResult result = dxil_store_.Load(key, &cached);
+    MetalDxilLoadResult result;
+    {
+      std::lock_guard<std::mutex> lock(durable_store_mutex_);
+      result = dxil_store_.Load(key, &cached);
+    }
     census.dxil_load_ns.fetch_add(
         uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                      std::chrono::steady_clock::now() - load_start)
@@ -330,7 +718,10 @@ bool MetalPipelineCache::ConvertDxbcToDxilCached(
           "build produces. Entry dropped and rebuilt.",
           site, MetalArtifactHitVerdictName(verdict), cached.size(),
           fresh.size());
-      dxil_store_.Forget(key);
+      {
+        std::lock_guard<std::mutex> lock(durable_store_mutex_);
+        dxil_store_.Forget(key);
+      }
       if (!converted || fresh.empty()) {
         if (error_out) {
           *error_out = verify_error.empty()
@@ -363,7 +754,10 @@ bool MetalPipelineCache::ConvertDxbcToDxilCached(
   }
   if (cache_enabled) {
     const auto store_start = std::chrono::steady_clock::now();
-    dxil_store_.Store(key, dxil_out);
+    {
+      std::lock_guard<std::mutex> lock(durable_store_mutex_);
+      dxil_store_.Store(key, dxil_out);
+    }
     census.dxil_store_ns.fetch_add(
         uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                      std::chrono::steady_clock::now() - store_start)
@@ -375,6 +769,14 @@ bool MetalPipelineCache::ConvertDxbcToDxilCached(
 
 bool MetalPipelineCache::TranslateShader(
     MetalShader::MetalTranslation& translation) {
+  return TranslateShader(translation, *shader_translator_, metal_converter_);
+}
+
+bool MetalPipelineCache::TranslateShader(
+    MetalShader::MetalTranslation& translation,
+    DxbcShaderTranslator& translator, MetalShaderConverter& metal_converter) {
+  std::lock_guard<std::mutex> translate_lock(
+      static_cast<MetalShader&>(translation.shader()).translate_mutex());
   if (translation.is_translated()) {
     return translation.is_valid() && translation.has_metal_function();
   }
@@ -388,7 +790,7 @@ bool MetalPipelineCache::TranslateShader(
   MetalShaderBuildCensus& census = GetMetalShaderBuildCensus();
   {
     MetalShaderBuildTimer timer(census.dxbc);
-    if (!shader_translator_->TranslateAnalyzedShader(translation)) {
+    if (!translator.TranslateAnalyzedShader(translation)) {
       timer.Dismiss();
       XELOGE("MetalPipelineCache: DXBC translation failed for shader {:016X}",
              shader.ucode_data_hash());
@@ -495,7 +897,7 @@ bool MetalPipelineCache::TranslateShader(
     MetalStageRequestProbe probe(dxil, uint32_t(stage),
                                  uint32_t(MetalShaderConverter::InputTopology::
                                               kUndefined));
-    if (!metal_converter_.Convert(stage, dxil, metallib, &error)) {
+    if (!metal_converter.Convert(stage, dxil, metallib, &error)) {
       timer.Dismiss();
       XELOGE("MetalPipelineCache: DXIL->metallib failed for shader {:016X}: {}",
              shader.ucode_data_hash(), error);
@@ -531,7 +933,12 @@ bool MetalPipelineCache::TranslateShader(
   // is never written for a later run to trip over.
   if (cvars::metal_pipeline_metallib_cache && storage_.is_open()) {
     const auto store_start = std::chrono::steady_clock::now();
-    if (storage_.StoreMetallib(m1_key, metallib)) {
+    bool stored;
+    {
+      std::lock_guard<std::mutex> lock(durable_store_mutex_);
+      stored = storage_.StoreMetallib(m1_key, metallib);
+    }
+    if (stored) {
       census.metallib_stores.fetch_add(1, std::memory_order_relaxed);
       census.metallib_store_bytes.fetch_add(metallib.size(),
                                             std::memory_order_relaxed);
@@ -758,7 +1165,41 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   if (!vertex || !vertex->has_metal_function()) {
     return nullptr;
   }
+  const uint64_t key =
+      RenderPipelineKey(vertex, pixel, color_pixel_formats, depth_pixel_format,
+                        raster_key, blend_controls, color_write_mask);
+  auto it = render_pipeline_states_.find(key);
+  if (it != render_pipeline_states_.end()) {
+    return it->second;
+  }
+  MTLRenderPipelineDescriptor* desc =
+      (__bridge_transfer MTLRenderPipelineDescriptor*)
+          NewRenderPipelineDescriptor(vertex, pixel, color_pixel_formats,
+                                      depth_pixel_format, raster_key,
+                                      blend_controls, color_write_mask,
+                                      binary_archive_lookup_list_);
+  bool archive_stale = false;
+  void* state =
+      NewRenderPipelineState((__bridge void*)desc, key, &archive_stale);
+  if (archive_stale) {
+    archived_pipeline_keys_.erase(key);
+  }
+  void* state_ptr = AddRenderPipelineState(key, (__bridge void*)desc, state);
+  if (state_ptr) {
+    StorePipeline(vertex,
+                  pixel && pixel->has_metal_function() ? pixel : nullptr,
+                  color_pixel_formats, depth_pixel_format,
+                  raster_key.raster_sample_count, blend_controls,
+                  color_write_mask);
+  }
+  return state_ptr;
+}
 
+uint64_t MetalPipelineCache::RenderPipelineKey(
+    MetalShader::MetalTranslation* vertex,
+    MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
+    uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
+    const uint32_t* blend_controls, uint32_t color_write_mask) {
   // 3.2 — full pipeline identity, content-derived so it can back a durable
   // entry. Audit of every input that reaches the descriptor below:
   //   shader identities + modifications  -> vs / ps (MakeShaderKeyIdentity)
@@ -801,13 +1242,18 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
     key_bytes.colors[i] = color_pixel_formats[i];
     key_bytes.blends[i] = blend_controls[i];
   }
-  uint64_t key = XXH3_64bits(&key_bytes, sizeof(key_bytes));
-  auto it = render_pipeline_states_.find(key);
-  if (it != render_pipeline_states_.end()) {
-    return it->second;
-  }
+  return XXH3_64bits(&key_bytes, sizeof(key_bytes));
+}
 
-  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+void* MetalPipelineCache::NewRenderPipelineDescriptor(
+    MetalShader::MetalTranslation* vertex,
+    MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
+    uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
+    const uint32_t* blend_controls, uint32_t color_write_mask,
+    void* lookup_list) const {
+  const MetalShaderKeyIdentity vs = MakeShaderKeyIdentity(vertex);
+  const MetalShaderKeyIdentity ps = MakeShaderKeyIdentity(
+      pixel && pixel->has_metal_function() ? pixel : nullptr);
   MTLRenderPipelineDescriptor* desc =
       [[MTLRenderPipelineDescriptor alloc] init];
   desc.rasterSampleCount = raster_key.raster_sample_count;
@@ -817,15 +1263,15 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
   // state in the pipeline key.
   desc.alphaToCoverageEnabled = NO;
   // Guest shader identities in the pipeline label: Instruments' Shader
-  // Timeline attributes GPU samples to the pipeline label (every translated
-  // function is named "main"), which is the only per-shader GPU-time
+  // Timeline attributes GPU samples to the pipeline label (function names are
+  // DXIL hashes, not guest ucode hashes), which is the only per-shader GPU-time
   // attribution on Apple GPUs (no per-draw counter sampling).
   desc.label = [NSString
       stringWithFormat:@"xe vs=%016llX.%llX ps=%016llX.%llX s%u",
-                       (unsigned long long)key_bytes.vs.ucode_hash,
-                       (unsigned long long)key_bytes.vs.modification,
-                       (unsigned long long)key_bytes.ps.ucode_hash,
-                       (unsigned long long)key_bytes.ps.modification,
+                       (unsigned long long)vs.ucode_hash,
+                       (unsigned long long)vs.modification,
+                       (unsigned long long)ps.ucode_hash,
+                       (unsigned long long)ps.modification,
                        raster_key.raster_sample_count];
   desc.vertexFunction = (__bridge id<MTLFunction>)vertex->metal_function();
   if (pixel && pixel->has_metal_function()) {
@@ -853,29 +1299,800 @@ void* MetalPipelineCache::GetOrCreateRenderPipelineState(
       }
     }
   }
+  if (lookup_list) {
+    desc.binaryArchives = (__bridge NSArray*)lookup_list;
+  }
+  return (__bridge_retained void*)desc;
+}
 
+void* MetalPipelineCache::NewRenderPipelineState(
+    void* descriptor, uint64_t key, bool* archive_stale_out) const {
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  MTLRenderPipelineDescriptor* desc =
+      (__bridge MTLRenderPipelineDescriptor*)descriptor;
   NSError* error = nil;
   id<MTLRenderPipelineState> state = nil;
-  {
+  // M2 — a key already archived is looked up fail-fast, so a hit is provably
+  // served from the archive (not from the macOS shader cache, the confound
+  // that made the first M2 study measure nothing) and a stale entry costs one
+  // lookup before the cold build below.
+  if (binary_archive_lookup_list_ && archived_pipeline_keys_.count(key)) {
+    MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().pso);
+    state = [device
+        newRenderPipelineStateWithDescriptor:desc
+                                     options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                  reflection:nil
+                                       error:nil];
+    if (state) {
+      GetMetalShaderBuildCensus().archive_hits.fetch_add(
+          1, std::memory_order_relaxed);
+    } else {
+      timer.Dismiss();
+      GetMetalShaderBuildCensus().archive_stale.fetch_add(
+          1, std::memory_order_relaxed);
+      *archive_stale_out = true;
+    }
+  }
+  if (!state) {
     // Task 1.1 census: host pipeline-state creation, the cost M2 (the binary
     // archive) targets and the one the async stage would move off the frame
-    // path. Timed around the API call alone; descriptor assembly above is
-    // ours and is not what either mechanism removes.
+    // path. Timed around the API call alone; descriptor assembly is ours and
+    // is not what either mechanism removes.
     MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().pso);
     state = [device newRenderPipelineStateWithDescriptor:desc error:&error];
     if (!state) {
       timer.Dismiss();
+      XELOGE("MetalPipelineCache: newRenderPipelineState failed: {}",
+             error ? [[error localizedDescription] UTF8String] : "unknown");
+      return nullptr;
+    }
+  }
+  return (__bridge_retained void*)state;
+}
+
+void* MetalPipelineCache::AddRenderPipelineState(uint64_t key,
+                                                 void* descriptor,
+                                                 void* state_retained) {
+  id<MTLRenderPipelineState> state =
+      (__bridge_transfer id<MTLRenderPipelineState>)state_retained;
+  MTLRenderPipelineDescriptor* desc =
+      (__bridge MTLRenderPipelineDescriptor*)descriptor;
+  id<MTLBinaryArchive> archive = (__bridge id<MTLBinaryArchive>)binary_archive_;
+  // While compacting, archive hits are added again too (once per session), so
+  // the old segments they came from can be deleted at quit.
+  const bool compacting = !binary_archive_compacting_.empty();
+  if (state && archive && !storage_.admission_stopped() &&
+      (compacting ? !binary_archive_session_keys_.count(key)
+                  : !archived_pipeline_keys_.count(key))) {
+    MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().archive_add);
+    NSError* add_error = nil;
+    if ([archive addRenderPipelineFunctionsWithDescriptor:desc
+                                                     error:&add_error]) {
+      archived_pipeline_keys_.insert(key);
+      binary_archive_pending_keys_.push_back(key);
+      if (compacting) {
+        binary_archive_session_keys_.insert(key);
+      }
+    } else {
+      timer.Dismiss();
+      XELOGW("MetalPipelineCache: binary archive add failed: {}",
+             add_error ? [[add_error localizedDescription] UTF8String]
+                       : "unknown");
     }
   }
   if (!state) {
-    XELOGE("MetalPipelineCache: newRenderPipelineState failed: {}",
-           error ? [[error localizedDescription] UTF8String] : "unknown");
     render_pipeline_states_.emplace(key, nullptr);
     return nullptr;
   }
   void* state_ptr = (__bridge_retained void*)state;
   render_pipeline_states_.emplace(key, state_ptr);
   return state_ptr;
+}
+
+bool MetalPipelineCache::AsyncPipelinesEnabled() {
+  // XE_METAL_ASYNC_PIPELINES=0/1 overrides the cvar.
+  static const int s_env = [] {
+    const char* v = std::getenv("XE_METAL_ASYNC_PIPELINES");
+    return v && (v[0] == '0' || v[0] == '1') && !v[1] ? v[0] - '0' : -1;
+  }();
+  return s_env >= 0 ? s_env == 1 : cvars::metal_async_pipelines;
+}
+
+uint64_t MetalPipelineCache::AsyncPipelineKey(
+    MetalShader::MetalTranslation* vertex,
+    MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
+    uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
+    const uint32_t* blend_controls, uint32_t color_write_mask) {
+  struct KeyBytes {
+    MetalShaderKeyIdentity vs;
+    MetalShaderKeyIdentity ps;
+    uint64_t colors[xenos::kMaxColorRenderTargets];
+    uint64_t depth;
+    uint32_t sample_count;
+    uint32_t blends[xenos::kMaxColorRenderTargets];
+    uint32_t write_mask;
+    uint32_t pad;
+  } key_bytes = {};
+  // The pixel translation's identity whether or not it has translated yet:
+  // RenderPipelineKey folds a pixel shader without a function into the
+  // depth-only key, which is only known afterwards.
+  key_bytes.vs = MakeShaderKeyIdentity(vertex);
+  key_bytes.ps = MakeShaderKeyIdentity(pixel);
+  key_bytes.depth = depth_pixel_format;
+  key_bytes.sample_count = raster_key.raster_sample_count;
+  key_bytes.write_mask = color_write_mask;
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    key_bytes.colors[i] = color_pixel_formats[i];
+    key_bytes.blends[i] = blend_controls[i];
+  }
+  return XXH3_64bits(&key_bytes, sizeof(key_bytes));
+}
+
+MetalPipelineCache::AsyncPipelineStatus
+MetalPipelineCache::GetRenderPipelineStateAsync(
+    MetalShader::MetalTranslation* vertex,
+    MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
+    uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
+    const uint32_t* blend_controls, uint32_t color_write_mask,
+    bool stand_in_allowed, bool may_defer, void** pipeline_out,
+    MetalShader::MetalTranslation** pixel_out,
+    std::shared_ptr<void>* deferred_out) {
+  *pipeline_out = nullptr;
+  *pixel_out = nullptr;
+  deferred_out->reset();
+  DrainAsyncPipelines();
+  auto from_key = [&](uint64_t key, MetalShader::MetalTranslation* pixel_used) {
+    auto it = render_pipeline_states_.find(key);
+    if (it == render_pipeline_states_.end() || !it->second) {
+      return AsyncPipelineStatus::kFailed;
+    }
+    *pipeline_out = it->second;
+    *pixel_out = pixel_used;
+    return AsyncPipelineStatus::kReady;
+  };
+  const uint64_t async_key =
+      AsyncPipelineKey(vertex, pixel, color_pixel_formats, depth_pixel_format,
+                       raster_key, blend_controls, color_write_mask);
+  {
+    auto it = async_results_.find(async_key);
+    if (it != async_results_.end()) {
+      return it->second.key ? from_key(it->second.key, it->second.pixel_used)
+                            : AsyncPipelineStatus::kFailed;
+    }
+  }
+  auto defer = [&](const std::shared_ptr<AsyncPipelineJob>& job) {
+    *pixel_out = job->pixel_used;
+    *deferred_out = job;
+    GetMetalShaderBuildCensus().deferred_pipelines.fetch_add(
+        1, std::memory_order_relaxed);
+    return AsyncPipelineStatus::kDeferred;
+  };
+  auto new_job = [&]() {
+    auto job = std::make_shared<AsyncPipelineJob>();
+    job->vertex = vertex;
+    job->pixel = pixel;
+    std::memcpy(job->color_formats, color_pixel_formats,
+                sizeof(job->color_formats));
+    job->depth_format = depth_pixel_format;
+    job->raster_key = raster_key;
+    std::memcpy(job->blend_controls, blend_controls,
+                sizeof(job->blend_controls));
+    job->color_write_mask = color_write_mask;
+    job->async_key = async_key;
+    // The lookup list is replaced on the GPU thread when the archive is
+    // saved; the worker keeps this one.
+    job->lookup_list =
+        binary_archive_lookup_list_
+            ? (__bridge_retained void*)(__bridge NSArray*)
+                  binary_archive_lookup_list_
+            : nullptr;
+    return job;
+  };
+  auto pending = async_pending_.find(async_key);
+  if (pending != async_pending_.end()) {
+    if (stand_in_allowed) {
+      return AsyncPipelineStatus::kPending;
+    }
+    if (may_defer && pending->second->deferred) {
+      return defer(pending->second);
+    }
+    // A draw that may not use a stand-in waits for the queued build.
+    std::shared_ptr<AsyncPipelineJob> job = pending->second;
+    {
+      std::unique_lock<std::mutex> lock(async_mutex_);
+      async_done_cv_.wait(lock, [&]() { return job->done; });
+    }
+    DrainAsyncPipelines();
+    auto it = async_results_.find(async_key);
+    return it != async_results_.end() && it->second.key
+               ? from_key(it->second.key, it->second.pixel_used)
+               : AsyncPipelineStatus::kFailed;
+  }
+  const bool translated =
+      vertex->is_translated() && (!pixel || pixel->is_translated());
+  if (!translated || stand_in_allowed) {
+    if (translated) {
+      MetalShader::MetalTranslation* pixel_used =
+          pixel && pixel->has_metal_function() ? pixel : nullptr;
+      if (!vertex->has_metal_function()) {
+        return AsyncPipelineStatus::kFailed;
+      }
+      const uint64_t key =
+          RenderPipelineKey(vertex, pixel_used, color_pixel_formats,
+                            depth_pixel_format, raster_key, blend_controls,
+                            color_write_mask);
+      if (render_pipeline_states_.count(key)) {
+        return from_key(key, pixel_used);
+      }
+    }
+    if (stand_in_allowed) {
+      std::shared_ptr<AsyncPipelineJob> job = new_job();
+      StartAsyncPipelineWorkers();
+      async_pending_.emplace(async_key, job);
+      {
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        async_queue_.push_back(job);
+      }
+      async_queue_cv_.notify_one();
+      return AsyncPipelineStatus::kPending;
+    }
+  }
+  // Synchronous, as GetOrCreateRenderPipelineState's callers did, or with
+  // only the translation synchronous when the state may be deferred.
+  if (!TranslateShader(*vertex)) {
+    return AsyncPipelineStatus::kFailed;
+  }
+  MetalShader::MetalTranslation* pixel_used =
+      pixel && TranslateShader(*pixel) ? pixel : nullptr;
+  if (may_defer) {
+    const uint64_t key =
+        RenderPipelineKey(vertex, pixel_used, color_pixel_formats,
+                          depth_pixel_format, raster_key, blend_controls,
+                          color_write_mask);
+    if (render_pipeline_states_.count(key)) {
+      return from_key(key, pixel_used);
+    }
+    std::shared_ptr<AsyncPipelineJob> job = new_job();
+    job->deferred = true;
+    job->cache = this;
+    job->pixel_used = pixel_used;
+    StartAsyncPipelineWorkers();
+    async_pending_.emplace(async_key, job);
+    {
+      // Ahead of stand-in builds: the encoder thread will wait for it.
+      std::lock_guard<std::mutex> lock(async_mutex_);
+      async_queue_.push_front(job);
+    }
+    async_queue_cv_.notify_one();
+    return defer(job);
+  }
+  void* state = GetOrCreateRenderPipelineState(
+      vertex, pixel_used, color_pixel_formats, depth_pixel_format, raster_key,
+      blend_controls, color_write_mask);
+  if (!state) {
+    return AsyncPipelineStatus::kFailed;
+  }
+  *pipeline_out = state;
+  *pixel_out = pixel_used;
+  return AsyncPipelineStatus::kReady;
+}
+
+MetalPipelineCache::AsyncPipelineJob::~AsyncPipelineJob() {
+  if (deferred_state) {
+    CFRelease(deferred_state);
+  }
+}
+
+void* MetalPipelineCache::ResolveDeferredPipeline(void* request) {
+  auto* job = static_cast<AsyncPipelineJob*>(request);
+  MetalPipelineCache& cache = *job->cache;
+  void* state;
+  {
+    std::unique_lock<std::mutex> lock(cache.async_mutex_);
+    if (!job->done && !cache.async_stop_) {
+      const auto start = std::chrono::steady_clock::now();
+      cache.async_done_cv_.wait(
+          lock, [&]() { return job->done || cache.async_stop_; });
+      GetMetalShaderBuildCensus().RecordDeferredWait(uint64_t(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - start)
+              .count()));
+    }
+    state = job->deferred_state;
+  }
+  if (state) {
+    CFRetain(state);
+  }
+  return state;
+}
+
+void MetalPipelineCache::DrainAsyncPipelines() {
+  std::vector<std::shared_ptr<AsyncPipelineJob>> done;
+  {
+    std::lock_guard<std::mutex> lock(async_mutex_);
+    if (async_done_.empty()) {
+      return;
+    }
+    done.swap(async_done_);
+  }
+  for (const std::shared_ptr<AsyncPipelineJob>& job : done) {
+    MTLRenderPipelineDescriptor* desc =
+        (__bridge_transfer MTLRenderPipelineDescriptor*)job->descriptor;
+    job->descriptor = nullptr;
+    if (job->lookup_list) {
+      NSArray* list = (__bridge_transfer NSArray*)job->lookup_list;
+      (void)list;
+      job->lookup_list = nullptr;
+    }
+    AsyncPipelineResult result = {0, nullptr};
+    if (job->vertex_ok && desc) {
+      if (render_pipeline_states_.count(job->key)) {
+        // Built synchronously meanwhile.
+        if (job->state) {
+          id<MTLRenderPipelineState> state =
+              (__bridge_transfer id<MTLRenderPipelineState>)job->state;
+          (void)state;
+        }
+      } else if (AddRenderPipelineState(job->key, (__bridge void*)desc,
+                                        job->state)) {
+        StorePipeline(job->vertex, job->pixel_used, job->color_formats,
+                      job->depth_format, job->raster_key.raster_sample_count,
+                      job->blend_controls, job->color_write_mask);
+      }
+      job->state = nullptr;
+      result = {job->key, job->pixel_used};
+    }
+    async_results_[job->async_key] = result;
+    async_pending_.erase(job->async_key);
+  }
+}
+
+void MetalPipelineCache::StartAsyncPipelineWorkers() {
+  if (!async_workers_.empty()) {
+    return;
+  }
+  // XE_METAL_ASYNC_PIPELINE_THREADS=<n>. Default a third of the logical
+  // processors (at least 2): the guest keeps running, and a pipeline-state
+  // build mostly waits on the Metal compiler service.
+  static const uint32_t s_count = [] {
+    if (const char* v = std::getenv("XE_METAL_ASYNC_PIPELINE_THREADS")) {
+      const long n = std::strtol(v, nullptr, 10);
+      if (n > 0) {
+        return uint32_t(n);
+      }
+    }
+    return std::max(xe::threading::logical_processor_count() / 3,
+                    uint32_t(2));
+  }();
+  async_stop_ = false;
+  for (uint32_t i = 0; i < s_count; ++i) {
+    xe::threading::Thread::CreationParameters params;
+    params.qos_class = 1;  // user_initiated
+    auto thread =
+        xe::threading::Thread::Create(params, [this]() { AsyncPipelineWorker(); });
+    if (!thread) {
+      break;
+    }
+    thread->set_name("Metal Async Pipelines");
+    async_workers_.push_back(std::move(thread));
+  }
+  XELOGI("MetalPipelineCache: {} background pipeline threads",
+         async_workers_.size());
+}
+
+void MetalPipelineCache::StopAsyncPipelineWorkers() {
+  if (async_workers_.empty()) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(async_mutex_);
+    async_stop_ = true;
+  }
+  async_queue_cv_.notify_all();
+  // A deferred request still queued resolves to null (draws skipped).
+  async_done_cv_.notify_all();
+  for (auto& thread : async_workers_) {
+    xe::threading::Wait(thread.get(), false);
+  }
+  async_workers_.clear();
+  // Jobs never started: nothing to release but their lookup lists.
+  for (const std::shared_ptr<AsyncPipelineJob>& job : async_queue_) {
+    if (job->lookup_list) {
+      NSArray* list = (__bridge_transfer NSArray*)job->lookup_list;
+      (void)list;
+      job->lookup_list = nullptr;
+    }
+  }
+  async_queue_.clear();
+  DrainAsyncPipelines();
+  async_pending_.clear();
+}
+
+void MetalPipelineCache::AsyncPipelineWorker() {
+  MetalShaderBuildCensus::AsyncBuildThread() = true;
+  std::unique_ptr<DxbcShaderTranslator> translator = CreateShaderTranslator();
+  MetalShaderConverter metal_converter;
+  const bool converter_ok = metal_converter.Initialize(
+      MetalTranslatorConfig::kMscBindlessResourcesUsed);
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  while (true) {
+    std::shared_ptr<AsyncPipelineJob> job;
+    {
+      std::unique_lock<std::mutex> lock(async_mutex_);
+      async_queue_cv_.wait(lock,
+                           [&]() { return async_stop_ || !async_queue_.empty(); });
+      if (async_stop_) {
+        return;
+      }
+      job = async_queue_.front();
+      async_queue_.pop_front();
+    }
+    @autoreleasepool {
+      job->vertex_ok =
+          converter_ok &&
+          TranslateShader(*job->vertex, *translator, metal_converter);
+      if (job->vertex_ok && !job->deferred) {
+        // A deferred request's pixel shader is translated already, and the
+        // command processor reads pixel_used.
+        job->pixel_used =
+            job->pixel &&
+                    TranslateShader(*job->pixel, *translator, metal_converter)
+                ? job->pixel
+                : nullptr;
+      }
+      if (job->vertex_ok) {
+        job->key = RenderPipelineKey(
+            job->vertex, job->pixel_used, job->color_formats,
+            job->depth_format, job->raster_key, job->blend_controls,
+            job->color_write_mask);
+        job->descriptor = NewRenderPipelineDescriptor(
+            job->vertex, job->pixel_used, job->color_formats,
+            job->depth_format, job->raster_key, job->blend_controls,
+            job->color_write_mask, job->lookup_list);
+        MTLRenderPipelineDescriptor* desc =
+            (__bridge MTLRenderPipelineDescriptor*)job->descriptor;
+        MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().pso);
+        NSError* error = nil;
+        id<MTLRenderPipelineState> state =
+            [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (state) {
+          job->state = (__bridge_retained void*)state;
+          if (job->deferred) {
+            job->deferred_state = (__bridge_retained void*)state;
+          }
+        } else {
+          timer.Dismiss();
+          XELOGE("MetalPipelineCache: background newRenderPipelineState "
+                 "failed: {}",
+                 error ? [[error localizedDescription] UTF8String] : "unknown");
+        }
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(async_mutex_);
+      job->done = true;
+      async_done_.push_back(job);
+    }
+    async_done_cv_.notify_all();
+  }
+}
+
+void MetalPipelineCache::StorePipeline(MetalShader::MetalTranslation* vertex,
+                                       MetalShader::MetalTranslation* pixel,
+                                       const uint64_t* color_pixel_formats,
+                                       uint64_t depth_pixel_format,
+                                       uint32_t sample_count,
+                                       const uint32_t* blend_controls,
+                                       uint32_t color_write_mask) {
+  if (shader_storage_replaying_ || !shader_storage_.is_active()) {
+    return;
+  }
+  PipelineStoredDescription stored;
+  std::memset(&stored, 0, sizeof(stored));
+  StoredPipelineDescription& description = stored.description;
+  auto& vertex_shader = static_cast<MetalShader&>(vertex->shader());
+  description.vertex_shader_hash = vertex_shader.ucode_data_hash();
+  description.vertex_shader_modification = vertex->modification();
+  MetalShader* pixel_shader = nullptr;
+  if (pixel) {
+    pixel_shader = &static_cast<MetalShader&>(pixel->shader());
+    DxbcShaderTranslator::Modification modification(pixel->modification());
+    if (const MetalShader::FetchPattern* pattern =
+            pixel_shader->GetFetchPattern(
+                modification.pixel.fetch_plain_pattern)) {
+      std::memcpy(&description.pixel_fetch_pattern, pattern,
+                  sizeof(description.pixel_fetch_pattern));
+    }
+    modification.pixel.fetch_plain_pattern = 0;
+    description.pixel_shader_hash = pixel_shader->ucode_data_hash();
+    description.pixel_shader_modification = modification.value;
+  }
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    description.color_formats[i] = color_pixel_formats[i];
+    description.blend_controls[i] = blend_controls[i];
+  }
+  description.depth_format = depth_pixel_format;
+  description.sample_count = sample_count;
+  description.color_write_mask = color_write_mask;
+  stored.description_hash = XXH3_64bits(&description, sizeof(description));
+  const uint32_t storage_index = shader_storage_.storage_index();
+  for (MetalShader* shader : {&vertex_shader, pixel_shader}) {
+    if (shader && shader->ucode_storage_index() != storage_index) {
+      shader->set_ucode_storage_index(storage_index);
+      shader_storage_.QueueShaderWrite(shader);
+      shader_storage_flush_shaders_ = true;
+    }
+  }
+  shader_storage_.QueuePipelineWrite(stored);
+  shader_storage_flush_pipelines_ = true;
+}
+
+void MetalPipelineCache::InitializeShaderStorage(
+    const std::filesystem::path& cache_root, uint32_t title_id) {
+  ShutdownShaderStorage();
+  static const bool s_enabled = metal::ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_SHADER_STORAGE"), true);
+  if (!s_enabled) {
+    return;
+  }
+  ShaderStorageWriter<PipelineStoredDescription>::PipelineStorageConfig config;
+  // Not ".metal.xpso": Xenia Edge's Metal backend writes that name in the
+  // same storage root with a different record.
+  config.file_suffix = ".msc.metal.xpso";
+  config.api_magic = 0x4C544D58;  // 'XMTL'
+  config.version = std::max(StoredPipelineDescription::kVersion,
+                            DxbcShaderTranslator::Modification::kVersion);
+  const uint32_t storage_index = shader_storage_.storage_index() + 1;
+  const auto start = std::chrono::steady_clock::now();
+  std::vector<PipelineStoredDescription> stored_descriptions;
+  if (!shader_storage_.InitializeShaderStorage(
+          cache_root, title_id, config,
+          [&](xenos::ShaderType type, const uint32_t* ucode_dwords,
+              uint32_t ucode_dword_count, uint64_t ucode_data_hash) {
+            if (MetalShader* shader =
+                    LoadShader(type, ucode_dwords, ucode_dword_count)) {
+              shader->set_ucode_storage_index(storage_index);
+            }
+            return true;
+          },
+          nullptr, stored_descriptions)) {
+    return;
+  }
+  // Rebuild every stored pipeline. Each shader and pipeline goes through the
+  // same cache-aware path a draw takes, so with warm caches this is metallib
+  // and binary archive hits; after a translator change it is the compile the
+  // session would otherwise do during play.
+  //
+  // That compile is spread over several threads: on one, Mafia II's 1314
+  // pipelines took 39 s of loading on the M1 Max, three quarters of it
+  // pipeline-state creation and the rest DXBC -> DXIL -> metallib. Everything
+  // that changes the shaders, the caches or the binary archive stays on this
+  // thread, before and after each parallel part.
+  shader_storage_replaying_ = true;
+  // XE_METAL_SHADER_STORAGE_THREADS=<n>: threads, this one included (1 = this
+  // thread alone). Default 3/4 of the logical processors, as Vulkan does.
+  static const uint32_t s_thread_count = [] {
+    if (const char* value = std::getenv("XE_METAL_SHADER_STORAGE_THREADS")) {
+      const long count = std::strtol(value, nullptr, 10);
+      if (count > 0) {
+        return uint32_t(count);
+      }
+    }
+    return std::max(xe::threading::logical_processor_count() * 3 / 4,
+                    uint32_t(1));
+  }();
+  StringBuffer ucode_disasm;
+  auto find_shader = [&](uint64_t hash) -> MetalShader* {
+    auto it = shaders_.find(hash);
+    if (it == shaders_.end()) {
+      return nullptr;
+    }
+    MetalShader* shader = it->second;
+    if (!shader->is_ucode_analyzed()) {
+      shader->AnalyzeUcode(ucode_disasm);
+    }
+    return shader;
+  };
+  struct ReplayPipeline {
+    const StoredPipelineDescription* description;
+    MetalShader::MetalTranslation* vertex;
+    MetalShader::MetalTranslation* pixel;
+    uint64_t key = 0;
+    MTLRenderPipelineDescriptor* descriptor = nil;
+    void* state = nullptr;  // Retained until AddRenderPipelineState.
+    bool archive_stale = false;
+  };
+  std::vector<ReplayPipeline> pipelines;
+  pipelines.reserve(stored_descriptions.size());
+  std::vector<MetalShader::MetalTranslation*> translations;
+  std::unordered_set<MetalShader::MetalTranslation*> translations_queued;
+  auto queue_translation = [&](MetalShader::MetalTranslation* translation) {
+    if (!translation->is_translated() &&
+        translations_queued.insert(translation).second) {
+      translations.push_back(translation);
+    }
+  };
+  size_t built = 0, missing_shader = 0, failed = 0;
+  for (const PipelineStoredDescription& stored : stored_descriptions) {
+    const StoredPipelineDescription& description = stored.description;
+    MetalShader* vertex_shader = find_shader(description.vertex_shader_hash);
+    MetalShader* pixel_shader =
+        description.pixel_shader_hash
+            ? find_shader(description.pixel_shader_hash)
+            : nullptr;
+    if (!vertex_shader || (description.pixel_shader_hash && !pixel_shader)) {
+      ++missing_shader;
+      continue;
+    }
+    auto* vertex = static_cast<MetalShader::MetalTranslation*>(
+        vertex_shader->GetOrCreateTranslation(
+            description.vertex_shader_modification));
+    queue_translation(vertex);
+    MetalShader::MetalTranslation* pixel = nullptr;
+    if (pixel_shader) {
+      DxbcShaderTranslator::Modification modification(
+          description.pixel_shader_modification);
+      if (description.pixel_fetch_pattern.fetch_mask) {
+        // 0 when the shader's pattern table is full: the fully dynamic
+        // translation, as a draw would get.
+        modification.pixel.fetch_plain_pattern =
+            pixel_shader->FindOrAddFetchPattern(
+                description.pixel_fetch_pattern);
+      }
+      pixel = static_cast<MetalShader::MetalTranslation*>(
+          pixel_shader->GetOrCreateTranslation(modification.value));
+      queue_translation(pixel);
+    }
+    ReplayPipeline& pipeline = pipelines.emplace_back();
+    pipeline.description = &description;
+    pipeline.vertex = vertex;
+    pipeline.pixel = pixel;
+  }
+
+  // Translation: a translator and a Metal Shader Converter per thread.
+  struct TranslationWorker {
+    std::unique_ptr<DxbcShaderTranslator> translator;
+    std::unique_ptr<MetalShaderConverter> metal_converter;
+  };
+  std::vector<TranslationWorker> translation_workers(
+      std::min(size_t(s_thread_count), translations.size()));
+  for (size_t i = 1; i < translation_workers.size(); ++i) {
+    TranslationWorker& worker = translation_workers[i];
+    worker.translator = CreateShaderTranslator();
+    worker.metal_converter = std::make_unique<MetalShaderConverter>();
+    if (!worker.metal_converter->Initialize(
+            MetalTranslatorConfig::kMscBindlessResourcesUsed)) {
+      translation_workers.resize(i);
+      break;
+    }
+  }
+  RunShaderStorageWorkers(
+      translations.size(), uint32_t(translation_workers.size()),
+      [&](uint32_t worker_index, size_t item) {
+        @autoreleasepool {
+          TranslationWorker& worker = translation_workers[worker_index];
+          if (worker.translator) {
+            TranslateShader(*translations[item], *worker.translator,
+                            *worker.metal_converter);
+          } else {
+            TranslateShader(*translations[item]);
+          }
+        }
+      });
+
+  // Pipeline states, for the pipelines whose shaders translated and that are
+  // not cached already (two descriptions can make one pipeline).
+  auto translated = [](const MetalShader::MetalTranslation* translation) {
+    return translation->is_translated() && translation->is_valid() &&
+           translation->has_metal_function();
+  };
+  std::vector<size_t> creations;
+  std::unordered_set<uint64_t> keys_queued;
+  for (size_t i = 0; i < pipelines.size(); ++i) {
+    ReplayPipeline& pipeline = pipelines[i];
+    const StoredPipelineDescription& description = *pipeline.description;
+    if (!translated(pipeline.vertex) ||
+        (pipeline.pixel && !translated(pipeline.pixel))) {
+      continue;
+    }
+    pipeline.key = RenderPipelineKey(
+        pipeline.vertex, pipeline.pixel, description.color_formats,
+        description.depth_format, {description.sample_count},
+        description.blend_controls, description.color_write_mask);
+    if (!render_pipeline_states_.count(pipeline.key) &&
+        keys_queued.insert(pipeline.key).second) {
+      creations.push_back(i);
+    }
+  }
+  RunShaderStorageWorkers(
+      creations.size(), s_thread_count, [&](uint32_t, size_t item) {
+        @autoreleasepool {
+          ReplayPipeline& pipeline = pipelines[creations[item]];
+          const StoredPipelineDescription& description = *pipeline.description;
+          pipeline.descriptor = (__bridge_transfer MTLRenderPipelineDescriptor*)
+              NewRenderPipelineDescriptor(
+                  pipeline.vertex, pipeline.pixel, description.color_formats,
+                  description.depth_format, {description.sample_count},
+                  description.blend_controls, description.color_write_mask,
+                  binary_archive_lookup_list_);
+          pipeline.state = NewRenderPipelineState(
+              (__bridge void*)pipeline.descriptor, pipeline.key,
+              &pipeline.archive_stale);
+        }
+      });
+  for (size_t i : creations) {
+    ReplayPipeline& pipeline = pipelines[i];
+    if (pipeline.archive_stale) {
+      archived_pipeline_keys_.erase(pipeline.key);
+    }
+    AddRenderPipelineState(pipeline.key, (__bridge void*)pipeline.descriptor,
+                           pipeline.state);
+    pipeline.descriptor = nil;
+  }
+  for (const ReplayPipeline& pipeline : pipelines) {
+    auto it = pipeline.key ? render_pipeline_states_.find(pipeline.key)
+                           : render_pipeline_states_.end();
+    if (it != render_pipeline_states_.end() && it->second) {
+      ++built;
+    } else {
+      ++failed;
+    }
+  }
+  shader_storage_replaying_ = false;
+  XELOGI(
+      "MetalPipelineCache: shader storage rebuilt {} of {} pipelines in {} ms "
+      "({} missing a shader, {} failed; {} shaders translated, {} pipeline "
+      "states created, {} threads)",
+      built, stored_descriptions.size(),
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count(),
+      missing_shader, failed, translations.size(), creations.size(),
+      s_thread_count);
+}
+
+void MetalPipelineCache::RunShaderStorageWorkers(
+    size_t item_count, uint32_t worker_count,
+    const std::function<void(uint32_t worker, size_t item)>& work) {
+  std::atomic<size_t> next_item{0};
+  auto run = [&](uint32_t worker) {
+    for (size_t item; (item = next_item.fetch_add(1)) < item_count;) {
+      work(worker, item);
+    }
+  };
+  std::vector<std::unique_ptr<xe::threading::Thread>> threads;
+  const uint32_t thread_count =
+      uint32_t(std::min(size_t(std::max(worker_count, uint32_t(1))),
+                        std::max(item_count, size_t(1))));
+  for (uint32_t worker = 1; worker < thread_count; ++worker) {
+    xe::threading::Thread::CreationParameters params;
+    params.qos_class = 1;  // user_initiated: the player is waiting on it.
+    auto thread = xe::threading::Thread::Create(
+        params, [&run, worker]() { run(worker); });
+    if (!thread) {
+      break;
+    }
+    thread->set_name("Metal Pipelines");
+    threads.push_back(std::move(thread));
+  }
+  run(0);
+  for (auto& thread : threads) {
+    xe::threading::Wait(thread.get(), false);
+  }
+}
+
+void MetalPipelineCache::ShutdownShaderStorage() {
+  FlushShaderStorage();
+  shader_storage_.ShutdownShaderStorage();
+}
+
+void MetalPipelineCache::FlushShaderStorage() {
+  if (shader_storage_flush_shaders_ || shader_storage_flush_pipelines_) {
+    shader_storage_.RequestFlush(shader_storage_flush_shaders_,
+                                 shader_storage_flush_pipelines_);
+    shader_storage_flush_shaders_ = false;
+    shader_storage_flush_pipelines_ = false;
+  }
 }
 
 void* MetalPipelineCache::NewLibraryFromBytes(const std::vector<uint8_t>& bytes,

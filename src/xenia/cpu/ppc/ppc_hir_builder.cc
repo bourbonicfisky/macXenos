@@ -10,7 +10,11 @@
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 
 #include <stddef.h>
+#include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <vector>
 
 #include "third_party/fmt/include/fmt/format.h"
 
@@ -173,6 +177,7 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     }
 
     MaybeBreakOnInstruction(address);
+    MaybeProbeInstruction(address);
 
     InstrData i;
     i.address = address;
@@ -197,6 +202,34 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
   }
 
   return Finalize();
+}
+
+void PPCHIRBuilder::MaybeProbeInstruction(uint32_t address) {
+  static const std::vector<uint32_t> s_pcs = [] {
+    std::vector<uint32_t> pcs;
+    const std::string& list = cvars::guest_probe_pcs;
+    size_t pos = 0;
+    while (pos < list.size()) {
+      size_t end = list.find(',', pos);
+      if (end == std::string::npos) {
+        end = list.size();
+      }
+      const std::string item = list.substr(pos, end - pos);
+      if (!item.empty()) {
+        pcs.push_back(uint32_t(std::strtoul(item.c_str(), nullptr, 16)));
+      }
+      pos = end + 1;
+    }
+    return pcs;
+  }();
+  if (s_pcs.empty() ||
+      std::find(s_pcs.begin(), s_pcs.end(), address) == s_pcs.end()) {
+    return;
+  }
+  Comment("--guest-probe-pcs target");
+  ContextBarrier();
+  StoreContext(offsetof(PPCContext, scratch), LoadConstantUint64(address));
+  CallExtern(builtins()->guest_probe);
 }
 
 void PPCHIRBuilder::MaybeBreakOnInstruction(uint32_t address) {

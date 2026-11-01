@@ -48,11 +48,17 @@ DEFINE_bool(metal_pipeline_metallib_cache, true,
             "95-96% of measured translation cost on a warm launch. Set to "
             "false for the exact rollback: no durable reads or writes.",
             "GPU");
-DEFINE_bool(metal_pipeline_binary_archive, false,
-            "Persist host pipeline state in an MTLBinaryArchive (M2). "
-            "Addresses the 1.7-47.5% the census attributed to "
-            "newRenderPipelineState. Default off until gated.",
+DEFINE_bool(metal_pipeline_binary_archive, true,
+            "Persist host render pipeline state in an MTLBinaryArchive (M2) "
+            "next to the metallib cache, so a later session does not pay "
+            "newRenderPipelineState again (the macOS shader cache does not "
+            "hold it once other titles have run). Set to false for the exact "
+            "rollback: no archive reads or writes.",
             "GPU");
+// Config migration for the promotion: resets only configs still holding the
+// old default (false). The flag shipped default-off for one day (53b2676f5),
+// so a false in a config is that default, not an opt-out.
+UPDATE_from_bool(metal_pipeline_binary_archive, 2026, 10, 27, 21, false);
 
 DEFINE_uint64(metal_pipeline_cache_title_cap_mib, 512,
               "Maximum durable Metal pipeline-cache size per title, in MiB. "
@@ -101,7 +107,7 @@ namespace {
 constexpr char kManifestName[] = "identity.manifest";
 constexpr char kLockName[] = ".lock";
 constexpr char kMetallibDirName[] = "metallib";
-constexpr char kBinaryArchiveName[] = "pipelines.metalar";
+constexpr char kBinaryArchiveName[] = "archive";
 constexpr uint32_t kManifestMagic = 0x584D5053u;  // 'XMPS'
 
 // On-disk manifest. Fixed layout; every field participates in the trust
@@ -589,10 +595,7 @@ void MetalPipelineStorage::LogSizeReport(const char* reason) const {
   std::error_code ec;
   uint64_t archive_bytes = 0;
   if (std::filesystem::exists(binary_archive_path(), ec) && !ec) {
-    archive_bytes = std::filesystem::file_size(binary_archive_path(), ec);
-    if (ec) {
-      archive_bytes = 0;
-    }
+    archive_bytes = DirectorySizeBytes(binary_archive_path());
   }
   const uint64_t total = metallib_bytes + archive_bytes;
   const double pct_of_cap =

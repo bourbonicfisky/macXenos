@@ -150,12 +150,6 @@ DEFINE_bool(
     "GPU");
 
 DEFINE_bool(
-    ac6_ground_fix, false,
-    "This fixes(hide) issues with black ground in AC6. Use only in AC6. "
-    "Might cause issues in other titles.",
-    "HACKS");
-
-DEFINE_bool(
     depth_float24_sample_z_varying, false,
     "With depth_float24_convert_in_pixel_shader: pass the NDC depth (z/w) "
     "from "

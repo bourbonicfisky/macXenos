@@ -7,7 +7,11 @@
  ******************************************************************************
  */
 
+#include <algorithm>
 #include <ranges>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "xenia/emulator.h"
 
@@ -34,6 +38,7 @@
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/backend/null_backend.h"
 #include "xenia/cpu/cpu_flags.h"
+#include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
@@ -1283,6 +1288,172 @@ const std::filesystem::path Emulator::GetNewDiscPath(
   return path;
 }
 
+namespace {
+
+// Return addresses from a guest thread's r1 back chain: each frame's word 0
+// points at the caller's frame, and the Xbox 360 compilers save LR at -8 from
+// the caller's frame before the stwu.
+std::vector<uint32_t> WalkGuestBackChain(Memory* memory, uint32_t r1,
+                                         uint32_t stack_low,
+                                         uint32_t stack_high,
+                                         size_t max_frames) {
+  std::vector<uint32_t> return_addresses;
+  uint32_t frame = r1;
+  while (return_addresses.size() < max_frames && frame >= stack_low &&
+         frame + 4 <= stack_high && !(frame & 3)) {
+    const uint32_t caller = *memory->TranslateVirtualBE<uint32_t>(frame);
+    if (caller <= frame || caller - 8 < stack_low || caller > stack_high) {
+      break;
+    }
+    return_addresses.push_back(
+        *memory->TranslateVirtualBE<uint32_t>(caller - 8));
+    frame = caller;
+  }
+  return return_addresses;
+}
+
+}  // namespace
+
+void Emulator::LogGuestThreadStates(std::string_view reason) {
+  if (!kernel_state_) {
+    return;
+  }
+  // Per guest thread: the call it is blocked in (lr, and r3/r4, which hold
+  // the handles for the Nt*Wait* exports), what those handles are, and the
+  // back chain. Two threads each waiting on the other's handle is a deadlock;
+  // spinning threads show their loop's callers.
+  auto threads =
+      kernel_state_->object_table()->GetObjectsByType<kernel::XThread>();
+  std::string msg = fmt::format("GuestThreadStates ({}): {} threads\n", reason,
+                                threads.size());
+  std::unordered_set<const kernel::XThread*> seen;
+  for (auto& thread : threads) {
+    // The object table lists a thread once per handle to it.
+    if (!thread->is_guest_thread() || !thread->thread_state() ||
+        !seen.insert(thread.get()).second) {
+      continue;
+    }
+    const cpu::ppc::PPCContext* ctx = thread->thread_state()->context();
+    msg.append(fmt::format(
+        "  {:08X} '{}' lr={:08X} r1={:08X} r3={:08X} r4={:08X} r5={:08X} "
+        "r6={:08X}",
+        thread->thread_id(), thread->thread_name_snapshot(), uint32_t(ctx->lr),
+        uint32_t(ctx->r[1]), uint32_t(ctx->r[3]), uint32_t(ctx->r[4]),
+        uint32_t(ctx->r[5]), uint32_t(ctx->r[6])));
+    auto readable = [&](uint32_t address, uint32_t length) {
+      BaseHeap* heap = address >= 0x10000 ? memory()->LookupHeap(address)
+                                          : nullptr;
+      uint32_t protect = 0;
+      return heap && heap->QueryProtect(address, &protect) &&
+             (protect & kMemoryProtectRead) &&
+             heap->QueryProtect(address + length - 1, &protect) &&
+             (protect & kMemoryProtectRead);
+    };
+    // A value is a handle (0xF8xxxxxx, Nt* waits) or a pointer to a guest
+    // dispatcher header (Ke* waits): type byte at +0, signal state at +4.
+    auto describe = [&](const char* label, uint32_t value) {
+      auto object =
+          value > 0xFFFF
+              ? kernel_state_->object_table()->LookupObject<kernel::XObject>(
+                    value)
+              : nullptr;
+      if (!object) {
+        if (value > 0xFFFF && !(value & 3) && readable(value, 16)) {
+          const auto* header =
+              memory()->TranslateVirtual<const kernel::X_DISPATCH_HEADER*>(
+                  value);
+          msg.append(fmt::format(" {}={:08X}:header{},signal={}", label,
+                                 value, header->type,
+                                 int32_t(header->signal_state)));
+          // The host object's handle lives in the wait list once the kernel
+          // has seen the header. The guest signal state is only read when that
+          // object is made, so a header without the signature that a thread
+          // still waits on was re-initialized under it (a lost wakeup).
+          if (header->wait_list.flink_ptr == kernel::kXObjSignature) {
+            msg.append(fmt::format(",host={:08X}",
+                                   uint32_t(header->wait_list.blink_ptr)));
+          } else {
+            msg.append(",host=none");
+          }
+        }
+        return;
+      }
+      msg.append(fmt::format(" {}={:08X}:type{}'{}'", label, value,
+                             uint32_t(object->type()), object->name()));
+      if (kernel::XObject::HasDispatcherHeader(object->type()) &&
+          object->guest_object()) {
+        msg.append(fmt::format(
+            ",signal={}", int32_t(*memory()->TranslateVirtualBE<uint32_t>(
+                              object->guest_object() + 4))));
+      }
+      if (object->type() == kernel::XObject::Type::Thread) {
+        msg.append(fmt::format(
+            ",tid={:08X}",
+            static_cast<kernel::XThread*>(object.get())->thread_id()));
+      }
+    };
+    describe("r3", uint32_t(ctx->r[3]));
+    describe("r4", uint32_t(ctx->r[4]));
+    // Wait-multiple calls pass a count in r3 and an array in r4 (handles for
+    // Nt*, dispatcher pointers for Ke*).
+    const uint32_t count = uint32_t(ctx->r[3]);
+    const uint32_t array = uint32_t(ctx->r[4]);
+    if (count && count <= 64 && !(array & 3) && readable(array, count * 4)) {
+      for (uint32_t i = 0; i < count; ++i) {
+        describe("[]",
+                 *memory()->TranslateVirtualBE<uint32_t>(array + i * 4));
+      }
+    }
+    // Spinning threads keep their loop state in callee-saved registers and
+    // the frame; r31 is usually the object being spun on.
+    msg.append(fmt::format("\n    r28={:08X} r29={:08X} r30={:08X} r31={:08X}",
+                           uint32_t(ctx->r[28]), uint32_t(ctx->r[29]),
+                           uint32_t(ctx->r[30]), uint32_t(ctx->r[31])));
+    auto words = [&](const char* label, uint32_t address) {
+      if (address <= 0xFFFF || (address & 3) || !readable(address, 0x40)) {
+        return;
+      }
+      msg.append(fmt::format(" {}@{:08X}:", label, address));
+      for (uint32_t i = 0; i < 0x40; i += 4) {
+        msg.append(fmt::format(
+            " {:08X}",
+            uint32_t(*memory()->TranslateVirtualBE<uint32_t>(address + i))));
+      }
+    };
+    msg.append("\n   ");
+    words("r31", uint32_t(ctx->r[31]));
+    msg.append("\n   ");
+    words("frame", uint32_t(ctx->r[1]) + 0x40);
+    msg.append("\n    stack");
+    for (uint32_t lr : WalkGuestBackChain(memory(), uint32_t(ctx->r[1]),
+                                          thread->stack_limit(),
+                                          thread->stack_base(), 16)) {
+      msg.append(fmt::format(" {:08X}", lr));
+    }
+    msg.append("\n");
+  }
+  if (!cvars::guest_probe_pcs.empty()) {
+    msg.append(cpu::ppc::FormatGuestProbes(16384));
+  }
+  // A log line is capped by the 64 KiB thread format buffer, so emit the dump
+  // in pieces split at line breaks.
+  constexpr size_t kChunk = 48 * 1024;
+  std::string_view rest(msg);
+  while (!rest.empty()) {
+    size_t n = rest.size();
+    if (n > kChunk) {
+      size_t nl = rest.rfind('\n', kChunk);
+      n = (nl == std::string_view::npos || !nl) ? kChunk : nl + 1;
+    }
+    std::string_view piece = rest.substr(0, n);
+    if (piece.back() == '\n') {
+      piece.remove_suffix(1);
+    }
+    XELOGW("{}", piece);
+    rest.remove_prefix(n);
+  }
+}
+
 bool Emulator::ExceptionCallbackThunk(Exception* ex, void* data) {
   return reinterpret_cast<Emulator*>(data)->ExceptionCallback(ex);
 }
@@ -1415,6 +1586,36 @@ bool Emulator::ExceptionCallback(Exception* ex) {
           gva, heap ? int(heap->heap_type()) : -1,
           heap ? heap->page_size() : 0u, qp, recorded, qh,
           static_cast<int>(haccess)));
+      // A fault in one physical window: report the same physical page in the
+      // parent physical heap and in every window, so a read through a window
+      // other than the allocating one is told apart from a read of freed or
+      // never-allocated physical memory.
+      if (gva >= 0xA0000000u) {
+        uint32_t phys = gva >= 0xE0000000u ? gva - 0xE0000000u + 0x1000u
+                                           : gva & 0x1FFFFFFFu;
+        auto describe = [&](const char* name, BaseHeap* h, uint32_t address) {
+          HeapAllocationInfo info = {};
+          if (!h || !h->QueryRegionInfo(address, &info)) {
+            crash_msg.append(fmt::format("  [diag] {} 0x{:08X}: no heap\n",
+                                         name, address));
+            return;
+          }
+          crash_msg.append(fmt::format(
+              "  [diag] {} 0x{:08X}: state=0x{:X} protect=0x{:X} "
+              "alloc_base=0x{:08X} alloc_size=0x{:X} region=0x{:08X}+0x{:X}\n",
+              name, address, info.state, info.protect, info.allocation_base,
+              info.allocation_size, info.base_address, info.region_size));
+        };
+        describe("parent", memory()->GetPhysicalHeap(), phys);
+        describe("A-window", memory()->LookupHeap(0xA0000000u + phys),
+                 0xA0000000u + phys);
+        describe("C-window", memory()->LookupHeap(0xC0000000u + phys),
+                 0xC0000000u + phys);
+        if (phys >= 0x1000u) {
+          describe("E-window", memory()->LookupHeap(0xE0000000u + phys - 0x1000u),
+                   0xE0000000u + phys - 0x1000u);
+        }
+      }
     }
   } else if (ex->code() == Exception::Code::kIllegalInstruction) {
     crash_msg.append("Illegal Instruction\n");
@@ -1444,6 +1645,43 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     }
   }
 #endif  // XE_PLATFORM_MAC
+  // Guest call stack from the r1 back chain. An exhausted stack (Mafia II's
+  // main thread, 256 KB) shows here as one or two return addresses repeated,
+  // which names the recursion; the counts at the end rank them.
+  if (current_thread->is_guest_thread()) {
+    const uint32_t stack_low = current_thread->stack_limit();
+    const uint32_t stack_high = current_thread->stack_base();
+    crash_msg.append(fmt::format("Guest stack {:08X}-{:08X}, r1={:08X}:\n",
+                                 stack_low, stack_high,
+                                 uint32_t(context->r[1])));
+    const std::vector<uint32_t> return_addresses =
+        WalkGuestBackChain(memory(), uint32_t(context->r[1]), stack_low,
+                           stack_high, 65536);
+    const size_t count = return_addresses.size();
+    for (size_t i = 0; i < count; ++i) {
+      if (i == 32 && count > 48) {
+        crash_msg.append(fmt::format("  ... {} frames ...\n", count - 48));
+        i = count - 16;
+      }
+      crash_msg.append(
+          fmt::format("  #{:<5} LR {:08X}\n", i, return_addresses[i]));
+    }
+    std::unordered_map<uint32_t, uint32_t> lr_counts;
+    for (uint32_t lr : return_addresses) {
+      ++lr_counts[lr];
+    }
+    std::vector<std::pair<uint32_t, uint32_t>> ranked(lr_counts.begin(),
+                                                      lr_counts.end());
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    crash_msg.append(fmt::format("  {} frames; most frequent return addresses:",
+                                 count));
+    for (size_t i = 0; i < ranked.size() && i < 8; ++i) {
+      crash_msg.append(
+          fmt::format(" {:08X}x{}", ranked[i].first, ranked[i].second));
+    }
+    crash_msg.append("\n");
+  }
   crash_msg.append("Registers:\n");
   for (int i = 0; i < 32; i++) {
     crash_msg.append(fmt::format(" r{:<3} = {:016X}\n", i, context->r[i]));

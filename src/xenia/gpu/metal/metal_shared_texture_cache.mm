@@ -93,6 +93,48 @@ static bool RouteViewCacheEnabled() {
   return s_enabled;
 }
 
+// The xe_resolve_forward_store kind a resolve can write this texture with:
+// single-level tiled 2D textures whose load is a plain copy of the guest
+// dwords (after the fetch endianness), else 0.
+uint32_t MetalSharedTextureCache::ResolveForwardKind(const TextureKey& key) {
+  if (key.dimension != xenos::DataDimension::k2DOrStacked ||
+      key.depth_or_array_size_minus_1 != 0 || key.mip_max_level != 0 ||
+      !key.tiled || key.scaled_resolve || key.signed_separate) {
+    return 0;
+  }
+  switch (key.format) {
+    case xenos::TextureFormat::k_8_8_8_8:
+      return 1;
+    case xenos::TextureFormat::k_16_16_16_16_FLOAT:
+      return 2;
+    case xenos::TextureFormat::k_32_FLOAT:
+      return 3;
+    default:
+      return 0;
+  }
+}
+
+namespace {
+// XE_METAL_RESOLVE_FORWARD_TRACE=<hex address>: every forwarding decision,
+// forward and load of the textures and destinations in the 8 MB from it.
+bool ResolveForwardTraced(uint32_t address) {
+  static const int64_t traced = [] {
+    const char* v = std::getenv("XE_METAL_RESOLVE_FORWARD_TRACE");
+    return v ? int64_t(strtoul(v, nullptr, 16)) : int64_t(-1);
+  }();
+  return traced >= 0 && address >= uint64_t(traced) &&
+         address < uint64_t(traced) + (8u << 20);
+}
+
+bool ResolveForwardEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_METAL_RESOLVE_FORWARD");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return enabled;
+}
+}  // namespace
+
 class MetalSharedTextureCache::MetalTexture final
     : public TextureCache::Texture {
  public:
@@ -119,9 +161,34 @@ class MetalSharedTextureCache::MetalTexture final
     SetHostMemoryUsage(bytes * (key.depth_or_array_size_minus_1 + 1));
     cache.census_host_bytes_ += GetHostMemoryUsage();
     ++cache.live_textures_;
+    if (ResolveForwardKind(key)) {
+      cache.forward_textures_.emplace(uint32_t(key.base_page) << 12, this);
+    }
+    if (ResolveForwardTraced(uint32_t(key.base_page) << 12)) {
+      XELOGI("MetalResolveForward CREATE base={:08X} fmt={} {}x{} pitch={} "
+             "mips={} tiled={} forwardable={}",
+             uint32_t(key.base_page) << 12, uint32_t(key.format),
+             key.GetWidth(), key.GetHeight(), key.pitch, key.mip_max_level,
+             uint32_t(key.tiled), ResolveForwardKind(key));
+    }
   }
   ~MetalTexture() override {
     auto& cache = static_cast<MetalSharedTextureCache&>(texture_cache());
+    if (ResolveForwardTraced(uint32_t(key().base_page) << 12)) {
+      XELOGI("MetalResolveForward DESTROY base={:08X} fmt={} {}x{}",
+             uint32_t(key().base_page) << 12, uint32_t(key().format),
+             key().GetWidth(), key().GetHeight());
+    }
+    if (ResolveForwardKind(key())) {
+      auto range =
+          cache.forward_textures_.equal_range(uint32_t(key().base_page) << 12);
+      for (auto it = range.first; it != range.second; ++it) {
+        if (it->second == this) {
+          cache.forward_textures_.erase(it);
+          break;
+        }
+      }
+    }
     ++cache.census_destroyed_;
     cache.census_host_bytes_ -= GetHostMemoryUsage();
     if (cache.live_textures_) {
@@ -144,6 +211,15 @@ class MetalSharedTextureCache::MetalTexture final
     // the load encoder referenced this texture directly and views bound in
     // descriptor slots retain it; destruction is LRU/completion-gated, but
     // the retire pool is the uniformly safe release point.
+    if (forward_view) {
+      if (cache.legacy_) {
+        cache.legacy_->RetireExternalTexture(forward_view);
+      } else {
+        id<MTLTexture> released =
+            (__bridge_transfer id<MTLTexture>)forward_view;
+        (void)released;
+      }
+    }
     if (cache.legacy_) {
       cache.legacy_->RetireExternalTexture(mtl_texture_);
     } else {
@@ -152,6 +228,9 @@ class MetalSharedTextureCache::MetalTexture final
     }
   }
   void* mtl_texture() const { return mtl_texture_; }
+  // Resolve forwarding: an unsigned integer view of the texture (retained),
+  // created on the first forward.
+  void* forward_view = nullptr;
 
   // Base and mip load provenance are tracked SEPARATELY so a later partial
   // reload of one region cannot hide an earlier faulted load of the other.
@@ -265,6 +344,7 @@ bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
   in.mip_max_level = key.mip_max_level;
   in.array_size = key.depth_or_array_size_minus_1 + 1;
   in.is_3d = key.dimension == xenos::DataDimension::k3D;
+  in.is_1d = key.dimension == xenos::DataDimension::k1D;
   in.guest_buffer_size = SharedMemory::kBufferSize;
   in.load_base = load_base;
   in.load_mips = load_mips;
@@ -272,6 +352,7 @@ bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
           FindSharedTextureFormat(key.format)) {
     in.bytes_per_block = entry->bytes_per_block;
     in.block_dim = SharedTextureBlockDim(*entry);
+    in.block_width = SharedTextureBlockWidth(*entry);
   }
   // The single planning authority (metal_mip_level_plan.h), shared with
   // conformance so production and tests can never diverge. The memo caches
@@ -285,7 +366,7 @@ bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
     // origin's rows included). Same conservative role: a surplus only adds a
     // flush.
     const SharedTextureFormatEntry* entry = FindSharedTextureFormat(key.format);
-    const uint32_t block_dim = entry ? SharedTextureBlockDim(*entry) : 1u;
+    const uint32_t block_dim = entry ? SharedTextureBlockHeight(*entry) : 1u;
     for (MipLevelPlan& p : *out) {
       const uint64_t rows =
           (uint64_t(p.py) + p.height + block_dim - 1u) / block_dim;
@@ -320,10 +401,18 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
   const bool volume = key.dimension == xenos::DataDimension::k3D &&
                       SharedRouteVolumeEnabled() && key.tiled &&
                       key.depth_or_array_size_minus_1 + 1 <= 2048;
+  // 1D (XE_METAL_TEX_ROUTE_1D): one linear row per level, created as a
+  // width x 1 2D texture and served through the same 2D-array view as 2D
+  // textures (the translator samples 1D fetches as 2D arrays). The row pitch
+  // addresses nothing for a single row, so a zero fetch pitch is accepted.
+  const bool one_d = key.dimension == xenos::DataDimension::k1D &&
+                     SharedRoute1DEnabled() && !key.tiled &&
+                     !key.packed_mips;
   if ((key.dimension != xenos::DataDimension::k2DOrStacked && !cube &&
-       !volume) ||
+       !volume && !one_d) ||
       (!key.tiled && !SharedRouteLinearEnabled()) ||
-      key.signed_separate || key.scaled_resolve || key.pitch == 0 ||
+      key.signed_separate || key.scaled_resolve ||
+      (key.pitch == 0 && !one_d) ||
       (key.depth_or_array_size_minus_1 != 0 && !SharedRouteStackedEnabled())) {
     return nullptr;
   }
@@ -493,6 +582,17 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     }
   }
 
+  if (ResolveForwardTraced(uint32_t(key.base_page) << 12)) {
+    XELOGI("MetalResolveForward LOAD base={:08X} fmt={} {}x{} loads={} "
+           "gpu_written={}",
+           uint32_t(key.base_page) << 12, uint32_t(key.format), key.GetWidth(),
+           key.GetHeight(), metal_texture.loads,
+           static_cast<MetalSharedMemory&>(shared_memory())
+                   .AnyPageGpuWritten(uint32_t(key.base_page) << 12,
+                                      texture.GetGuestBaseSize())
+               ? 1
+               : 0);
+  }
   // ---- Reload of an already-loaded texture: when the guest bytes of every
   // region to load still hash to what the last load read, there is nothing
   // to load (and no render pass to end). First loads go straight to the load.
@@ -543,7 +643,7 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     // The planner's exact range scan is the 32bpp tiled walk; for the other
     // block sizes register the conservative whole tiled extent of each level
     // (32-row aligned) as consumed. A superset can only add a hazard flush.
-    const uint32_t block_dim = SharedTextureBlockDim(*entry);
+    const uint32_t block_dim = SharedTextureBlockHeight(*entry);
     for (const MipLevelPlan& p : plan) {
       if (p.depth > 1) {
         continue;  // 3D: the plan's range is already the whole level
@@ -596,7 +696,7 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
              !metal_shared_memory.AnyStagedUploadPending(begin, len,
                                                          open_submission);
     };
-    const uint32_t block_dim = SharedTextureBlockDim(*entry);
+    const uint32_t block_dim = SharedTextureBlockHeight(*entry);
     for (const MipLevelPlan& p : plan) {
       if (!eligible) {
         break;
@@ -926,6 +1026,15 @@ bool MetalSharedTextureCache::RevalidateRegions(
   if ((load_base && metal_shared_memory.AnyPageGpuWritten(base, base_bytes)) ||
       (load_mips && metal_shared_memory.AnyPageGpuWritten(mips, mips_bytes))) {
     ++census_revalidate_gpu_skipped_;
+    // Attribution probe (frame output is wrong):
+    // XE_METAL_PROBE_SKIP_GPU_RELOAD=1 keeps the old content of textures
+    // reloaded over GPU-written pages, to size what serving them without a load
+    // could save.
+    static const bool s_probe_skip =
+        std::getenv("XE_METAL_PROBE_SKIP_GPU_RELOAD") != nullptr;
+    if (s_probe_skip) {
+      return true;
+    }
     // XE_METAL_REVAL_LOG=1: which textures reload over GPU-written pages
     // (bounded). A block-compressed texture here means the flag is wider
     // than the resolve that set it, or the title really resolves there.
@@ -1033,7 +1142,8 @@ void MetalSharedTextureCache::BeginFrame() {
     return;
   }
   const double f = double(census_frames_);
-  if (census_loads_base_ || census_loads_mips_ || census_revalidated_) {
+  if (census_loads_base_ || census_loads_mips_ || census_revalidated_ ||
+      census_forwarded_) {
     std::vector<std::pair<uint32_t, uint32_t>> ranked;
     for (const auto& kv : census_loads_by_format_) {
       ranked.emplace_back(kv.second, kv.first);
@@ -1050,7 +1160,8 @@ void MetalSharedTextureCache::BeginFrame() {
         "reloads {:.1f}, side {:.1f}, {:.2f} MB); destroyed {:.1f}/frame "
         "(slot budget {:.1f}), live {} MB in {} textures, slots {} of {} "
         "(free {}), served-stale {:.1f}/frame; revalidated {:.1f}/frame "
-        "(changed {:.1f}, gpu-written {:.1f}) in {:.2f} ms; top:{}",
+        "(changed {:.1f}, gpu-written {:.1f}) in {:.2f} ms; forwarded "
+        "{:.1f}/frame; top:{}",
         double(census_loads_base_ + census_loads_mips_) / f,
         double(census_loads_base_) / f, double(census_loads_mips_) / f,
         double(census_reloads_) / f, double(census_side_loads_) / f,
@@ -1065,11 +1176,13 @@ void MetalSharedTextureCache::BeginFrame() {
         double(census_revalidated_) / f,
         double(census_revalidate_changed_) / f,
         double(census_revalidate_gpu_skipped_) / f,
-        double(census_revalidate_ns_) / 1e6 / f, top);
+        double(census_revalidate_ns_) / 1e6 / f,
+        double(census_forwarded_) / f, top);
   }
   census_destroyed_ = 0;
   census_slot_destroyed_ = 0;
   census_side_loads_ = 0;
+  census_forwarded_ = 0;
   census_served_stale_ = 0;
   census_frames_ = 0;
   census_loads_base_ = 0;
@@ -1217,6 +1330,22 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
         wanted = "texture_load_depth_float_cs";
         load_shader_index = kLoadShaderIndexDepthFloat;
         break;
+      case SharedLoadFamily::kR5G5B6ToB5G6R5Rbga:
+        wanted = "texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs";
+        load_shader_index = kLoadShaderIndexR5G5B6ToB5G6R5WithRBGASwizzle;
+        break;
+      case SharedLoadFamily::kDxt3aAs1111ToAbgr4:
+        wanted = "texture_load_dxt3aas1111_argb4_cs";
+        load_shader_index = kLoadShaderIndexDXT3AAs1111ToARGB4;
+        break;
+      case SharedLoadFamily::kGbgr8ToRgba8:
+        wanted = "texture_load_gbgr8_rgb8_cs";
+        load_shader_index = kLoadShaderIndexGBGR8ToRGB8;
+        break;
+      case SharedLoadFamily::kBgrg8ToRgba8:
+        wanted = "texture_load_bgrg8_rgb8_cs";
+        load_shader_index = kLoadShaderIndexBGRG8ToRGB8;
+        break;
     }
     if (!wanted) {
       return false;
@@ -1246,7 +1375,9 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
   // write one host block / texel per guest block (host_expand 1), so for
   // them the host side is addressed in blocks and the blit converts to
   // texels (Metal takes compressed copy sizes in texels, rows in bytes).
-  const uint32_t block_dim = SharedTextureBlockDim(entry);
+  // Block width and height differ for the 4:2:2 pairs (2x1).
+  const uint32_t block_w = SharedTextureBlockWidth(entry);
+  const uint32_t block_dim = SharedTextureBlockHeight(entry);
   const uint32_t host_expand = SharedTextureHostExpand(entry);
 
   // Plan every level's scratch region before encoding anything (atomic
@@ -1262,6 +1393,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     uint32_t src_x = 0;     // level origin in the scratch region, texels
     uint32_t src_y = 0;
     uint32_t depth = 1;     // 3D: slices in this level's scratch
+    uint32_t src_z = 0;     // 3D packed tail: first slice of the level
   };
   std::vector<LevelDispatch> dispatches;
   dispatches.reserve(plan.size());
@@ -1273,9 +1405,9 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     // enclosing region and blitting the sub-rectangle out of it.
     // Packed origins come from the planner in texels; block-compressed
     // packed levels sit on whole blocks.
-    const uint32_t px_blocks = p.px / block_dim;
+    const uint32_t px_blocks = p.px / block_w;
     const uint32_t py_blocks = p.py / block_dim;
-    d.region_w = px_blocks + (p.width + block_dim - 1u) / block_dim;
+    d.region_w = px_blocks + (p.width + block_w - 1u) / block_w;
     d.region_h = py_blocks + (p.height + block_dim - 1u) / block_dim;
     // Level origin in host units (texels for the decoders, blocks for BC).
     d.src_x = px_blocks * host_expand;
@@ -1284,7 +1416,10 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
         ((d.region_w + blocks_per_thread - 1u) / blocks_per_thread) *
         blocks_per_thread * host_expand * bpb;
     d.host_pitch = (written_row + 255u) & ~255u;
-    d.depth = std::max(p.depth, 1u);
+    // A packed 3D level sits at a depth origin inside its tail: dispatch the
+    // enclosing slices and blit from the origin slice.
+    d.depth = p.pz + std::max(p.depth, 1u);
+    d.src_z = p.pz;
     uint64_t dest_bytes =
         uint64_t(d.host_pitch) * d.region_h * host_expand * d.depth + 256u;
     static uint32_t s_scratch_logs = 0;
@@ -1381,7 +1516,10 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
   for (size_t i = 0; i < plan.size(); ++i) {
     const MipLevelPlan& p = plan[i];
     const LevelDispatch& d = dispatches[i];
+    const NSUInteger bytes_per_image =
+        NSUInteger(d.host_pitch) * d.region_h * host_expand;
     NSUInteger source_offset = d.scratch_offset +
+                               NSUInteger(d.src_z) * bytes_per_image +
                                NSUInteger(d.src_y) * d.host_pitch +
                                NSUInteger(d.src_x) * bpb;
     // Rows in host units (texel rows, or block rows for BC); the size is in
@@ -1390,8 +1528,9 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
     [blit copyFromBuffer:(__bridge id<MTLBuffer>)d.scratch
                sourceOffset:source_offset
           sourceBytesPerRow:d.host_pitch
-        sourceBytesPerImage:NSUInteger(d.host_pitch) * d.region_h * host_expand
-                 sourceSize:MTLSizeMake(p.width, p.height, d.depth)
+        sourceBytesPerImage:bytes_per_image
+                 sourceSize:MTLSizeMake(p.width, p.height,
+                                        std::max(p.depth, 1u))
                   toTexture:base_texture
            destinationSlice:p.slice
            destinationLevel:p.host_level
@@ -1810,6 +1949,161 @@ const char* MetalSharedTextureCache::UnservedReason(
   return "served";
 }
 
+bool MetalSharedTextureCache::FindResolveForward(
+    uint32_t dest_base, uint32_t dest_pitch, uint32_t bpp_log2,
+    uint32_t offset_x, uint32_t offset_y, uint32_t width, uint32_t height,
+    uint32_t extent_bytes, ResolveForwardTarget* out) {
+  // XE_METAL_RESOLVE_FORWARD_LOG=1: why resolves are not forwarded (the
+  // first 300, then one in 32).
+  static const bool s_log =
+      std::getenv("XE_METAL_RESOLVE_FORWARD_LOG") != nullptr;
+  static uint32_t s_logs = 0;
+  auto note = [&](const char* why, const TextureKey* key) {
+    if (ResolveForwardTraced(dest_base) ||
+        (s_log && (s_logs++ < 300 || (s_logs & 31u) == 0))) {
+      XELOGI(
+          "MetalResolveForward {} dest={:08X} pitch={} bpp_log2={} off=({},{}) "
+          "{}x{} extent={:X} tex={}",
+          why, dest_base, dest_pitch, bpp_log2, offset_x, offset_y, width,
+          height, extent_bytes,
+          key ? fmt::format("fmt={} {:08X} {}x{} pitch={}",
+                            uint32_t(key->format),
+                            uint32_t(key->base_page) << 12, key->GetWidth(),
+                            key->GetHeight(), key->pitch)
+              : std::string());
+    }
+  };
+  if (!ResolveForwardEnabled() || draw_resolution_scale_x() != 1 ||
+      draw_resolution_scale_y() != 1 || (bpp_log2 != 2 && bpp_log2 != 3)) {
+    note("disabled", nullptr);
+    return false;
+  }
+  const uint32_t pitch_bytes = dest_pitch << bpp_log2;
+  MetalTexture* best = nullptr;
+  uint32_t best_kind = 0, best_origin_y = 0;
+  // Textures starting at or below the destination, nearest first; no
+  // forwardable texture is larger than 32 MB.
+  constexpr uint32_t kMaxTextureBytes = 32u << 20;
+  for (auto it = forward_textures_.upper_bound(dest_base);
+       it != forward_textures_.begin();) {
+    --it;
+    if (dest_base - it->first >= kMaxTextureBytes) {
+      break;
+    }
+    MetalTexture& texture = *it->second;
+    const TextureKey key = texture.key();
+    const uint32_t base = it->first;
+    const uint32_t delta = dest_base - base;
+    if (delta >= texture.GetGuestBaseSize()) {
+      continue;
+    }
+    const uint32_t kind = ResolveForwardKind(key);
+    if (!kind || (kind == 2 ? 3u : 2u) != bpp_log2) {
+      note("format", &key);
+      continue;
+    }
+    // The load's own addressing: same pitch, and the destination a whole
+    // number of 32-row bands in, so the texture's texel (x, origin_y + y) is
+    // the destination's texel (x, y).
+    std::vector<MipLevelPlan> plan;
+    if (!PlanLevels(texture, true, false, &plan) || plan.size() != 1 ||
+        plan[0].guest_offset != base ||
+        plan[0].pitch_blocks * 4u != pitch_bytes || plan[0].px || plan[0].py ||
+        plan[0].depth != 1 || plan[0].slice ||
+        delta % (pitch_bytes * 32u) != 0) {
+      note("layout", &key);
+      continue;
+    }
+    const uint32_t origin_y = delta / pitch_bytes;
+    // Whether the resolve rewrites every texel; otherwise the texture must be
+    // current, so that the texels it leaves alone still match memory.
+    const bool covers_all =
+        !delta && !offset_x && !offset_y && width >= key.GetWidth() &&
+        height >= key.GetHeight() && texture.GetGuestBaseSize() <= extent_bytes;
+    if (!covers_all && texture.base_outdated_lockless()) {
+      note("partial-outdated", &key);
+      continue;
+    }
+    // Several textures of one range (different formats or sizes): the most
+    // recently used one is forwarded, the others reload as before.
+    if (!best || texture.last_usage_submission_index() >
+                     best->last_usage_submission_index()) {
+      best = &texture;
+      best_kind = kind;
+      best_origin_y = origin_y;
+    }
+  }
+  if (!best) {
+    note("none", nullptr);
+    return false;
+  }
+  if (!best->forward_view) {
+    id<MTLTexture> texture = (__bridge id<MTLTexture>)best->mtl_texture();
+    id<MTLTexture> view =
+        texture
+            ? [texture
+                  newTextureViewWithPixelFormat:best_kind == 1
+                                                    ? MTLPixelFormatRGBA8Uint
+                                                : best_kind == 2
+                                                    ? MTLPixelFormatRGBA16Uint
+                                                    : MTLPixelFormatR32Uint]
+            : nil;
+    if (!view) {
+      return false;
+    }
+    best->forward_view = (__bridge_retained void*)view;
+  }
+  const TextureKey key = best->key();
+  out->texture = best;
+  out->mtl_texture = best->forward_view;
+  out->kind = best_kind;
+  out->endian = uint32_t(key.endianness);
+  out->width = key.GetWidth();
+  out->height = key.GetHeight();
+  out->origin_y = best_origin_y;
+  return true;
+}
+
+void MetalSharedTextureCache::CompleteResolveForward(
+    const ResolveForwardTarget& target) {
+  MetalTexture* texture = static_cast<MetalTexture*>(target.texture);
+  const uint32_t base = uint32_t(texture->key().base_page) << 12;
+  auto range = forward_textures_.equal_range(base);
+  bool live = false;
+  for (auto it = range.first; it != range.second; ++it) {
+    live |= it->second == texture;
+  }
+  // A page of it left invalid (a guest write the resolve did not cover) still
+  // needs the load.
+  if (!live ||
+      !shared_memory().IsRangeValid(base, base + texture->GetGuestBaseSize())) {
+    if (ResolveForwardTraced(base)) {
+      XELOGI("MetalResolveForward NOT-COMPLETED base={:08X} live={}", base,
+             live ? 1 : 0);
+    }
+    return;
+  }
+  // The resolve's watch invalidation has outdated it; its content is now
+  // memory's again, so it is current and watched again like a loaded texture.
+  texture->MakeUpToDateAndWatch(xe::global_critical_region::AcquireDirect());
+  texture->last_load_submission =
+      submission_provider_ ? submission_provider_() : 0;
+  texture->base_hash = 0;
+  ++texture->loads;
+  texture->MarkAsUsed();
+  ++census_forwarded_;
+  static const bool s_log =
+      std::getenv("XE_METAL_RESOLVE_FORWARD_LOG") != nullptr;
+  static uint32_t s_logs = 0;
+  if (ResolveForwardTraced(base) ||
+      (s_log && (s_logs++ < 300 || (s_logs & 31u) == 0))) {
+    XELOGI("MetalResolveForward FORWARDED base={:08X} kind={} {}x{} endian={} "
+           "origin_y={} submission={}",
+           base, target.kind, target.width, target.height, target.endian,
+           target.origin_y, texture->last_load_submission);
+  }
+}
+
 void MetalSharedTextureCache::OnSubmissionsFaulted(
     const std::vector<uint64_t>& submissions) {
   ++serve_generation_;
@@ -1838,45 +2132,54 @@ void MetalSharedTextureCache::OnSubmissionsFaulted(
     }
     // The load rode a lost command buffer: its content is garbage while
     // base state says up-to-date. Invalidate through the ONE authority —
-    // the watch fires, the texture goes outdated, and the next use
-    // revalidates + reloads from intact RAM (also evicts any overlapping
-    // legacy entry via its own global watch).
+    // the watch fires, the texture goes outdated, and the next use reloads
+    // from intact RAM (also evicts any overlapping legacy entry via its own
+    // global watch). The region's content hash is dropped too: RAM did not
+    // change, so RevalidateRegions would otherwise match the hash and skip
+    // the reload, serving the garbage until the guest rewrote the bytes
+    // (conformance "Base and mip provenance ... either fault refuses").
     TextureKey key = texture.key();
     if (base_faulted) {
       shared_memory().MemoryInvalidationCallback(
           key.base_page << 12, texture.GetGuestBaseSize(), true);
       metal_texture.last_load_submission = 0;
+      metal_texture.base_hash = 0;
     }
     if (mip_faulted) {
       shared_memory().MemoryInvalidationCallback(
           key.mip_page << 12, texture.GetGuestMipsSize(), true);
       metal_texture.last_mip_load_submission = 0;
+      metal_texture.mips_hash = 0;
     }
   });
 }
 
 void MetalSharedTextureCache::WriteAllCachedTexturesToTrace(
     TraceWriter& trace_writer) {
-  // Pre-WriteTraceInitialState only (the caller guarantees the order): a
-  // texture up-to-date HERE is exactly a texture the legacy cache would
-  // still hold a warm entry for, and the record value matches the legacy
-  // warm-entry sweep's. Outdated textures have no legacy analog (the
-  // immediate drain-time InvalidateRange evicted the entry) and reload
-  // during the captured frame through the legacy path instead.
+  // Pre-WriteTraceInitialState only (the caller guarantees the order).
+  // Every cached texture is recorded, outdated or not: guest RAM has been
+  // converged for a host read just before this sweep, and a texture whose
+  // pages are flagged GPU-written is neither invalidated for re-upload by
+  // WriteTraceInitialState nor reloaded from RAM during the frame, so an
+  // outdated-only sweep left it out of the trace entirely (Rise of the Tomb
+  // Raider's CPU-written 256x2 tone curve at 1CC1D000 shares such a page;
+  // replays built the colour LUT from zeros). The base extent is the full
+  // guest layout (3D/stacked textures: every slice), never the 2D pitch*height.
   ForEachTexture([&](Texture& texture) {
     TextureKey key = texture.key();
-    if (!texture.base_outdated_lockless()) {
-      uint32_t base = key.base_page << 12;
-      trace_writer.WriteMemoryRead(
-          base, ComputeWatchedBaseBytes(uint32_t(key.pitch) << 5,
-                                        key.GetHeight(), 4, base,
-                                        SharedMemory::kBufferSize));
+    uint32_t base = key.base_page << 12;
+    uint32_t base_bytes =
+        std::max(ComputeWatchedBaseBytes(uint32_t(key.pitch) << 5,
+                                         key.GetHeight(), 4, base,
+                                         SharedMemory::kBufferSize),
+                 texture.GetGuestBaseSize());
+    if (base_bytes > SharedMemory::kBufferSize - base) {
+      base_bytes = uint32_t(SharedMemory::kBufferSize - base);
     }
-    // 6.1: the mip chain is a SEPARATE up-to-date region at its own guest
-    // pointer, so a warm mipped texture must record those bytes too or a
-    // replay would restore a texture whose levels were never captured.
-    if (key.mip_max_level && key.mip_page &&
-        !texture.mips_outdated_lockless()) {
+    if (base_bytes) {
+      trace_writer.WriteMemoryRead(base, base_bytes);
+    }
+    if (key.mip_max_level && key.mip_page) {
       trace_writer.WriteMemoryRead(uint32_t(key.mip_page) << 12,
                                    texture.GetGuestMipsSize());
     }

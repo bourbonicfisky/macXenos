@@ -1205,7 +1205,7 @@ bool MetalSharedMemory::UploadRanges(
         return v ? strtoull(v, nullptr, 16) : 0ull;
       }();
       if (s_upload_watch &&
-          upload_start < s_upload_watch + 0x40000 &&
+          upload_start < s_upload_watch + SharedMemory::UploadWatchLength() &&
           upload_start + upload_length > s_upload_watch) {
         uint32_t wpage = uint32_t(s_upload_watch) >> page_size_log2();
         XELOGW(
@@ -1252,6 +1252,34 @@ bool MetalSharedMemory::UploadRanges(
               "MetalSharedMemory: upload {:08X}+{:X} skips {} GPU-current "
               "bytes in {} span(s)",
               upload_start, upload_length, skipped, spans.size());
+        }
+        // XE_METAL_LINEAGE=<base hex>: every upload covering the watched base
+        // reports whether it copies the base's bytes (RAM over the buffer) or
+        // skips them as a pending GPU-current span, with both words.
+        static const uint32_t s_lineage_base = [] {
+          const char* v = std::getenv("XE_METAL_LINEAGE");
+          return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+        }();
+        if (s_lineage_base && s_lineage_base >= upload_start &&
+            s_lineage_base < upload_start + upload_length) {
+          bool copies_base = false;
+          for (const auto& piece : pieces) {
+            if (s_lineage_base >= piece.first &&
+                s_lineage_base < piece.first + piece.second) {
+              copies_base = true;
+            }
+          }
+          uint32_t ram_word = 0, buf_word = 0;
+          std::memcpy(&ram_word, memory().TranslatePhysical(s_lineage_base),
+                      sizeof(ram_word));
+          std::memcpy(&buf_word, buffer_contents_ + s_lineage_base,
+                      sizeof(buf_word));
+          XELOGW(
+              "MetalLineage UPLOAD base={:08X} upload={:08X}+{:X} "
+              "copies_base={} skipped={} spans={} staged={} ram={:08X} "
+              "buf_before={:08X}",
+              s_lineage_base, upload_start, upload_length, copies_base,
+              skipped, spans.size(), staged, ram_word, buf_word);
         }
       }
       for (const auto& piece : pieces) {
@@ -1303,6 +1331,12 @@ bool MetalSharedMemory::UploadRanges(
     // replay must restore before this range's consumers run. No-op unless a
     // trace file is open.
     if (trace_writer_) {
+      // Publish pending GPU-current bytes in this range to RAM first: the
+      // record must hold what the GPU consumes, not the stale RAM behind an
+      // unpublished resolve (see SetTracePublishCallback).
+      if (trace_publish_callback_) {
+        trace_publish_callback_(upload_start, upload_length);
+      }
       trace_writer_->WriteMemoryRead(upload_start, upload_length);
     }
   }

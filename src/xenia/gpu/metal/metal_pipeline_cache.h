@@ -10,14 +10,20 @@
 #ifndef XENIA_GPU_METAL_METAL_PIPELINE_CACHE_H_
 #define XENIA_GPU_METAL_METAL_PIPELINE_CACHE_H_
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+#include "xenia/base/threading.h"
 #include "xenia/gpu/dxbc_geometry_shader.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/metal/dxbc_to_dxil_converter.h"
@@ -26,6 +32,7 @@
 #include "xenia/gpu/metal/metal_pipeline_storage.h"
 #include "xenia/gpu/metal/metal_shader.h"
 #include "xenia/gpu/metal/metal_shader_converter.h"
+#include "xenia/gpu/shader_storage.h"
 #include "xenia/gpu/xenos.h"
 
 namespace xe {
@@ -91,6 +98,40 @@ class MetalPipelineCache {
                                        const uint32_t* blend_controls,
                                        uint32_t color_write_mask);
 
+  // Background pipeline creation (metal_async_pipelines, default off): a
+  // draw whose pipeline is not built yet, and that may use a stand-in, gets
+  // kPending while workers translate its shaders and create the state, so a
+  // first session does not stop for every new pipeline. Other draws wait for
+  // a queued build or build synchronously, as GetOrCreateRenderPipelineState.
+  // `vertex` and `pixel` may be untranslated; `pixel` may be null.
+  static bool AsyncPipelinesEnabled();
+  enum class AsyncPipelineStatus { kReady, kPending, kFailed, kDeferred };
+  // kReady: *pipeline_out is the state, *pixel_out the pixel translation it
+  // uses (null if the pixel shader did not translate, as the synchronous
+  // path does). kFailed: no pipeline (the vertex shader did not translate if
+  // it has no function).
+  // kDeferred (only with `may_defer`, for a draw that may not use a
+  // stand-in): the shaders are translated (*pixel_out as for kReady) and a
+  // worker is creating the state, ahead of stand-in builds. *deferred_out
+  // owns the request; ResolveDeferredPipeline(deferred_out->get()) blocks
+  // until the state exists. The encoder thread resolves it, so the command
+  // processor records the next draws (and queues their pipelines) meanwhile:
+  // a scene's first frame, whose new pipelines all wait, builds them in
+  // parallel instead of one after another.
+  AsyncPipelineStatus GetRenderPipelineStateAsync(
+      MetalShader::MetalTranslation* vertex,
+      MetalShader::MetalTranslation* pixel, const uint64_t* color_pixel_formats,
+      uint64_t depth_pixel_format, MetalPipelineRasterKey raster_key,
+      const uint32_t* blend_controls, uint32_t color_write_mask,
+      bool stand_in_allowed, bool may_defer, void** pipeline_out,
+      MetalShader::MetalTranslation** pixel_out,
+      std::shared_ptr<void>* deferred_out);
+  // A MetalEncodeStream::PipelineResolver: the retained state of a kDeferred
+  // request, or null if creation failed. Any thread.
+  static void* ResolveDeferredPipeline(void* request);
+  // Installs the pipelines the workers finished. GPU thread.
+  void DrainAsyncPipelines();
+
   // Builds (or returns the cached) MESH id<MTLRenderPipelineState> that expands a
   // point/rectangle/quad primitive via MSC geometry emulation: the guest VS runs
   // as the object stage (with a synthesized stage-in), a generated DXBC geometry
@@ -124,9 +165,161 @@ class MetalPipelineCache {
                                 uint32_t title_id);
   void ShutdownDurableStorage();
 
+  // M2 — writes the binary archive if this session added pipelines to it. The
+  // emulator quits through std::quick_exit, so nothing runs at teardown: the
+  // archive is saved from MetalCommandProcessor::SaveShaderStorageToDisk (GPU
+  // paused, just before the exit) and periodically from the swap, which is
+  // what keeps a crash or a SIGKILL from losing a whole session of pipelines.
+  // `wait` blocks until every queued segment is on disk.
+  void SaveBinaryArchive(const char* reason, bool wait);
+  void MaybeSaveBinaryArchiveOnSwap();
+
   const MetalPipelineStorage& durable_storage() const { return storage_; }
 
+  // Shader and pipeline storage: the guest shaders (.xsh, the format D3D12 and
+  // Vulkan share) and render pipeline descriptions (.msc.metal.xpso) a title has
+  // used, recorded as they are first built and rebuilt at the next launch.
+  // The metallib cache and binary archive hold only translator output, so a
+  // build that changes the translator discards them; this record is what
+  // lets the next launch compile before gameplay instead of inside it.
+  // XE_METAL_SHADER_STORAGE=0 disables it. GPU thread only.
+  void InitializeShaderStorage(const std::filesystem::path& cache_root,
+                               uint32_t title_id);
+  void ShutdownShaderStorage();
+  // Hands this frame's new records to the writer thread.
+  void FlushShaderStorage();
+
  private:
+  // Configured like every translator this cache uses; one per thread that
+  // translates (DxbcShaderTranslator keeps per-translation state).
+  std::unique_ptr<DxbcShaderTranslator> CreateShaderTranslator() const;
+  // TranslateShader on a given translator and Metal Shader Converter, so the
+  // shader storage replay can translate on several threads. Different
+  // translations may be translated concurrently; the shaders must already be
+  // analyzed and their fetch patterns registered.
+  bool TranslateShader(MetalShader::MetalTranslation& translation,
+                       DxbcShaderTranslator& translator,
+                       MetalShaderConverter& metal_converter);
+
+  // GetOrCreateRenderPipelineState in parts, so the shader storage replay can
+  // create states on several threads: Metal state creation is thread-safe,
+  // render_pipeline_states_ and the binary archive here are not.
+  static uint64_t RenderPipelineKey(MetalShader::MetalTranslation* vertex,
+                                    MetalShader::MetalTranslation* pixel,
+                                    const uint64_t* color_pixel_formats,
+                                    uint64_t depth_pixel_format,
+                                    MetalPipelineRasterKey raster_key,
+                                    const uint32_t* blend_controls,
+                                    uint32_t color_write_mask);
+  // A retained MTLRenderPipelineDescriptor. Any thread; `lookup_list` is the
+  // binary archive lookup list (NSArray) to search, or null.
+  void* NewRenderPipelineDescriptor(MetalShader::MetalTranslation* vertex,
+                                    MetalShader::MetalTranslation* pixel,
+                                    const uint64_t* color_pixel_formats,
+                                    uint64_t depth_pixel_format,
+                                    MetalPipelineRasterKey raster_key,
+                                    const uint32_t* blend_controls,
+                                    uint32_t color_write_mask,
+                                    void* lookup_list) const;
+  // A retained id<MTLRenderPipelineState>, or null. Any thread, while no
+  // other thread changes the archive key set; `archive_stale_out` reports an
+  // archived key the archive no longer serves, for the caller to forget.
+  void* NewRenderPipelineState(void* descriptor, uint64_t key,
+                               bool* archive_stale_out) const;
+  // Takes the retained `state` (null caches a failure), adds it to the binary
+  // archive and caches it. Returns the cached state.
+  void* AddRenderPipelineState(uint64_t key, void* descriptor, void* state);
+
+  // Runs work(worker, item) for every item in [0, item_count), on the calling
+  // thread (worker 0) and up to worker_count - 1 more, until all are done.
+  static void RunShaderStorageWorkers(
+      size_t item_count, uint32_t worker_count,
+      const std::function<void(uint32_t worker, size_t item)>& work);
+
+  XEPACKEDSTRUCT(StoredPipelineDescription, {
+    uint64_t vertex_shader_hash;
+    uint64_t vertex_shader_modification;
+    // 0 for a depth-only pipeline.
+    uint64_t pixel_shader_hash;
+    // With fetch_plain_pattern cleared: the pattern index is session-local,
+    // so the pattern itself is stored below and re-registered on load.
+    uint64_t pixel_shader_modification;
+    uint64_t color_formats[xenos::kMaxColorRenderTargets];
+    uint64_t depth_format;
+    uint32_t sample_count;
+    uint32_t blend_controls[xenos::kMaxColorRenderTargets];
+    uint32_t color_write_mask;
+    MetalShader::FetchPattern pixel_fetch_pattern;  // fetch_mask 0: none
+    static constexpr uint32_t kVersion = 0x20261027;
+  });
+  XEPACKEDSTRUCT(PipelineStoredDescription, {
+    uint64_t description_hash;
+    StoredPipelineDescription description;
+  });
+  void StorePipeline(MetalShader::MetalTranslation* vertex,
+                     MetalShader::MetalTranslation* pixel,
+                     const uint64_t* color_pixel_formats,
+                     uint64_t depth_pixel_format, uint32_t sample_count,
+                     const uint32_t* blend_controls,
+                     uint32_t color_write_mask);
+  struct AsyncPipelineJob {
+    MetalShader::MetalTranslation* vertex;
+    MetalShader::MetalTranslation* pixel;
+    uint64_t color_formats[xenos::kMaxColorRenderTargets];
+    uint64_t depth_format;
+    MetalPipelineRasterKey raster_key;
+    uint32_t blend_controls[xenos::kMaxColorRenderTargets];
+    uint32_t color_write_mask;
+    uint64_t async_key;
+    void* lookup_list;  // retained NSArray or null
+    // Set by the worker.
+    bool done = false;
+    bool vertex_ok = false;
+    uint64_t key = 0;
+    MetalShader::MetalTranslation* pixel_used = nullptr;
+    void* descriptor = nullptr;  // retained
+    void* state = nullptr;       // retained
+    // kDeferred requests: translated by the command processor (pixel_used
+    // is set before queueing), resolved by the encoder thread. The worker
+    // keeps a reference to the state here for the resolver.
+    bool deferred = false;
+    MetalPipelineCache* cache = nullptr;
+    void* deferred_state = nullptr;  // retained
+    ~AsyncPipelineJob();
+  };
+  struct AsyncPipelineResult {
+    uint64_t key;  // 0: failed
+    MetalShader::MetalTranslation* pixel_used;
+  };
+  // Content key of a request, valid before the shaders are translated.
+  static uint64_t AsyncPipelineKey(MetalShader::MetalTranslation* vertex,
+                                   MetalShader::MetalTranslation* pixel,
+                                   const uint64_t* color_pixel_formats,
+                                   uint64_t depth_pixel_format,
+                                   MetalPipelineRasterKey raster_key,
+                                   const uint32_t* blend_controls,
+                                   uint32_t color_write_mask);
+  void StartAsyncPipelineWorkers();
+  void StopAsyncPipelineWorkers();
+  void AsyncPipelineWorker();
+  std::mutex async_mutex_;
+  std::condition_variable async_queue_cv_;
+  std::condition_variable async_done_cv_;
+  std::deque<std::shared_ptr<AsyncPipelineJob>> async_queue_;
+  std::vector<std::shared_ptr<AsyncPipelineJob>> async_done_;
+  bool async_stop_ = false;
+  // GPU thread only.
+  std::unordered_map<uint64_t, std::shared_ptr<AsyncPipelineJob>>
+      async_pending_;
+  std::unordered_map<uint64_t, AsyncPipelineResult> async_results_;
+  std::vector<std::unique_ptr<xe::threading::Thread>> async_workers_;
+
+  ShaderStorageWriter<PipelineStoredDescription> shader_storage_;
+  bool shader_storage_flush_shaders_ = false;
+  bool shader_storage_flush_pipelines_ = false;
+  // Set while stored pipelines are rebuilt, so they are not written again.
+  bool shader_storage_replaying_ = false;
+
   // A guest VS compiled as an MSC geometry-emulation OBJECT stage, plus its
   // synthesized stage-in. Metal objects held as retained void*.
   struct GeometryVertexStage {
@@ -163,6 +356,11 @@ class MetalPipelineCache {
   // Wraps a metallib blob in an id<MTLLibrary> (retained void*); null on failure.
   void* NewLibraryFromBytes(const std::vector<uint8_t>& bytes, const char* label);
 
+  void OpenBinaryArchive();
+  void CloseBinaryArchive();
+  void RebuildBinaryArchiveLookupList();
+  void FinishBinaryArchiveCompaction();
+
   void* device_;  // id<MTLDevice>, not owned.
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
@@ -176,6 +374,10 @@ class MetalPipelineCache {
   // the helper).
   DxbcToDxilConverter dxil_converter_raw_;
   MetalShaderConverter metal_converter_;
+
+  // The metallib store and the DXIL store, written by every thread that
+  // translates.
+  std::mutex durable_store_mutex_;
 
   // Owns the loaded shaders, keyed by ucode hash.
   std::unordered_map<uint64_t, MetalShader*> shaders_;
@@ -196,6 +398,39 @@ class MetalPipelineCache {
   // Durable on-disk storage for M1/M2. Closed means "no durable cache", which
   // is today's behavior and the default.
   MetalPipelineStorage storage_;
+
+  // M2 — the binary archive, null unless metal_pipeline_binary_archive is on
+  // and storage_ opened. Only the thread that creates render pipelines touches
+  // it, plus SaveShaderStorageToDisk with that thread paused. Segments
+  // (id<MTLBinaryArchive>, retained) are loaded or already serialized and are
+  // only read; `binary_archive_` is the fresh archive new pipelines go to, and
+  // `binary_archive_lookup_list_` (NSArray, retained) is the LOADED segments
+  // for MTLRenderPipelineDescriptor.binaryArchives (archives this session
+  // made only hold pipelines already in render_pipeline_states_). `archived_pipeline_keys_` are
+  // the keys in any of them, so a pipeline is added once ever and a lookup can
+  // fail fast on a miss; `binary_archive_pending_keys_` are the ones only in
+  // the fresh archive.
+  std::vector<void*> binary_archive_segments_;
+  void* binary_archive_ = nullptr;
+  void* binary_archive_lookup_list_ = nullptr;
+  std::unordered_set<uint64_t> archived_pipeline_keys_;
+  std::vector<uint64_t> binary_archive_pending_keys_;
+  uint32_t binary_archive_next_segment_ = 0;
+  // Serial dispatch queue (retained) that serializes finished archives.
+  void* binary_archive_queue_ = nullptr;
+  std::chrono::steady_clock::time_point binary_archive_last_save_;
+  // Compaction. A session that opens with more than kCompactArchiveSegments
+  // segments adds every pipeline it obtains, archive hits included, to the
+  // fresh archive again (`binary_archive_session_keys_`). At quit it deletes
+  // every old segment if 80% of their pipelines were saved again, otherwise
+  // only the segments whose pipelines all were.
+  struct OldArchiveSegment {
+    std::filesystem::path path;
+    std::vector<uint64_t> keys;
+  };
+  std::vector<OldArchiveSegment> binary_archive_compacting_;
+  std::unordered_set<uint64_t> binary_archive_session_keys_;
+  uint64_t binary_archive_failed_at_open_ = 0;
 
   // Durable DXIL-intermediate store (task 2.2). SEPARATE from storage_ and
   // deliberately so: its identity omits the MSC hash, the device and the OS

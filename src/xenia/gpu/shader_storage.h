@@ -240,7 +240,10 @@ class ShaderStorageWriter {
       return false;
     }
 
-    // Read pipeline descriptions.
+    // Read pipeline descriptions. "a+" leaves the stream at the end on macOS
+    // and the BSDs (at the start only on glibc and Windows), and without this
+    // seek the header read failed and every launch truncated the file.
+    xe::filesystem::Seek(pipeline_storage_file_, 0, SEEK_SET);
     const uint32_t pipeline_storage_version_swapped =
         xe::byte_swap(pipeline_config.version);
     PipelineStorageFileHeader pipeline_header;
@@ -315,7 +318,8 @@ class ShaderStorageWriter {
       return false;
     }
 
-    // Load shaders from storage.
+    // Load shaders from storage (from the start: see the pipeline file).
+    xe::filesystem::Seek(shader_storage_file_, 0, SEEK_SET);
     size_t shaders_loaded = 0;
     ShaderStorageFileHeader shader_header;
     if (ValidateShaderStorageHeader(shader_storage_file_, shader_header)) {
@@ -481,7 +485,11 @@ class ShaderStorageWriter {
       bool write_pipeline = false;
       {
         std::unique_lock<std::mutex> lock(storage_write_request_lock_);
-        if (storage_write_thread_shutdown_) {
+        // Shutdown drains what is queued first: the callers are pre-exit
+        // paths, so anything dropped here is never written.
+        if (storage_write_thread_shutdown_ &&
+            storage_write_shader_queue_.empty() &&
+            storage_write_pipeline_queue_.empty()) {
           return;
         }
         if (!storage_write_shader_queue_.empty()) {

@@ -207,3 +207,9 @@ if(APPLE)
     COMMENT "Copying the Preferences blades")
   add_dependencies(xenia-app xenia-app-blades)
 endif()
+
+# Storage and save migration (storage_migration_mac.cc).
+if(APPLE AND XENIA_BUILD_TESTS)
+  set(CMAKE_FOLDER "tests")
+  add_subdirectory(testing)
+endif()

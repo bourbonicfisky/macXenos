@@ -36,11 +36,11 @@ namespace metal {
 
 // Every field that distinguishes one host texture's storage from another.
 //
-// Deliberately absent as DIRECT inputs, each with zero measured engagement
-// across the trace corpus: the raw mip address, packed-mips state, stacked
-// identity, and 3D/stack depth. The first and, for 3D, the last still reach the
-// key INDIRECTLY through the normalized range, which is correct — see the
-// capability spec.
+// The raw mip address (page), the raw packed-mips flag and the stacked flag
+// became DIRECT inputs on 2026-10-26: two fetches that differ only there
+// describe different guest storage, and the shared D3D12 TextureKey carries
+// mip_page and packed_mips the same way. 3D/stack depth reaches the key through
+// format_tiled_endian.
 struct MetalTextureKeyInputs {
   uint32_t base = 0;
   uint32_t width = 0;
@@ -54,6 +54,10 @@ struct MetalTextureKeyInputs {
   // NORMALIZED effective range. Not the raw fetch fields.
   uint32_t mip_min_level = 0;
   uint32_t mip_max_level = 0;
+  // Raw fetch fields (mip page, packed_mips, stacked).
+  uint32_t mip_address = 0;
+  uint32_t packed_mips = 0;
+  uint32_t stacked = 0;
 };
 
 inline uint64_t MakeMetalTextureKey(const MetalTextureKeyInputs& inputs) {
@@ -62,13 +66,17 @@ inline uint64_t MakeMetalTextureKey(const MetalTextureKeyInputs& inputs) {
     uint32_t format_tiled_endian;
     uint32_t swizzle;
     uint32_t mip_level_range;
+    uint32_t mip_address;
+    uint32_t packed_stacked;
   } kb{inputs.base,
        inputs.width,
        inputs.height,
        inputs.pitch_texels,
        inputs.format_tiled_endian,
        inputs.swizzle,
-       (inputs.mip_min_level << 8) | (inputs.mip_max_level & 0xFF)};
+       (inputs.mip_min_level << 8) | (inputs.mip_max_level & 0xFF),
+       inputs.mip_address,
+       (inputs.packed_mips & 1u) | ((inputs.stacked & 1u) << 1)};
   return XXH3_64bits(&kb, sizeof(kb));
 }
 

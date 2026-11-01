@@ -116,6 +116,15 @@
 "description": "Value used to fill all allocated heap memory. 0 - Random value. Valid range: [1-255]",
 "changed": false
 },
+"exact_write_fault_invalidation": {
+"name": "exact_write_fault_invalidation",
+"category": "Memory",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Invalidate only the faulting page on a guest write to watched memory instead of the surrounding 256 KB block, so per-frame dynamic writes stop invalidating neighbouring static textures and vertex data (GTA IV: ~230 needless texture revalidations per frame).",
+"changed": false
+},
 "defaults_date": {
 "name": "defaults_date",
 "category": "Config",
@@ -456,6 +465,15 @@
 "value": true,
 "defaultValue": true,
 "description": "If execute_unclipped_draw_vs_on_cpu is enabled, execute the vertex shader for unclipped draws on the CPU even when using the pixel shader interlock (rasterizer-ordered view) implementation of the render backend on the host, for which no expensive copying between host render targets is needed when the ownership of a EDRAM range is changed.\nIf this is enabled, excessive barriers may be eliminated when switching between different render targets in separate EDRAM locations.",
+"changed": false
+},
+"aliased_depth_read_only": {
+"name": "aliased_depth_read_only",
+"category": "GPU.Debug",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Matches interlock behavior by handling disjoint color and depth aliases for host render targets, keeping read-only depth bound when color writes only the unused stencil bits. May slightly increase overhead from keeping both host targets live and bound.",
 "changed": false
 },
 "custom_internal_display_resolution_x": {
@@ -1052,15 +1070,6 @@
 "description": "Compile shaders and create pipelines asynchronously in background threads. Eliminates shader compilation stutter but may cause brief rendering artifacts while pipelines are being created. When disabled, pipelines are created synchronously which causes stutter but no visual artifacts.",
 "changed": false
 },
-"ac6_ground_fix": {
-"name": "ac6_ground_fix",
-"category": "HACKS",
-"type": "bool",
-"value": false,
-"defaultValue": false,
-"description": "This fixes(hide) issues with black ground in AC6. Use only in AC6. Might cause issues in other titles.",
-"changed": false
-},
 "depth_float24_sample_z_varying": {
 "name": "depth_float24_sample_z_varying",
 "category": "GPU",
@@ -1295,6 +1304,24 @@
 "description": "Round mulsc products toward zero instead of to nearest even. This fixes bad geometry in several Volition Engine titles and possibly others. This rounding behavior hasn't been confirmed on real hardware, so it's disabled by default.",
 "changed": false
 },
+"texture_point_snap": {
+"name": "texture_point_snap",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Snap normalized point sampled 2D texture coordinates to texel centers. Fixes texture seams in titles that use virtual textures, e.g. idTech 5, but may cause rendering issues in other titles.",
+"changed": false
+},
+"dxbc_implicit_lod": {
+"name": "dxbc_implicit_lod",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Experimental: sample computed-LOD 1D, 2D and cube texture fetches with the hardware's implicit LOD plus the LOD bias (sample_b) instead of explicit coarse gradients scaled by 2^bias (sample_d). The LOD is the same up to derivative precision. Fetches snapped to texel centers (texture_point_snap) from mipmapped textures keep sample_d.",
+"changed": false
+},
 "point_sampling_extra_offset": {
 "name": "point_sampling_extra_offset",
 "category": "GPU",
@@ -1311,6 +1338,15 @@
 "value": true,
 "defaultValue": true,
 "description": "When using resolution scaling, apply the hack that stretches the first surely covered host pixel in the left and top sides of render target resolve areas to eliminate the gap caused by the half-pixel offset (this is necessary for certain games to display the scene graphics).",
+"changed": false
+},
+"window_offset_in_edram": {
+"name": "window_offset_in_edram",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Renders every tile of a predicated tiling frame at the same position as the depth prepass by applying the window offset in EDRAM rather than the viewport.\nFixes depth artifacts in the bottom tile of the screen. Disable this if tiles start shifting or banding.\nWorks on every render target path. ROV and FSI apply it to every tile since their pixel shaders directly address EDRAM and can offset sideways or past the end of EDRAM, RTV and FBO keep sideways offsets, and tiles that would run past the target, in the viewport.",
 "changed": false
 },
 "use_fuzzy_alpha_epsilon": {
@@ -1439,6 +1475,42 @@
 "description": "Experimental: route memory exports from vertex shaders that also rasterize (the exports of a draw that has a render target bound). Required by titles that copy data through such draws, for example Child of Eden's video decoder; costs about 13% more GPU submissions per frame on Viva Pinata. auto: only for titles that set metal_memexport_raster (their built-in config). on: every title. off: none. XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
 "changed": false
 },
+"metal_max_in_flight": {
+"name": "metal_max_in_flight",
+"category": "GPU",
+"type": "uint",
+"value": 0,
+"defaultValue": 0,
+"description": "Metal: cap on command-buffer submissions in flight (0 = default 16). The XE_METAL_MAX_IN_FLIGHT environment variable overrides it, and metal_serialize_submissions forces 1.",
+"changed": false
+},
+"metal_serialize_submissions": {
+"name": "metal_serialize_submissions",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Metal: finish each GPU submission before the next one starts (one in flight). Workaround for whole-frame colour flashes in Rise of the Tomb Raider whose cause is still open; costs frame rate wherever the GPU and CPU would otherwise overlap (M1 Max Tomb Raider 30 -> 21 fps).",
+"changed": false
+},
+"metal_completion_wait_exports": {
+"name": "metal_completion_wait_exports",
+"category": "GPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Metal: before the guest sees a completion signal (interrupt or end-of-pipe event), wait for the GPU when memory exports are still pending in the open submission. Removes Rise of the Tomb Raider's whole-frame colour flashes (cause still open) at a lower cost than metal_serialize_submissions: M4 Macs keep 30 fps, an M1 Max drops from 30 to about 22.",
+"changed": false
+},
+"metal_memexport_pixel": {
+"name": "metal_memexport_pixel",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Route memory exports from pixel shaders (Halo: Reach). They write through the same shared-memory buffer as vertex exports and only cost anything on draws whose pixel shader exports. A draw whose vertex shader also exports additionally needs metal_memexport_raster_mode. XE_METAL_MEMEXPORT_PIXEL=0/1 overrides.",
+"changed": false
+},
 "metal_quad_lists_as_triangles": {
 "name": "metal_quad_lists_as_triangles",
 "category": "GPU",
@@ -1524,9 +1596,9 @@
 "name": "metal_pipeline_binary_archive",
 "category": "GPU",
 "type": "bool",
-"value": false,
-"defaultValue": false,
-"description": "Persist host pipeline state in an MTLBinaryArchive (M2). Addresses the 1.7-47.5% the census attributed to newRenderPipelineState. Default off until gated.",
+"value": true,
+"defaultValue": true,
+"description": "Persist host render pipeline state in an MTLBinaryArchive (M2) next to the metallib cache, so a later session does not pay newRenderPipelineState again (the macOS shader cache does not hold it once other titles have run). Set to false for the exact rollback: no archive reads or writes.",
 "changed": false
 },
 "metal_pipeline_cache_title_cap_mib": {
@@ -1572,6 +1644,15 @@
 "value": 256,
 "defaultValue": 256,
 "description": "Maximum durable DXIL artifact-store size in MiB. On reaching it no NEW artifacts are admitted for the session; existing ones keep being served.",
+"changed": false
+},
+"metal_async_pipelines": {
+"name": "metal_async_pipelines",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Metal: create pipelines a game has not used before on background threads. Until one is ready, draws into a render target redrawn every frame are skipped (an object can be missing for a few frames) instead of the game pausing; one-off renders, small render targets and memory exports still wait. Off: every new pipeline is built during the frame that needs it. XE_METAL_ASYNC_PIPELINES=0/1 overrides.",
 "changed": false
 },
 "texture_host_dump": {
@@ -2739,9 +2820,9 @@
 "name": "guest_thread_qos",
 "category": "CPU",
 "type": "string",
-"value": "off",
-"defaultValue": "off",
-"description": "macOS only: Apple QoS scheduling policy for guest CPU threads. 'off' (default, no QoS calls) | 'all' (every guest XThread) | 'main' (entry-point thread only) | 'priority' (guest priority >= guest_thread_qos_priority_threshold). 'hot' (hot-after-warmup) is reserved but not yet implemented.",
+"value": "all",
+"defaultValue": "all",
+"description": "macOS only: Apple QoS scheduling policy for guest CPU threads. 'off' (no QoS calls) | 'all' (default, every guest XThread) | 'main' (entry-point thread only) | 'priority' (guest priority >= guest_thread_qos_priority_threshold). 'hot' (hot-after-warmup) is reserved but not yet implemented.",
 "changed": false
 },
 "guest_thread_qos_class": {

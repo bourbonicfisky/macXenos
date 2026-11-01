@@ -304,7 +304,8 @@ inline draw_util::GetViewportInfoArgs GetMetalViewportInfoArgs(
     reg::RB_DEPTHCONTROL normalized_depth_control,
     bool pixel_shader_writes_depth, uint32_t scale_x = 1,
     uint32_t scale_y = 1, uint32_t draw_resolution_scale_x = 1,
-    uint32_t draw_resolution_scale_y = 1) {
+    uint32_t draw_resolution_scale_y = 1,
+    bool window_offset_in_edram = false) {
   draw_util::GetViewportInfoArgs args;
   args.Setup(scale_x, scale_y, divisors::MagicDiv(scale_x),
              divisors::MagicDiv(scale_y),
@@ -318,7 +319,7 @@ inline draw_util::GetViewportInfoArgs GetMetalViewportInfoArgs(
              /*allow_reverse_z=*/true, normalized_depth_control,
              /*convert_z_to_float24=*/false,
              /*full_float24_in_0_to_1=*/true, pixel_shader_writes_depth);
-  args.SetupRegisterValues(regs);
+  args.SetupRegisterValues(regs, window_offset_in_edram);
   return args;
 }
 

@@ -53,6 +53,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/base/string.h"
 #include "xenia/base/string_buffer.h"
 #include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/shader_interpreter.h"
 #include "xenia/gpu/dxbc_shader_translator.h"
 #include "xenia/gpu/edram_layout.h"
 #include "xenia/gpu/gpu_flags.h"
@@ -80,6 +81,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include "xenia/gpu/metal/metal_tessellation_flags.h"
 #include "xenia/gpu/metal/metal_shared_texture_cache.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
+#include "xenia/gpu/metal/metal_sampler_contract.h"
 #include "xenia/gpu/metal/metal_texture_load_eligibility.h"
 #include "xenia/gpu/metal/metal_upload_arena.h"
 #include "xenia/gpu/packet_disassembler.h"
@@ -145,6 +147,38 @@ DEFINE_string(
     "(their built-in config). on: every title. off: none. "
     "XE_METAL_MEMEXPORT_RASTER=0/1 overrides.",
     "GPU");
+DEFINE_uint32(
+    metal_max_in_flight, 0,
+    "Metal: cap on command-buffer submissions in flight (0 = default 16). "
+    "The XE_METAL_MAX_IN_FLIGHT environment variable overrides it, and "
+    "metal_serialize_submissions forces 1.",
+    "GPU");
+DEFINE_bool(
+    metal_serialize_submissions, false,
+    "Metal: finish each GPU submission before the next one starts (one in "
+    "flight). Workaround for whole-frame colour flashes in Rise of the Tomb "
+    "Raider whose cause is still open; costs frame rate wherever the GPU and "
+    "CPU would otherwise overlap (M1 Max Tomb Raider 30 -> 21 fps).",
+    "GPU");
+DEFINE_bool(
+    metal_completion_wait_exports, false,
+    "Metal: before the guest sees a completion signal (interrupt or "
+    "end-of-pipe event), wait for the GPU when memory exports are still "
+    "pending in the open submission. Removes Rise of the Tomb Raider's "
+    "whole-frame colour flashes (cause still open) at a lower cost than "
+    "metal_serialize_submissions: M4 Macs keep 30 fps, an M1 Max drops from "
+    "30 to about 22.",
+    "GPU");
+
+DEFINE_bool(
+    metal_memexport_pixel, true,
+    "Route memory exports from pixel shaders (Halo: Reach). They write "
+    "through the same shared-memory buffer as vertex exports and only cost "
+    "anything on draws whose pixel shader exports. A draw whose vertex shader "
+    "also exports additionally needs metal_memexport_raster_mode. "
+    "XE_METAL_MEMEXPORT_PIXEL=0/1 overrides.",
+    "GPU");
+
 DEFINE_transient_bool(
     metal_memexport_raster, false,
     "Per-title hint for metal_memexport_raster_mode = auto, set by the "
@@ -470,12 +504,24 @@ inline bool RouteServiceOk(ResolvedFetchService service,
           !(declaration_site && RouteAllDrainsBase(fetch_base)));
 }
 inline uint32_t fetch_width_serve(const xenos::xe_gpu_texture_fetch_t& f) {
-  return f.dimension == xenos::DataDimension::k3D ? f.size_3d.width + 1
-                                                  : f.size_2d.width + 1;
+  switch (f.dimension) {
+    case xenos::DataDimension::k1D:
+      return f.size_1d.width + 1;
+    case xenos::DataDimension::k3D:
+      return f.size_3d.width + 1;
+    default:
+      return f.size_2d.width + 1;
+  }
 }
 inline uint32_t fetch_height_serve(const xenos::xe_gpu_texture_fetch_t& f) {
-  return f.dimension == xenos::DataDimension::k3D ? f.size_3d.height + 1
-                                                  : f.size_2d.height + 1;
+  switch (f.dimension) {
+    case xenos::DataDimension::k1D:
+      return 1;
+    case xenos::DataDimension::k3D:
+      return f.size_3d.height + 1;
+    default:
+      return f.size_2d.height + 1;
+  }
 }
 inline uint32_t fetch_pitch_serve(const xenos::xe_gpu_texture_fetch_t& f) {
   uint32_t w = fetch_width_serve(f);
@@ -549,6 +595,28 @@ bool MetalMemexportRasterGateOn() {
           value);
     }
     return MetalMemexportRasterGateEngaged(gate);
+  }();
+  return s_gate_on;
+}
+
+// Pixel-stage memexport gate (default on): metal_memexport_pixel, with
+// XE_METAL_MEMEXPORT_PIXEL=0/1 overriding; malformed values keep the option.
+bool MetalMemexportPixelGateOn() {
+  static const bool s_gate_on = [] {
+    const char* value = std::getenv("XE_METAL_MEMEXPORT_PIXEL");
+    bool on = cvars::metal_memexport_pixel;
+    if (value && value[0]) {
+      if ((value[0] == '0' || value[0] == '1') && !value[1]) {
+        on = value[0] == '1';
+      } else {
+        XELOGW(
+            "XE_METAL_MEMEXPORT_PIXEL='{}' is malformed; keeping "
+            "metal_memexport_pixel={} (use 0 or 1)",
+            value, on);
+      }
+    }
+    XELOGI("Metal pixel-stage memexport: {}", on ? "on" : "off");
+    return on;
   }();
   return s_gate_on;
 }
@@ -701,7 +769,8 @@ class MetalRamWritePublicationTarget : public metal::RamWritePublicationTarget {
       const char* v = std::getenv("XE_METAL_UPLOAD_WATCH");
       return v ? strtoull(v, nullptr, 16) : 0ull;
     }();
-    if (s_watch && base < s_watch + 0x40000 && base + length > s_watch) {
+    if (s_watch && base < s_watch + SharedMemory::UploadWatchLength() &&
+        base + length > s_watch) {
       XELOGW("MetalUploadWatch INVALIDATE {:08X}+{:X} exact={}", base, length,
              exact_range);
     }
@@ -761,7 +830,8 @@ class MetalMemexportPublicationTarget
       const char* v = std::getenv("XE_METAL_UPLOAD_WATCH");
       return v ? strtoull(v, nullptr, 16) : 0ull;
     }();
-    if (s_watch && base < s_watch + 0x40000 && base + length > s_watch) {
+    if (s_watch && base < s_watch + SharedMemory::UploadWatchLength() &&
+        base + length > s_watch) {
       XELOGW("MetalUploadWatch MARK-GPU-WRITTEN {:08X}+{:X}", base, length);
     }
     shared_memory_->RangeWrittenByGpu(base, length);
@@ -812,16 +882,45 @@ class MetalMemexportConvergenceTarget
     // execution, so the captured pre-image is unsound there — an accepted
     // limitation of two diagnostic-only modes coinciding; production mirror
     // mode captures before the only RAM write, this copy.
-    if (command_processor_) {
-      command_processor_->NotifyGuestRamWrite(base, length);
-    }
-    metal::SharedBufferConvergenceOutcome published =
-        shared_memory_->ConvergeRangeToRam(base, length);
-    *bytes_copied = published.bytes_copied;
-    if (!published.converged) {
-      // Missing backing, missing RAM mapping, or an alias claim the addresses
-      // do not support: publish nothing and let the caller retain the record.
-      return false;
+    if (owned_only_) {
+      // A lazily armed record copies only the pages it still owns: the rest
+      // were published on first touch, discarded by a host overwrite or
+      // superseded, and RAM there may hold newer CPU data. Copying them from
+      // the buffer again clobbered Banjo-Kazooie's command buffers and shader
+      // microcode (ring allocator reusing export scratch) with exports routed.
+      const uint64_t end = uint64_t(base) + length;
+      for (const auto& [owned_start, owned_length] : *owned_only_) {
+        uint64_t sub_start = std::max<uint64_t>(base, owned_start);
+        uint64_t sub_end =
+            std::min<uint64_t>(end, uint64_t(owned_start) + owned_length);
+        if (sub_end <= sub_start) {
+          continue;
+        }
+        uint32_t sub_length = uint32_t(sub_end - sub_start);
+        if (command_processor_) {
+          command_processor_->NotifyGuestRamWrite(uint32_t(sub_start),
+                                                  sub_length);
+        }
+        metal::SharedBufferConvergenceOutcome published =
+            shared_memory_->ConvergeRangeToRam(uint32_t(sub_start), sub_length);
+        *bytes_copied += published.bytes_copied;
+        if (!published.converged) {
+          return false;
+        }
+      }
+    } else {
+      if (command_processor_) {
+        command_processor_->NotifyGuestRamWrite(base, length);
+      }
+      metal::SharedBufferConvergenceOutcome published =
+          shared_memory_->ConvergeRangeToRam(base, length);
+      *bytes_copied = published.bytes_copied;
+      if (!published.converged) {
+        // Missing backing, missing RAM mapping, or an alias claim the addresses
+        // do not support: publish nothing and let the caller retain the
+        // record.
+        return false;
+      }
     }
     if (texture_cache_) {
       // Task 5.3 proved the earlier RangeWrittenByGpu watch is equivalent in
@@ -836,11 +935,18 @@ class MetalMemexportConvergenceTarget
     return true;
   }
 
+  // Restricts the next copies to these guest ranges (a lazily armed record's
+  // still-owned pages); nullptr copies whole records.
+  void SetOwnedOnly(const std::vector<std::pair<uint32_t, uint32_t>>* owned) {
+    owned_only_ = owned;
+  }
+
  private:
   CommandProcessor* command_processor_;
   Memory* memory_;
   MetalSharedMemory* shared_memory_;
   metal::MetalTextureCache* texture_cache_;
+  const std::vector<std::pair<uint32_t, uint32_t>>* owned_only_ = nullptr;
 };
 
 // Snapshot-bridge lineage probe (XE_METAL_LINEAGE=<base hex>): writer-side half.
@@ -1129,7 +1235,10 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_s
        !metal::MetalScaledAnisotropyEnabled())
           ? 0u
           : uint32_t((key >> 15) & 7);
-  const uint32_t border = uint32_t((key >> 18) & 3);
+  const uint32_t border =
+      uint32_t((key >> metal::kMetalSamplerKeyBorderShift) & 3);
+  const bool force_bc_w_to_max =
+      ((key >> metal::kMetalSamplerKeyForceBcWShift) & 1) != 0;
   const uint32_t mip_min_level = uint32_t((key >> 20) & 15);
   const bool base_map = ((key >> 24) & 1) != 0;
   const bool legacy = ((key >> 25) & 1) != 0;
@@ -1176,16 +1285,35 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_s
   } else if (!legacy && mip_max_level) {
     d.lodMaxClamp = float(mip_max_level);
   }
-  switch (xenos::BorderColor(border)) {
-    case xenos::BorderColor::k_ABGR_White:
-      d.borderColor = MTLSamplerBorderColorOpaqueWhite;
-      break;
-    default:
-      // k_ABGR_Black is (0,0,0,0) in the shared contract; the YCbCr borders
-      // (0.5,0,0.5,0)/(0,0.5,0.5,0) have no Metal border color -- they fall to
-      // transparent black (unengaged in the census).
-      d.borderColor = MTLSamplerBorderColorTransparentBlack;
-      break;
+  // Border colour per the shared contract (metal_sampler_contract.h):
+  // ABGR black/white and the force_bc_w_to_max alpha forcing are exact;
+  // the YCbCr blacks decay to black luma with the contract's alpha (Metal
+  // has no custom border colours) and are counted as approximated.
+  {
+    const metal::MetalSamplerBorderDecision decision =
+        metal::DecideMetalSamplerBorder(xenos::BorderColor(border),
+                                        force_bc_w_to_max);
+    switch (decision.border) {
+      case metal::MetalSamplerBorder::kOpaqueWhite:
+        d.borderColor = MTLSamplerBorderColorOpaqueWhite;
+        break;
+      case metal::MetalSamplerBorder::kOpaqueBlack:
+        d.borderColor = MTLSamplerBorderColorOpaqueBlack;
+        break;
+      case metal::MetalSamplerBorder::kTransparentBlack:
+      default:
+        d.borderColor = MTLSamplerBorderColorTransparentBlack;
+        break;
+    }
+    if (decision.approximated) {
+      static uint32_t s_approximated_logs = 0;
+      if (s_approximated_logs++ < 8) {
+        XELOGW(
+            "MetalSamplerBorderApprox: YCbCr border colour {} has no Metal "
+            "border colour; using {} black (alpha {}) for sampler key {:016X}",
+            border, "luma", force_bc_w_to_max ? 1 : 0, key);
+      }
+    }
   }
   auto addr = [](uint32_t c) {
     switch (xenos::ClampMode(c)) {
@@ -1231,12 +1359,13 @@ bool MetalCommandProcessor::GetOrCreateSamplerSlot(uint64_t key, uint32_t* out_s
   if (s_sampler_census_log) {
     XELOGI(
         "MetalSamplerCreate key={:016X} mag={} min={} mip={} aniso={} "
-        "addr=({},{},{}) border={} lod=[{},{}] base_map={}",
+        "addr=({},{},{}) border={} force_bc_w={} lod=[{},{}] base_map={}",
         key, uint32_t(d.magFilter), uint32_t(d.minFilter),
         uint32_t(d.mipFilter), uint32_t(d.maxAnisotropy),
         uint32_t(d.sAddressMode), uint32_t(d.tAddressMode),
-        uint32_t(d.rAddressMode), uint32_t(d.borderColor), d.lodMinClamp,
-        d.lodMaxClamp, base_map ? 1 : 0);
+        uint32_t(d.rAddressMode), uint32_t(d.borderColor),
+        force_bc_w_to_max ? 1 : 0, d.lodMinClamp, d.lodMaxClamp,
+        base_map ? 1 : 0);
   }
   uint32_t slot = next_sampler_slot_++;
   auto* entries = static_cast<IRDescriptorTableEntry*>(
@@ -2422,6 +2551,15 @@ bool MetalCommandProcessor::SetupContext() {
   shared_memory_->SetCompletedSubmissionProvider([this]() {
     return completed_submission_.load(std::memory_order_acquire);
   });
+  // Frame-trace fidelity: an upload's source range is recorded only after
+  // the pending producers over it have converged to RAM (the same host-read
+  // preparation the RAM frontbuffer present uses).
+  shared_memory_->SetTracePublishCallback([this](uint32_t start,
+                                                 uint32_t length) {
+    if (trace_writer_.is_open()) {
+      PrepareGuestMemoryForHostRead(start, length);
+    }
+  });
   // Straddler fix: uploads copy around pending GPU-current spans (the
   // pending lists live on this thread, the same one that uploads).
   shared_memory_->SetGpuCurrentSpanProvider(
@@ -3224,6 +3362,220 @@ uint64_t MetalCommandProcessor::PassAttachmentKey(bool dummy_depth,
   return key;
 }
 
+// XE_METAL_PASS_TIMING=1: GPU time of every draw render pass from
+// stage-boundary timestamp samples, summed per attachment key and logged
+// with the per-128-swap stats. Instruments cannot attribute most render-pass
+// work on Apple GPUs (its GPU intervals carry encoder id 0 for ~3/4 of
+// fragment time, Far Cry 3 2x 2026-10-31), so this names the passes itself.
+// CP thread: Attach / EndPass / TakeCommitRange. Completion handlers: Resolve.
+namespace {
+struct PassTimingAgg {
+  uint64_t vertex_ticks = 0;
+  uint64_t fragment_ticks = 0;
+  uint64_t passes = 0;
+  uint64_t draws = 0;
+  uint32_t msaa = 0;
+};
+struct PassTimingState {
+  // Four samples per pass; Apple caps a sample buffer at 32 KiB (4096
+  // samples), which holds ~10 frames of passes in flight.
+  static constexpr uint32_t kPasses = 1024;
+  id<MTLCounterSampleBuffer> buffer = nil;
+  bool init_tried = false;
+  struct Slot {
+    uint64_t rt_key;
+    uint32_t draw_start;
+    uint32_t draws;
+    uint32_t msaa;
+  };
+  std::array<Slot, kPasses> slots{};
+  uint64_t next = 0;       // CP thread
+  uint64_t committed = 0;  // CP thread
+  int64_t open = -1;       // CP thread
+  uint64_t overruns = 0;   // CP thread
+  std::atomic<uint64_t> resolved{0};
+  std::mutex mutex;  // guards everything below
+  std::unordered_map<uint64_t, PassTimingAgg> agg;
+  std::unordered_map<uint64_t, std::string> describe;
+  uint64_t invalid = 0;
+  MTLTimestamp cal_gpu = 0;
+  std::chrono::steady_clock::time_point cal_time;
+};
+PassTimingState& PassTiming() {
+  static PassTimingState state;
+  return state;
+}
+bool PassTimingEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_METAL_PASS_TIMING");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return enabled;
+}
+void PassTimingAttach(MTLRenderPassDescriptor* pass, id<MTLDevice> device,
+                      uint64_t rt_key, uint32_t msaa, uint32_t draw_start,
+                      const std::function<std::string()>& describe) {
+  PassTimingState& pt = PassTiming();
+  if (!pt.init_tried) {
+    pt.init_tried = true;
+    id<MTLCounterSet> timestamps = nil;
+    for (id<MTLCounterSet> set in device.counterSets) {
+      if ([set.name isEqualToString:MTLCommonCounterSetTimestamp]) {
+        timestamps = set;
+      }
+    }
+    if (timestamps &&
+        [device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+      MTLCounterSampleBufferDescriptor* desc =
+          [[MTLCounterSampleBufferDescriptor alloc] init];
+      desc.counterSet = timestamps;
+      desc.storageMode = MTLStorageModeShared;
+      desc.sampleCount = PassTimingState::kPasses * 4;
+      desc.label = @"xe pass timing";
+      NSError* error = nil;
+      pt.buffer = [device newCounterSampleBufferWithDescriptor:desc
+                                                        error:&error];
+      if (!pt.buffer) {
+        XELOGW("MetalPassTiming: no sample buffer ({})",
+               error ? [[error localizedDescription] UTF8String] : "nil");
+      }
+    } else {
+      XELOGW("MetalPassTiming: stage-boundary timestamps unsupported");
+    }
+    MTLTimestamp cpu = 0;
+    [device sampleTimestamps:&cpu gpuTimestamp:&pt.cal_gpu];
+    pt.cal_time = std::chrono::steady_clock::now();
+  }
+  // The descriptor may be reused: clear a previous pass's attachment.
+  pass.sampleBufferAttachments[0].sampleBuffer = nil;
+  pt.open = -1;
+  if (!pt.buffer) {
+    return;
+  }
+  if (pt.next - pt.resolved.load(std::memory_order_acquire) >=
+      PassTimingState::kPasses) {
+    ++pt.overruns;
+    return;
+  }
+  const uint32_t slot = uint32_t(pt.next % PassTimingState::kPasses);
+  MTLRenderPassSampleBufferAttachmentDescriptor* a =
+      pass.sampleBufferAttachments[0];
+  a.sampleBuffer = pt.buffer;
+  a.startOfVertexSampleIndex = slot * 4;
+  a.endOfVertexSampleIndex = slot * 4 + 1;
+  a.startOfFragmentSampleIndex = slot * 4 + 2;
+  a.endOfFragmentSampleIndex = slot * 4 + 3;
+  pt.slots[slot] = {rt_key, draw_start, 0, msaa};
+  pt.open = int64_t(pt.next++);
+  std::lock_guard<std::mutex> lock(pt.mutex);
+  if (!pt.describe.count(rt_key)) {
+    pt.describe.emplace(rt_key, describe());
+  }
+}
+void PassTimingEndPass(uint32_t draw_count) {
+  PassTimingState& pt = PassTiming();
+  if (pt.open >= 0) {
+    auto& slot = pt.slots[uint64_t(pt.open) % PassTimingState::kPasses];
+    slot.draws = draw_count - slot.draw_start;
+    pt.open = -1;
+  }
+}
+std::pair<uint64_t, uint64_t> PassTimingTakeCommitRange() {
+  PassTimingState& pt = PassTiming();
+  // A pass still open belongs to the next command buffer's range.
+  const uint64_t end = pt.open >= 0 ? uint64_t(pt.open) : pt.next;
+  std::pair<uint64_t, uint64_t> range{pt.committed, end};
+  pt.committed = end;
+  return range;
+}
+void PassTimingResolve(std::pair<uint64_t, uint64_t> range) {
+  PassTimingState& pt = PassTiming();
+  if (range.second > range.first && pt.buffer) {
+    std::lock_guard<std::mutex> lock(pt.mutex);
+    for (uint64_t i = range.first; i < range.second; ++i) {
+      const uint32_t slot = uint32_t(i % PassTimingState::kPasses);
+      NSData* data =
+          [pt.buffer resolveCounterRange:NSMakeRange(slot * 4, 4)];
+      if (!data || data.length < 4 * sizeof(MTLCounterResultTimestamp)) {
+        ++pt.invalid;
+        continue;
+      }
+      const auto* t =
+          static_cast<const MTLCounterResultTimestamp*>(data.bytes);
+      const auto& s = pt.slots[slot];
+      PassTimingAgg& agg = pt.agg[s.rt_key];
+      agg.msaa = s.msaa;
+      ++agg.passes;
+      agg.draws += s.draws;
+      bool ok = true;
+      for (int k = 0; k < 4; ++k) {
+        ok &= t[k].timestamp != MTLCounterErrorValue && t[k].timestamp != 0;
+      }
+      if (!ok || t[1].timestamp < t[0].timestamp ||
+          t[3].timestamp < t[2].timestamp) {
+        ++pt.invalid;
+        continue;
+      }
+      agg.vertex_ticks += t[1].timestamp - t[0].timestamp;
+      agg.fragment_ticks += t[3].timestamp - t[2].timestamp;
+    }
+  }
+  pt.resolved.store(range.second, std::memory_order_release);
+}
+std::string PassTimingReport(uint32_t swaps, uint64_t count) {
+  PassTimingState& pt = PassTiming();
+  if (!pt.buffer) {
+    return "MetalPassTiming: unavailable";
+  }
+  MTLTimestamp cpu = 0, gpu = 0;
+  [pt.buffer.device sampleTimestamps:&cpu gpuTimestamp:&gpu];
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lock(pt.mutex);
+  // GPU timestamp ticks are not specified as nanoseconds; calibrate against
+  // the host steady clock over the report interval.
+  const double elapsed_ns =
+      std::chrono::duration<double, std::nano>(now - pt.cal_time).count();
+  const double ns_per_tick =
+      gpu > pt.cal_gpu ? elapsed_ns / double(gpu - pt.cal_gpu) : 1.0;
+  pt.cal_gpu = gpu;
+  pt.cal_time = now;
+  std::vector<std::pair<uint64_t, PassTimingAgg>> rows(pt.agg.begin(),
+                                                       pt.agg.end());
+  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+    return a.second.vertex_ticks + a.second.fragment_ticks >
+           b.second.vertex_ticks + b.second.fragment_ticks;
+  });
+  double total_v = 0, total_f = 0, total_passes = 0;
+  for (const auto& [key, a] : rows) {
+    total_v += double(a.vertex_ticks);
+    total_f += double(a.fragment_ticks);
+    total_passes += double(a.passes);
+  }
+  const double to_ms = ns_per_tick / 1.0e6 / double(swaps);
+  std::string out = fmt::format(
+      "MetalPassTiming swap#{}: {:.1f} passes/frame vertex {:.2f} fragment "
+      "{:.2f} ms/frame (stage spans; overlap between passes is not "
+      "removed), {} keys, {} invalid, {} overruns, {:.3f} ns/tick",
+      count, total_passes / double(swaps), total_v * to_ms, total_f * to_ms,
+      rows.size(), pt.invalid, pt.overruns, ns_per_tick);
+  for (size_t i = 0; i < rows.size() && i < 12; ++i) {
+    const auto& [key, a] = rows[i];
+    auto d = pt.describe.find(key);
+    out += fmt::format(
+        "\n  rt={:016X} msaa={} {:5.1f} passes/frame {:6.1f} draws/pass "
+        "vertex {:6.2f} fragment {:6.2f} ms/frame  {}",
+        key, a.msaa, double(a.passes) / double(swaps),
+        double(a.draws) / std::max<double>(double(a.passes), 1.0),
+        double(a.vertex_ticks) * to_ms, double(a.fragment_ticks) * to_ms,
+        d != pt.describe.end() ? d->second.substr(0, 160) : "");
+  }
+  pt.agg.clear();
+  pt.invalid = 0;
+  pt.overruns = 0;
+  return out;
+}
+}  // namespace
+
 void* MetalCommandProcessor::BeginFrameEncoder() {
   // Attach whatever the RT cache accumulated for the current draw (Update()
   // ran in IssueDraw). The attachment key detects guest pass changes.
@@ -3592,6 +3944,13 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     }
   }
 
+  if (PassTimingEnabled()) {
+    PassTimingAttach(
+        pass, command_buffer.device, want_key,
+        memexport_pass_ ? 1u : render_target_cache_->current_msaa_samples(),
+        draw_count_,
+        [this] { return render_target_cache_->DescribeCurrentAttachments(); });
+  }
   const bool deferred_pass = DeferredPassLifecycle();
   MTLRenderPassDescriptor* final_pass =
       metal::MetalApplyXenosSamplePositions(pass);
@@ -3853,10 +4212,19 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   // rollback).
   static const bool s_locked_wait =
       std::getenv("XE_METAL_LAZY_LOCKED_WAIT") != nullptr;
-  const bool may_wait =
-      access != Memory::PhysicalAccess::kReadNoWait || s_locked_wait;
+  const bool may_wait = (access != Memory::PhysicalAccess::kReadNoWait &&
+                         access != Memory::PhysicalAccess::kWriteNoWait) ||
+                        s_locked_wait;
+  // Only a write fault's unlocked first pass may ask the GPU thread for a
+  // commit: every other write path holds the global lock, which the GPU
+  // thread may need before it can commit.
+  const bool write_unlocked =
+      access == Memory::PhysicalAccess::kWriteUnlocked;
   if (access == Memory::PhysicalAccess::kReadNoWait) {
     access = Memory::PhysicalAccess::kRead;
+  } else if (access == Memory::PhysicalAccess::kWriteUnlocked ||
+             access == Memory::PhysicalAccess::kWriteNoWait) {
+    access = Memory::PhysicalAccess::kWrite;
   }
   // Ordering census (XE_METAL_LAZY_ORDER_CENSUS): a CPU write or a release
   // over bytes a pending record still owns leaves that record's upload skip
@@ -3902,11 +4270,58 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   // the faulting thread (committing is the GPU thread's job); the read then
   // observes prior contents and the watch is re-armed at the next commit.
   const uint64_t committed = submission_counter_;
+  // Default ON (XE_METAL_LAZY_WRITE_COMMIT=0 is the rollback): guest WRITES
+  // over a producer still in the open command buffer ask the GPU thread to
+  // commit and wait for completion before the write lands; without it the
+  // drain/fault copy of that record later overwrites the CPU's bytes.
+  // 2026-10-25 RotTR: ~8k requests per 4-minute run at no fps cost (the colour
+  // flash stayed, so it is not that title's answer). 2026-10-27 M1, eight
+  // titles: Reach, Crysis 3 and Banjo hit it, no fps change, no timeouts once
+  // the service also commits buffers with no render encoder open. The GPU
+  // thread never waits on itself. On hardware the
+  // export/resolve has executed by the time the guest reuses its memory
+  // (Rise of the Tomb Raider's XenonFlush thread rewrites memexport
+  // destinations ~1.3x per frame right after issuing them); here the
+  // producer may not even be committed. Ask the GPU thread to commit, wait
+  // (bounded) for the commit, then wait for completion so the record
+  // publishes before the write lands. Reads keep the old no-wait rule.
+  static const bool s_write_commit = metal::ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_LAZY_WRITE_COMMIT"), true);
+  const bool commit_first =
+      s_write_commit && write_unlocked && may_wait &&
+      !kernel::XThread::IsInThread(worker_thread_.get());
   uint32_t remaining = lazy_publication_.OnAccess(
       physical_address_start, length,
-      [this, committed, may_wait](uint64_t submission) {
+      [this, committed, may_wait, commit_first](uint64_t submission) {
         if (submission > committed) {
-          return false;
+          if (!commit_first) {
+            return false;
+          }
+          // Request the commit and give the GPU thread up to 50 ms.
+          lazy_commit_request_.store(submission, std::memory_order_release);
+          static std::atomic<uint64_t> s_requests{0}, s_timeouts{0};
+          const uint64_t n = ++s_requests;
+          bool committed_now = false;
+          for (uint32_t spin = 0; spin < 500; ++spin) {
+            if (submission_counter_ >= submission) {
+              committed_now = true;
+              break;
+            }
+            xe::threading::Sleep(std::chrono::microseconds(100));
+          }
+          if (!committed_now) {
+            lazy_commit_request_.store(0, std::memory_order_release);
+            const uint64_t t = ++s_timeouts;
+            if (t <= 8 || (t & 1023) == 0) {
+              XELOGW("MetalLazyWriteCommit: timeout #{} of {} requests "
+                     "(submission {} still open)", t, n, submission);
+            }
+            return false;
+          }
+          if (n <= 4 || (n & 4095) == 0) {
+            XELOGI("MetalLazyWriteCommit: request #{} committed submission {}",
+                   n, submission);
+          }
         }
         if (!may_wait) {
           return completed_submission_.load(std::memory_order_acquire) >=
@@ -3917,6 +4332,22 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
       contents, [this](uint32_t address) {
         return memory_->TranslatePhysical<uint8_t*>(address);
       });
+  if (xe_lineage_base() && xe_lineage_base() >= physical_address_start &&
+      xe_lineage_base() < physical_address_start + length) {
+    // Lineage probe: a CPU access to the watched base's page. The buffer word
+    // is what the GPU route reads; RAM is not read here (the page faulted).
+    char lineage_thread[64] = {};
+    pthread_getname_np(pthread_self(), lineage_thread, sizeof(lineage_thread));
+    uint32_t buf_word = 0;
+    std::memcpy(&buf_word, contents + xe_lineage_base(), sizeof(buf_word));
+    XELOGW(
+        "MetalLineage FAULT base={:08X} swap#{} thread='{}' {} {:08X}+{:X} "
+        "remaining={} committed={} completed={} buf={:08X}",
+        xe_lineage_base(), swap_count_, lineage_thread,
+        access == Memory::PhysicalAccess::kRead ? "read" : "write",
+        physical_address_start, length, remaining, committed,
+        completed_submission_.load(std::memory_order_acquire), buf_word);
+  }
   if (remaining) {
     // XE_METAL_LAZY_STALE_LOG=1: name the reader and the owners of every
     // stale page (first 200, then every 1024th).
@@ -4079,7 +4510,23 @@ void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
         // geometry cannot prove superseded.
         static const bool s_retire_census =
             std::getenv("XE_METAL_LAZY_ORDER_CENSUS") != nullptr;
-        if (s_retire_census) {
+        // Strict covered retire (XE_METAL_LAZY_RETIRE_STRICT=1, default OFF:
+        // 2026-10-25 RotTR A/B made the flash MORE frequent, 56/409 vs
+        // 7/135, so retention is not the answer there; kept as a lever):
+        // a byte-range nesting is only a retirement when the newer rectangle
+        // provably rewrites every texel of the older one. Otherwise the older
+        // record stays pending: its bytes are still the GPU's newest for the
+        // texels the newer resolve did not touch, uploads must keep skipping
+        // its span and lazy publication must still own it. Rise of the Tomb
+        // Raider 2026-10-25: its transient ring interleaves CPU scratch with
+        // 32x32 colour-LUT slab resolves; an 8x8 resolve landing on a slab's
+        // base retired the slab "covered", the slab was never published, and
+        // the page's next CPU upload copied stale RAM over the slab while the
+        // frame's LUT load (and the previous frame's, in flight) still read
+        // it: one psychedelic frame (~8% of gameplay seconds).
+        static const bool s_retire_strict = metal::ParseMetalEnvironmentFlag(
+            std::getenv("XE_METAL_LAZY_RETIRE_STRICT"), false);
+        if (s_retire_census || s_retire_strict) {
           const PendingWriteback& nw = pending_writebacks_.back();
           auto pitch = [](const PendingWriteback& w) {
             return w.dest_pitch_aligned ? w.dest_pitch_aligned
@@ -4114,6 +4561,21 @@ void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
           }
           static uint64_t s_retires = 0, s_unproven = 0;
           ++s_retires;
+          if (!contained && s_retire_strict) {
+            ++s_unproven;
+            if (s_retire_census && s_unproven <= 100) {
+              XELOGW(
+                  "MetalLazyRetireCensus #{} swap#{}: KEPT {:08X} {}x{} "
+                  "off=({},{}) bpp={} pitch={} under {:08X} {}x{} off=({},{}) "
+                  "bpp={} pitch={} (not provably superseded)",
+                  s_unproven, swap_count_, it->guest_addr, it->width,
+                  it->height, it->dest_offset_x, it->dest_offset_y, it->bpp,
+                  pitch(*it), nw.guest_addr, nw.width, nw.height,
+                  nw.dest_offset_x, nw.dest_offset_y, nw.bpp, pitch(nw));
+            }
+            ++it;
+            continue;
+          }
           if (!contained) {
             ++s_unproven;
             if (s_unproven <= 100) {
@@ -4145,27 +4607,24 @@ void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
 }
 
 bool MetalCommandProcessor::NeedBasedWaitsEnabled() {
-  // Exact-1 opt-in, warn-once fail-closed, DEFAULT OFF, per the house flag
-  // contract (SeamTimingEnabled is the same shape). This is NOT a promotion:
-  // unset stays on the unconditional synchronous consumer boundary, and only
-  // the frozen D5 gate may change that. Malformed fails closed to OFF rather
-  // than to "probably meant on" -- a diagnostic that widened what counts as
-  // enabled would put an unmeasured path into a control arm.
+  // DEFAULT ON since 2026-10-31: a consumer that needs a producer's output
+  // waits for that producer's submission only, instead of committing and
+  // draining the whole open command buffer. Fable II on the M1 Max 19 -> 30
+  // fps (41 tess-factor reads/frame each drained ~410 draws); library sweeps
+  // on the M1 Max and M4 mini unchanged elsewhere, 0 faults/skips. Rollback:
+  // XE_METAL_NEED_BASED_WAITS=0 (exact 0 / malformed = off, the house shape).
   static const bool s_enabled = [] {
     const char* value = std::getenv(metal::kNeedBasedWaitsEnvVar);
-    if (!value || !value[0]) {
-      return false;
-    }
-    if (value[0] == '1' && !value[1]) {
-      return true;
-    }
-    if (!(value[0] == '0' && !value[1])) {
+    if (value && value[0] && !((value[0] == '0' || value[0] == '1') &&
+                               !value[1])) {
       XELOGW(
           "XE_METAL_NEED_BASED_WAITS='{}' is malformed; failing closed to off "
           "(use 0 or 1)",
           value);
     }
-    return false;
+    // Empty counts as unset (harness arms pass VAR= for the default).
+    return metal::ParseMetalEnvironmentFlag(value && value[0] ? value : nullptr,
+                                            true);
   }();
   return s_enabled;
 }
@@ -4455,7 +4914,7 @@ bool MetalCommandProcessor::ServingCensusEnabled() {
 
 bool MetalCommandProcessor::SkipConsumerWaitEnabled() {
   // Exact-1 opt-in, warn-once fail-closed, DEFAULT OFF -- the house flag shape
-  // (NeedBasedWaitsEnabled above). The banner is a WARNING and prints exactly
+  // (SeamTimingEnabled). The banner is a WARNING and prints exactly
   // once, from the first consultation: any log containing it names a run whose
   // guest-visible output is untrusted, which is what makes the arm disclosure
   // checkable after the fact.
@@ -5670,6 +6129,9 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
   }
   id<MTLRenderCommandEncoder> encoder =
       (__bridge_transfer id<MTLRenderCommandEncoder>)frame_render_encoder_;
+  if (PassTimingEnabled()) {
+    PassTimingEndPass(draw_count_);
+  }
   frame_render_encoder_ = nullptr;
   frame_open_ = false;
   encoder_has_zpd_visibility_ = false;
@@ -5859,9 +6321,15 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
       }
     }
   } reservation{&epoch_outstanding_[submit_epoch % kFaultEpochSlots]};
+  const std::pair<uint64_t, uint64_t> pass_timing_range =
+      PassTimingEnabled() ? PassTimingTakeCommitRange()
+                          : std::pair<uint64_t, uint64_t>{0, 0};
   [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
     if (GpuBusyTimingEnabled()) {
       NoteGpuBusyInterval(cb.GPUStartTime, cb.GPUEndTime);
+    }
+    if (PassTimingEnabled()) {
+      PassTimingResolve(pass_timing_range);
     }
     if (cb.status == MTLCommandBufferStatusError) {
       std::lock_guard<std::mutex> lock(fault_mutex_);
@@ -5938,9 +6406,26 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
     // WaitForSubmission while the GPU still had slack: 8 -> 16 measured
     // 24.2 -> 26.7 fps (32: 26.8, +100 MB footprint). USF4 2026-10-04 also
     // showed 10 ms/frame of depth-cap wait at a cap of 8.
+    // metal_max_in_flight (cvar) sets the cap when the environment does
+    // not; 0 keeps the default. metal_serialize_submissions (user switch,
+    // default off) forces 1: with more than one submission in flight Rise of
+    // the Tomb Raider's transient ring (CPU scratch interleaved with
+    // memexport and resolve destinations, reused as soon as the guest's
+    // fence says the GPU is done) produces a whole-frame colour-grading
+    // flash in ~8% of gameplay seconds (xenia-mac-evidence
+    // tombraider-stretch-20261025 knob census: every serializing arm 0,
+    // every non-serializing arm unchanged; ~1/580 s after the 2026-10-27
+    // write-commit fixes). The title no longer pins it (M1 Max 30 -> 21
+    // fps); remove the switch once the root cause is fixed.
     static const uint64_t kMaxInFlightSubmissions = [] {
       const char* v = std::getenv("XE_METAL_MAX_IN_FLIGHT");
       uint64_t n = v ? strtoull(v, nullptr, 10) : 0;
+      if (!n && cvars::metal_serialize_submissions) {
+        n = 1;
+      }
+      if (!n) {
+        n = cvars::metal_max_in_flight;
+      }
       return n ? n : uint64_t(16);
     }();
     if (submission > kMaxInFlightSubmissions) {
@@ -6278,10 +6763,496 @@ void MetalCommandProcessor::RecordDrawSkip(MetalDrawSkipReason reason,
   }
 }
 
+// A write fault over a GPU-owned range whose producer is still in the open
+// command buffer (see OnLazyRead) needs that buffer committed before the
+// faulting thread can wait for the producer. Serviced from the GPU thread
+// only: at each draw, so the commit is an ordinary pass end, and from the idle
+// and WAIT_REG_MEM loops (OnIdlePoll), where the writing thread is often the
+// one that would have queued the next draw.
+void MetalCommandProcessor::ServiceLazyCommitRequest() {
+  const uint64_t requested =
+      lazy_commit_request_.load(std::memory_order_acquire);
+  if (!requested) {
+    return;
+  }
+  // Not gated on frame_open_: a command buffer recording only compute or blit
+  // work (resolves, uploads) has no render encoder open but still holds the
+  // requested producer. EndFrameEncoder is a no-op without a buffer.
+  if (requested > submission_counter_) {
+    EndFrameEncoder(metal::SeamBoundaryReason::kHazardFlush);
+  }
+  lazy_commit_request_.store(0, std::memory_order_release);
+}
+
+// Diagnostics XE_METAL_DUMP_RT / XE_METAL_DUMP_RT_PS (see the block): called
+// from every IssueDraw encode path that ends a draw, including the
+// geometry-emulated one that returns before the common tail.
+void MetalCommandProcessor::DumpBoundColorRtDiagnostic(
+    const Shader* pixel_shader) {
+  // Diagnostic: XE_METAL_DUMP_RT=<trace draw index> dumps the bound color-0
+  // RT texture to /tmp/xe_rt_<index>.ppm right after that draw encodes —
+  // TEXTURE-space ground truth vs the EDRAM-mapped view of the capture
+  // pipeline (splits "content mislaid in the texture" from "the dump/EDRAM
+  // mapping mislays it").
+  static const int64_t s_dump_rt_at = [] {
+    const char* v = std::getenv("XE_METAL_DUMP_RT");
+    return v ? strtoll(v, nullptr, 10) : -1ll;
+  }();
+  // Live variant: XE_METAL_DUMP_RT_PS=<pixel shader ucode hash hex>[:<every>]
+  // dumps the bound color-0 RT after every <every>-th draw using that pixel
+  // shader (default every 60th) to /tmp/xe_rtps_<swap>_<n>.ppm, so a live
+  // pass output can be compared with the same pass in a replay.
+  // Several shaders: "hash[:every],hash[:every],...". Each has its own
+  // occurrence counter; the file name carries the swap, the shader's hash
+  // prefix and its occurrence count.
+  struct DumpRtPsEntry {
+    uint64_t hash;
+    uint32_t every;
+    uint32_t seen;
+  };
+  static std::vector<DumpRtPsEntry> s_dump_rt_ps = [] {
+    std::vector<DumpRtPsEntry> entries;
+    const char* v = std::getenv("XE_METAL_DUMP_RT_PS");
+    if (!v) return entries;
+    std::string spec(v);
+    size_t pos = 0;
+    while (pos < spec.size()) {
+      size_t comma = spec.find(',', pos);
+      std::string item = spec.substr(
+          pos, comma == std::string::npos ? std::string::npos : comma - pos);
+      char* end = nullptr;
+      uint64_t hash = strtoull(item.c_str(), &end, 16);
+      uint32_t every = 60u;
+      if (end && *end == ':') {
+        every = !strcmp(end + 1, "trace")
+                    ? 0u
+                    : uint32_t(strtoul(end + 1, nullptr, 10));
+        if (every == 0u && strcmp(end + 1, "trace") != 0) every = 60u;
+      }
+      if (hash) entries.push_back({hash, every, 0u});
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
+    return entries;
+  }();
+  bool dump_ps_now = false;
+  uint32_t s_dump_rt_ps_seen = 0;
+  uint64_t dump_ps_hash = 0;
+  if (pixel_shader) {
+    for (DumpRtPsEntry& e : s_dump_rt_ps) {
+      if (e.hash == pixel_shader->ucode_data_hash()) {
+        ++e.seen;
+        if (e.every == 0u ? trace_writer_.is_open() : (e.seen % e.every) == 0) {
+          dump_ps_now = true;
+          s_dump_rt_ps_seen = e.seen;
+          dump_ps_hash = e.hash;
+        }
+        break;
+      }
+    }
+  }
+  // XE_METAL_DUMP_RT_CONSTS=<c,c,...>: with every dump, log those pixel
+  // shader float constants (exposure / curve parameters live vs replay).
+  if (dump_ps_now) {
+    static const std::vector<uint32_t> s_dump_consts = [] {
+      std::vector<uint32_t> out;
+      const char* v = std::getenv("XE_METAL_DUMP_RT_CONSTS");
+      if (!v) return out;
+      std::string spec(v);
+      size_t pos = 0;
+      while (pos < spec.size()) {
+        size_t comma = spec.find(',', pos);
+        out.push_back(uint32_t(strtoul(spec.substr(pos).c_str(), nullptr, 10)));
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+      }
+      return out;
+    }();
+    for (uint32_t c : s_dump_consts) {
+      if (c >= 256) continue;
+      uint32_t r = XE_GPU_REG_SHADER_CONSTANT_256_X + c * 4;
+      XELOGW("XE_METAL_DUMP_RT: swap#{} ps c{} = ({}, {}, {}, {})", swap_count_,
+             c, register_file_->Get<float>(r), register_file_->Get<float>(r + 1),
+             register_file_->Get<float>(r + 2), register_file_->Get<float>(r + 3));
+    }
+  }
+  if (dump_ps_now ||
+      (s_dump_rt_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_rt_at)) {
+    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
+    void* rt_ptr = render_target_cache_->current_color_texture(0, nullptr);
+    if (rt_ptr) {
+      __unsafe_unretained id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt_ptr;
+      uint32_t tw = uint32_t(rt_tex.width), th = uint32_t(rt_tex.height);
+      uint32_t bpp = 4;
+      switch (rt_tex.pixelFormat) {
+        case MTLPixelFormatRGBA16Float:
+        case MTLPixelFormatRGBA16Unorm:
+        case MTLPixelFormatRGBA16Snorm:
+        case MTLPixelFormatRGBA16Uint:
+        case MTLPixelFormatRG32Float:
+        case MTLPixelFormatRG32Uint:
+          bpp = 8;
+          break;
+        case MTLPixelFormatRGBA32Float:
+        case MTLPixelFormatRGBA32Uint:
+          bpp = 16;
+          break;
+        default:
+          break;
+      }
+      id<MTLBuffer> rb =
+          [rt_tex.device newBufferWithLength:size_t(tw) * th * bpp
+                                     options:MTLResourceStorageModeShared];
+      __unsafe_unretained id<MTLCommandQueue> dq = (__bridge id<MTLCommandQueue>)
+          static_cast<xe::ui::metal::MetalProvider*>(
+              graphics_system_->provider())->command_queue();
+      if (rb && dq) {
+        id<MTLCommandBuffer> dcb = [dq commandBuffer];
+        id<MTLBlitCommandEncoder> dbl = [dcb blitCommandEncoder];
+        [dbl copyFromTexture:rt_tex
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(tw, th, 1)
+                     toBuffer:rb
+            destinationOffset:0
+       destinationBytesPerRow:tw * bpp
+     destinationBytesPerImage:size_t(tw) * th * bpp];
+        [dbl endEncoding];
+        [dcb commit];
+        [dcb waitUntilCompleted];
+        std::string path =
+            dump_ps_now ? fmt::format("/tmp/xe_rtps_{}_{:08X}_{}.ppm",
+                                      swap_count_, uint32_t(dump_ps_hash >> 32),
+                                      s_dump_rt_ps_seen)
+                        : fmt::format("/tmp/xe_rt_{}.ppm", s_dump_rt_at);
+        if (bpp != 4) {
+          // Raw texels beside the PPM for 64/128-bit targets (half floats);
+          // the PPM shows each texel's first 3 bytes.
+          if (FILE* fr = fopen((path + ".raw").c_str(), "wb")) {
+            fwrite(rb.contents, 1, size_t(tw) * th * bpp, fr);
+            fclose(fr);
+          }
+        }
+        FILE* f = fopen(path.c_str(), "wb");
+        if (f) {
+          fprintf(f, "P6\n%u %u\n255\n", tw, th);
+          const uint8_t* px = static_cast<const uint8_t*>(rb.contents);
+          uint64_t a_sum = 0;
+          uint8_t a_min = 255, a_max = 0;
+          for (size_t i = 0; i < size_t(tw) * th; ++i) {
+            fwrite(px + i * bpp, 1, 3, f);  // RGBA8 storage: bytes are R,G,B.
+            uint8_t a = px[i * bpp + 3];
+            a_sum += a;
+            a_min = std::min(a_min, a);
+            a_max = std::max(a_max, a);
+          }
+          fclose(f);
+          XELOGW("XE_METAL_DUMP_RT: wrote {} ({}x{} fmt={} bpp={}) alpha min={} max={} mean={:.2f}",
+                 path, tw, th, uint32_t(rt_tex.pixelFormat), bpp, a_min, a_max,
+                 double(a_sum) / (double(tw) * th));
+        }
+      }
+    }
+  }
+}
+
+namespace {
+// Captures the position and the vertex kill flag of one interpreted vertex.
+class OverwritePositionSink : public ShaderInterpreter::ExportSink {
+ public:
+  void Export(ucode::ExportRegister export_register, const float* value,
+              uint32_t value_mask) override {
+    if (export_register == ucode::ExportRegister::kVSPosition) {
+      for (uint32_t i = 0; i < 4; ++i) {
+        if (value_mask & (1u << i)) {
+          position[i] = value[i];
+          position_mask |= 1u << i;
+        }
+      }
+    } else if (export_register ==
+                   ucode::ExportRegister::kVSPointSizeEdgeFlagKillVertex &&
+               (value_mask & 0b0100)) {
+      killed = (xe::memory::Reinterpret<uint32_t>(value[2]) &
+                ~(UINT32_C(1) << 31)) != 0;
+    }
+  }
+  float position[4] = {};
+  uint32_t position_mask = 0;
+  bool killed = false;
+};
+}  // namespace
+
+uint32_t MetalCommandProcessor::ComputeDrawOverwrite(
+    xenos::PrimitiveType prim_type, const Shader* vertex_shader,
+    const Shader* pixel_shader, uint32_t normalized_color_mask,
+    reg::RB_DEPTHCONTROL depth, float rect_out[4]) {
+  // Default on; XE_METAL_OVERWRITE_SKIP=0 materializes as before.
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_OVERWRITE_SKIP");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (!s_enabled || prim_type != xenos::PrimitiveType::kRectangleList ||
+      !vertex_shader || !vertex_shader->is_ucode_analyzed()) {
+    return 0;
+  }
+  // XE_METAL_OVERWRITE_LOG=1: why rectangles are not overwrite candidates.
+  static const bool s_log = std::getenv("XE_METAL_OVERWRITE_LOG") != nullptr;
+  static uint32_t s_logs = 0;
+  auto reject = [&](const char* why, float a = 0, float b = 0, float c = 0,
+                    float d = 0) -> uint32_t {
+    // The first 300, then one in 32 (gameplay past the menus).
+    if (s_log && (s_logs++ < 300 || (s_logs & 31u) == 0)) {
+      XELOGW("MetalOverwrite reject {} ({}, {}, {}, {}) vs={:016X}", why, a,
+             b, c, d, vertex_shader->ucode_data_hash());
+    }
+    return 0;
+  };
+  const RegisterFile& regs = *register_file_;
+  auto initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (initiator.num_indices != 3 ||
+      (initiator.source_select != xenos::SourceSelect::kDMA &&
+       initiator.source_select != xenos::SourceSelect::kAutoIndex)) {
+    return reject("draw-shape");
+  }
+  if (xenos::IsMajorModeExplicit(initiator.major_mode, initiator.prim_type) &&
+      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          xenos::VGTOutputPath::kTessellationEnable) {
+    return reject("tessellation");
+  }
+  const xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if (edram_mode != xenos::EdramMode::kColorDepth &&
+      edram_mode != xenos::EdramMode::kDepthOnly) {
+    return reject("edram-mode");
+  }
+  auto mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+  auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+  if (mode_cntl.cull_front || mode_cntl.cull_back ||
+      mode_cntl.poly_mode != xenos::PolygonModeEnable::kDisabled ||
+      (mode_cntl.vtx_window_offset_enable &&
+       (window_offset.window_x_offset || window_offset.window_y_offset))) {
+    return reject("raster-state",
+                  float(mode_cntl.cull_front | (mode_cntl.cull_back << 1)),
+                  float(uint32_t(mode_cntl.poly_mode)),
+                  float(window_offset.window_x_offset),
+                  float(window_offset.window_y_offset));
+  }
+  auto clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  auto color_control = regs.Get<reg::RB_COLORCONTROL>();
+  if (clip_cntl.ucp_ena || color_control.alpha_to_mask_enable ||
+      (pixel_shader && pixel_shader->kills_pixels())) {
+    return reject("pixel-discard", float(clip_cntl.ucp_ena),
+                  float(color_control.alpha_to_mask_enable),
+                  float(pixel_shader && pixel_shader->kills_pixels()));
+  }
+  // GTA IV's alpha-tested clear rectangles test alpha != 0 with alpha 0: they
+  // write nothing, so they are not overwrites.
+  if (color_control.alpha_test_enable &&
+      color_control.alpha_func != xenos::CompareFunction::kAlways) {
+    return reject("alpha-test", float(color_control.alpha_func),
+                  regs.Get<float>(XE_GPU_REG_RB_ALPHA_REF));
+  }
+  // Slots every covered sample of which the draw writes regardless of the old
+  // content.
+  uint32_t slots = 0;
+  auto stencil_replaces = [](xenos::CompareFunction func, xenos::StencilOp op,
+                             reg::RB_STENCILREFMASK mask) {
+    return func == xenos::CompareFunction::kAlways &&
+           op == xenos::StencilOp::kReplace && mask.stencilwritemask == 0xFF;
+  };
+  if (depth.z_enable && depth.z_write_enable &&
+      depth.zfunc == xenos::CompareFunction::kAlways && depth.stencil_enable &&
+      stencil_replaces(depth.stencilfunc, depth.stencilzpass,
+                       regs.Get<reg::RB_STENCILREFMASK>()) &&
+      (!depth.backface_enable ||
+       stencil_replaces(depth.stencilfunc_bf, depth.stencilzpass_bf,
+                        regs.Get<reg::RB_STENCILREFMASK>(
+                            XE_GPU_REG_RB_STENCILREFMASK_BF)))) {
+    slots |= 1u;
+  }
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets &&
+                      edram_mode == xenos::EdramMode::kColorDepth;
+       ++i) {
+    if (((normalized_color_mask >> (i * 4)) & 0xFu) != 0xFu || !pixel_shader ||
+        !pixel_shader->writes_color_target(i)) {
+      continue;
+    }
+    auto blend = regs.Get<reg::RB_BLENDCONTROL>(
+        reg::RB_BLENDCONTROL::rt_register_indices[i]);
+    if (blend.color_srcblend == xenos::BlendFactor::kOne &&
+        blend.color_destblend == xenos::BlendFactor::kZero &&
+        blend.color_comb_fcn == xenos::BlendOp::kAdd &&
+        blend.alpha_srcblend == xenos::BlendFactor::kOne &&
+        blend.alpha_destblend == xenos::BlendFactor::kZero &&
+        blend.alpha_comb_fcn == xenos::BlendOp::kAdd) {
+      slots |= 1u << (1 + i);
+    }
+  }
+  if (!slots || !ShaderInterpreter::CanInterpretShader(*vertex_shader)) {
+    return reject("no-full-write", float(slots), float(depth.value & 0xFFFF),
+                  float(depth.value >> 16), float(normalized_color_mask));
+  }
+  // The window position as DrawExtentEstimator derives it: xy divided by w
+  // unless pre-transformed, then the enabled viewport scale and offset.
+  auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+  const bool viewport_enabled = vte.vport_x_scale_ena &&
+                                vte.vport_x_offset_ena &&
+                                vte.vport_y_scale_ena && vte.vport_y_offset_ena;
+  // vtx_w0_fmt (set by Direct3D 9 for everything) describes the VTE's W
+  // output, not the divide, which DrawExtentEstimator applies regardless.
+  if (!clip_cntl.clip_disable &&
+      (!viewport_enabled || vte.vtx_xy_fmt || vte.vtx_z_fmt)) {
+    // Clipping in a space this check does not model.
+    return reject("clip-space", float(vte.value), float(viewport_enabled));
+  }
+  const float x_scale =
+      vte.vport_x_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE)
+                            : 1.0f;
+  const float x_offset =
+      vte.vport_x_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET)
+                             : 0.0f;
+  const float y_scale =
+      vte.vport_y_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE)
+                            : 1.0f;
+  const float y_offset =
+      vte.vport_y_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET)
+                             : 0.0f;
+  const float center =
+      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero
+          ? 0.5f
+          : 0.0f;
+
+  // Vertex indices as the primitive processor and DrawExtentEstimator read
+  // them.
+  uint32_t indices[3];
+  auto dma_size = regs.Get<reg::VGT_DMA_SIZE>();
+  if (initiator.source_select == xenos::SourceSelect::kDMA) {
+    if (dma_size.num_words < 3) {
+      return reject("dma-short");
+    }
+    xenos::Endian endian = dma_size.swap_mode;
+    uint32_t base = regs[XE_GPU_REG_VGT_DMA_BASE];
+    if (initiator.index_size == xenos::IndexFormat::kInt16) {
+      if (endian == xenos::Endian::k8in32) {
+        endian = xenos::Endian::k8in16;
+      } else if (endian == xenos::Endian::k16in32) {
+        endian = xenos::Endian::kNone;
+      }
+      auto source = memory_->TranslatePhysical<const uint16_t*>(
+          base & ~uint32_t(sizeof(uint16_t) - 1));
+      for (uint32_t i = 0; i < 3; ++i) {
+        indices[i] = xenos::GpuSwap(uint32_t(source[i]), endian) & 0xFFFFFF;
+      }
+    } else {
+      auto source = memory_->TranslatePhysical<const uint32_t*>(
+          base & ~uint32_t(sizeof(uint32_t) - 1));
+      for (uint32_t i = 0; i < 3; ++i) {
+        indices[i] = xenos::GpuSwap(source[i], endian) & 0xFFFFFF;
+      }
+    }
+    if (mode_cntl.multi_prim_ib_ena) {
+      const uint32_t reset =
+          regs.Get<reg::VGT_MULTI_PRIM_IB_RESET_INDX>().reset_indx;
+      for (uint32_t i = 0; i < 3; ++i) {
+        if (indices[i] == reset) {
+          return reject("reset-index");
+        }
+      }
+    }
+  } else {
+    for (uint32_t i = 0; i < 3; ++i) {
+      indices[i] = i;
+    }
+  }
+  const uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
+  const uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
+  const uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
+
+  if (!overwrite_interpreter_) {
+    overwrite_interpreter_ =
+        std::make_unique<ShaderInterpreter>(regs, *memory_);
+  }
+  ShaderInterpreter& interpreter = *overwrite_interpreter_;
+  interpreter.SetShader(*vertex_shader);
+  OverwritePositionSink sink;
+  interpreter.SetExportSink(&sink);
+  float x[3], y[3];
+  bool ok = true;
+  for (uint32_t i = 0; i < 3 && ok; ++i) {
+    sink = OverwritePositionSink();
+    interpreter.temp_registers()[0] = float(std::min(
+        max_index, std::max(min_index, (indices[i] + index_offset) & 0xFFFFFF)));
+    interpreter.Execute();
+    const float* p = sink.position;
+    const uint32_t needed_mask = vte.vtx_xy_fmt ? 0b0011u : 0b1011u;
+    if (sink.killed || (sink.position_mask & needed_mask) != needed_mask ||
+        (!vte.vtx_xy_fmt && !(p[3] > 0.0f)) || !std::isfinite(p[0]) ||
+        !std::isfinite(p[1])) {
+      ok = false;
+      break;
+    }
+    if (!clip_cntl.clip_disable) {
+      // The whole rectangle must lie inside the depth clip range.
+      const float z_min = clip_cntl.dx_clip_space_def ? 0.0f : -p[3];
+      if (!(sink.position_mask & 0b0100) || !std::isfinite(p[2]) ||
+          p[2] < z_min || p[2] > p[3]) {
+        ok = false;
+        break;
+      }
+    }
+    const float inv_w = vte.vtx_xy_fmt ? 1.0f : 1.0f / p[3];
+    x[i] = p[0] * inv_w * x_scale + x_offset + center;
+    y[i] = p[1] * inv_w * y_scale + y_offset + center;
+  }
+  interpreter.SetExportSink(nullptr);
+  if (!ok) {
+    return reject("vertex");
+  }
+  // Three corners of an axis-aligned rectangle: two distinct values on each
+  // axis (the fourth corner is then that rectangle's).
+  auto two_values = [](const float v[3], float& lo, float& hi) {
+    lo = std::min(v[0], std::min(v[1], v[2]));
+    hi = std::max(v[0], std::max(v[1], v[2]));
+    for (uint32_t i = 0; i < 3; ++i) {
+      if (v[i] != lo && v[i] != hi) {
+        return false;
+      }
+    }
+    return lo < hi;
+  };
+  float x0, x1, y0, y1;
+  if (!two_values(x, x0, x1) || !two_values(y, y0, y1)) {
+    return reject("not-axis-aligned");
+  }
+  // The viewport bounds the host's coverage even with guest clipping off.
+  if (viewport_enabled) {
+    const float ax = std::abs(x_scale), ay = std::abs(y_scale);
+    x0 = std::max(x0, x_offset - ax + center);
+    x1 = std::min(x1, x_offset + ax + center);
+    y0 = std::max(y0, y_offset - ay + center);
+    y1 = std::min(y1, y_offset + ay + center);
+  }
+  draw_util::Scissor scissor;
+  draw_util::GetScissor(regs, scissor, true, false);
+  x0 = std::max(x0, float(scissor.offset[0]));
+  y0 = std::max(y0, float(scissor.offset[1]));
+  x1 = std::min(x1, float(scissor.offset[0] + scissor.extent[0]));
+  y1 = std::min(y1, float(scissor.offset[1] + scissor.extent[1]));
+  if (!(x0 < x1) || !(y0 < y1)) {
+    return reject("empty");
+  }
+  rect_out[0] = x0;
+  rect_out[1] = y0;
+  rect_out[2] = x1;
+  rect_out[3] = y1;
+  return slots;
+}
+
 bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
+  ServiceLazyCommitRequest();
   const bool state_dedupe = StateDedupeEnabled();
   // Diagnostic (XE_METAL_DRAW_TRACE=<draw>): log entry into IssueDraw for one
   // trace draw, with the primitive and index count, before any early exit.
@@ -6369,6 +7340,62 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   };
   auto* vertex_shader = static_cast<MetalShader*>(active_vertex_shader());
   auto* pixel_shader = static_cast<MetalShader*>(active_pixel_shader());
+  // Replay experiment (XE_METAL_PS_CONST_OVERRIDE=<ps hash hex>:<c>=<x,y,z,w>
+  // [;...]): overwrite pixel-shader float constants in the register file
+  // before this draw marshals them. Diagnostic only.
+  {
+    struct PsConstOverride {
+      uint64_t hash;
+      uint32_t c;
+      float v[4];
+    };
+    static const std::vector<PsConstOverride> s_overrides = [] {
+      std::vector<PsConstOverride> out;
+      const char* env = std::getenv("XE_METAL_PS_CONST_OVERRIDE");
+      if (!env) return out;
+      std::string spec(env);
+      size_t pos = 0;
+      while (pos < spec.size()) {
+        size_t semi = spec.find(';', pos);
+        std::string item = spec.substr(
+            pos, semi == std::string::npos ? std::string::npos : semi - pos);
+        PsConstOverride o{};
+        char* end = nullptr;
+        o.hash = strtoull(item.c_str(), &end, 16);
+        if (end && *end == ':') {
+          o.c = uint32_t(strtoul(end + 1, &end, 10));
+          if (end && *end == '=') {
+            const char* p = end + 1;
+            for (int i = 0; i < 4; ++i) {
+              o.v[i] = strtof(p, &end);
+              p = (end && *end == ',') ? end + 1 : end;
+            }
+            if (o.hash && o.c < 256) out.push_back(o);
+          }
+        }
+        if (semi == std::string::npos) break;
+        pos = semi + 1;
+      }
+      return out;
+    }();
+    if (!s_overrides.empty() && pixel_shader) {
+      for (const PsConstOverride& o : s_overrides) {
+        if (o.hash != pixel_shader->ucode_data_hash()) continue;
+        uint32_t r = XE_GPU_REG_SHADER_CONSTANT_256_X + o.c * 4;
+        for (int i = 0; i < 4; ++i) {
+          uint32_t bits;
+          std::memcpy(&bits, &o.v[i], 4);
+          // Through WriteRegister so constant dirty tracking and memos see it.
+          WriteRegister(r + i, bits);
+        }
+        static uint32_t s_override_logs = 0;
+        if (s_override_logs++ < 4) {
+          XELOGW("MetalPsConstOverride: ps={:016X} c{} = ({}, {}, {}, {})",
+                 o.hash, o.c, o.v[0], o.v[1], o.v[2], o.v[3]);
+        }
+      }
+    }
+  }
   if (!vertex_shader || !pipeline_cache_ || !upload_arena_) {
     RecordDrawSkip(!vertex_shader ? MetalDrawSkipReason::kInvalidGuestState
                                   : MetalDrawSkipReason::kResourceFailure,
@@ -6485,8 +7512,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         return true;
       }
       // The four host primitive shapes the patch dispatch supports (XeniOS
-      // :5431-5456); the shared processor never converts tessellated
-      // topologies, so host == guest here.
+      // :5431-5456). Tessellated triangle strips and fans arrive here as
+      // triangle lists (shared processor, Canary 3eab2b8b3); every other
+      // tessellated topology keeps host == guest.
       switch (tess_pp.host_primitive_type) {
         case xenos::PrimitiveType::kTriangleList:
         case xenos::PrimitiveType::kQuadList:
@@ -6498,12 +7526,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                          "tess-shape");
           return true;
       }
-      // Index stream shapes the arena staging serves: none (auto-indexed) or
-      // guest DMA. Converted/builtin types never occur for tessellated draws.
+      // Index stream shapes the arena staging serves: none (auto-indexed),
+      // guest DMA, and -- for tessellated strips and fans converted to
+      // triangle lists -- the host-converted per-frame pool or the built-in
+      // auto fan table.
       if (tess_pp.index_buffer_type !=
               PrimitiveProcessor::ProcessedIndexBufferType::kNone &&
           tess_pp.index_buffer_type !=
-              PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA) {
+              PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
+          tess_pp.index_buffer_type !=
+              PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted &&
+          tess_pp.index_buffer_type !=
+              PrimitiveProcessor::ProcessedIndexBufferType::
+                  kHostBuiltinForAuto) {
         RecordDrawSkip(MetalDrawSkipReason::kTessellationUnsupportedShape,
                        "tess-shape");
         return true;
@@ -6554,6 +7589,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   const bool dma_line_loop_route =
       index_buffer_info && index_buffer_info->guest_base &&
       IsDmaLineLoopRoutable(*register_file_, prim_type);
+  // Converted classes (2026-10-26): guest-DMA fans/loops (any reset), DMA
+  // quads on converting devices, and reset-enabled strips with a custom or
+  // 32-bit reset index all normalize through the shared PrimitiveProcessor's
+  // host-converted index buffer; the inline expansions above are now only
+  // the fallback when the route does not engage.
+  const bool converted_class_route =
+      primitive_processor_ && index_buffer_info &&
+      index_buffer_info->guest_base &&
+      IsConvertedClassRoutable(*register_file_, prim_type,
+                               convert_auto_quads_);
   // Point sprites expanded in the vertex shader (two-triangle strips, 4 host
   // vertices per point) instead of the object+mesh geometry emulation.
   const bool point_strip_route =
@@ -6721,12 +7766,35 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                  register_file_->Get<reg::SQ_PROGRAM_CNTL>(),
                  register_file_->Get<reg::SQ_CONTEXT_MISC>(), pgp);
            }() : 0u);
-    for (uint32_t c : {0u, 23u, 255u}) {
+    for (uint32_t c : {0u, 23u, 132u, 254u, 255u}) {
       uint32_t r = XE_GPU_REG_SHADER_CONSTANT_256_X + c * 4;
       XELOGW("MetalDrawTrace   ps c{} = ({}, {}, {}, {})", c,
              register_file_->Get<float>(r), register_file_->Get<float>(r + 1),
              register_file_->Get<float>(r + 2),
              register_file_->Get<float>(r + 3));
+    }
+    // Every float constant the pixel shader actually reads (bounded).
+    if (pixel_shader) {
+      const auto& pmap = pixel_shader->constant_register_map();
+      uint32_t printed = 0;
+      for (uint32_t i = 0; i < xe::countof(pmap.float_bitmap) && printed < 48;
+           ++i) {
+        uint64_t bits = pmap.float_bitmap[i];
+        while (bits && printed < 48) {
+          uint32_t j = uint32_t(xe::tzcnt(bits));
+          bits &= bits - 1;
+          uint32_t c = i * 64 + j;
+          uint32_t r = XE_GPU_REG_SHADER_CONSTANT_256_X + c * 4;
+          XELOGW("MetalDrawTrace   ps uses c{} = ({}, {}, {}, {}) [{:08X} {:08X} {:08X} {:08X}]",
+                 c, register_file_->Get<float>(r),
+                 register_file_->Get<float>(r + 1),
+                 register_file_->Get<float>(r + 2),
+                 register_file_->Get<float>(r + 3), (*register_file_)[r],
+                 (*register_file_)[r + 1], (*register_file_)[r + 2],
+                 (*register_file_)[r + 3]);
+          ++printed;
+        }
+      }
     }
     if (pixel_shader) {
       for (const auto& binding :
@@ -6748,6 +7816,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                uint32_t(f.mip_max_level), int32_t(f.lod_bias),
                uint32_t(f.num_format), uint32_t(f.sign_x),
                int32_t(f.exp_adjust));
+      }
+      // Pixel-shader vertex fetches (vfetch in a PS: per-pixel indexed
+      // buffer reads through the fetch constants, RotTR's dynamic-weight
+      // skinning pass).
+      for (const auto& vb : pixel_shader->vertex_bindings()) {
+        xenos::xe_gpu_vertex_fetch_t vf =
+            register_file_->GetVertexFetch(vb.fetch_constant);
+        XELOGW("MetalDrawTrace   ps vfetch fc={} addr={:08X} size_dw={} "
+               "endian={} stride_dw={} type={}",
+               vb.fetch_constant, vf.address << 2, vf.size,
+               uint32_t(vf.endian), vb.stride_words, uint32_t(vf.type));
       }
     }
   }
@@ -6781,7 +7860,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // topology (task 4.4).
   if (!use_tessellation_emulation && !use_geometry_emulation &&
       !auto_line_loop_route && !auto_quad_route && !dma_quad_route &&
-      !dma_line_loop_route && !MapPrimitiveType(prim_type, &mtl_prim)) {
+      !dma_line_loop_route && !converted_class_route &&
+      !MapPrimitiveType(prim_type, &mtl_prim)) {
     ++prim_census_[uint32_t(prim_type) & 31][6];
     RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
                    "prim-unmappable");
@@ -6790,8 +7870,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   ++prim_census_[uint32_t(prim_type) & 31]
                 [use_tessellation_emulation ? 5
                  : use_geometry_emulation   ? 4
-                 : auto_line_loop_route ||
-                           dma_line_loop_route
+                 : auto_line_loop_route || dma_line_loop_route ||
+                           (converted_class_route &&
+                            prim_type == xenos::PrimitiveType::kLineLoop)
                                             ? 3
                  : dma_quad_route           ? 2
                  : auto_quad_route          ? 1
@@ -7211,6 +8292,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   if (s_memexport_exec && vertex_shader->memexport_eM_written()) {
     draw_util::AddMemExportRanges(regs, *vertex_shader, memexport_ranges);
   }
+  // The vertex stage's ranges come first; the pixel stage's follow (as in
+  // the reference backends' AddMemExportRanges for VS then PS), so the gap
+  // report, preparation and publication see both stages' real destinations.
+  const size_t vertex_memexport_range_count = memexport_ranges.size();
+  if (s_memexport_exec && pixel_shader &&
+      pixel_shader->memexport_eM_written()) {
+    draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges);
+  }
+  const bool pixel_memexport_ranges_present =
+      memexport_ranges.size() > vertex_memexport_range_count;
   // Destination preparation, shared by BOTH memexport producer routes
   // (task 1.2 reuse audit: the VS-only route's call shape generalizes
   // untouched -- normalized range through DecideMemexportDestinationPreparation
@@ -7344,9 +8435,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // exclusions (pixel-stage export; tessellated producers, which the
   // tessellation route already fail-closed skips upstream at "tess-memexport").
   const metal::MetalMemexportRasterRoute memexport_raster_route =
-      metal::DecideMetalMemexportRasterRoute(
-          MetalMemexportRasterGateOn(), rt_bound_for_export,
-          !memexport_ranges.empty(), ps_writes_eM, use_tessellation_emulation);
+      metal::DecideMetalMemexportRoute(
+          MetalMemexportRasterGateOn(), MetalMemexportPixelGateOn(),
+          rt_bound_for_export, vertex_memexport_range_count != 0,
+          ps_writes_eM, pixel_memexport_ranges_present,
+          use_tessellation_emulation);
   bool memexport_raster_routed =
       metal::MetalMemexportRasterRouteRoutes(memexport_raster_route);
   // Bisect filter (XE_METAL_MEMEXPORT_RASTER_ONLY, empty by default and
@@ -7399,7 +8492,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         }
       };
       if (memexport_ranges.empty()) {
-        // A pixel-stage export whose ranges production never gathers still has
+        // An export whose stream constants produced no valid range still has
         // a class worth reporting once; key it on a zero range.
         report(0u, 0u);
       } else {
@@ -7423,10 +8516,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (s_memexport_log) {
       for (const auto& range : memexport_ranges) {
         XELOGW(
-            "MetalMemexportRasterExec draw={} VS shader={:016X} dest={:08X} "
+            "MetalMemexportRasterExec draw={} VS shader={:016X} PS shader="
+            "{:016X} ps_exports={} dest={:08X} "
             "bytes={} prim={} n={} geometry_emulated={} eM_mask={:02X} "
             "stage_mask={:X} writing_stage={:X}",
             trace_draw_index_, vertex_shader->ucode_data_hash(),
+            pixel_shader ? pixel_shader->ucode_data_hash() : 0ull,
+            ps_writes_eM ? 1 : 0,
             range.base_address_dwords << 2, range.size_bytes,
             uint32_t(prim_type), index_count, use_geometry_emulation ? 1 : 0,
             uint32_t(vertex_shader->memexport_eM_written()),
@@ -7703,8 +8799,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   vertex_fetch_dependencies.clear();
   vertex_dependency_ranges.Clear();
   draw_vfetch_renames_.clear();
+  // A pixel shader can vfetch too (Rise of the Tomb Raider's dynamic-weight
+  // skinning pass reads the cloth vertex positions per pixel through fetch
+  // constant 95). Those ranges are guest-RAM consumers exactly like the
+  // vertex shader's: they must be uploaded, hazard-ordered and joined with a
+  // pending memexport producer. Before 2026-10-25 only the vertex shader's
+  // bitmap was walked, so the pixel pass read whatever bytes the shared
+  // buffer happened to hold for that page (live: a stale or never-uploaded
+  // CPU write; the weight sum then collapses and the vertices fly off as a
+  // stretched sheet).
+  const Shader::ConstantRegisterMap* ps_map =
+      pixel_shader ? &pixel_shader->constant_register_map() : nullptr;
+  static uint32_t s_ps_vfetch_logged = 0;
   for (uint32_t i = 0; i < xe::countof(vs_map.vertex_fetch_bitmap); ++i) {
-    uint32_t bits = vs_map.vertex_fetch_bitmap[i];
+    const uint32_t ps_bits = ps_map ? ps_map->vertex_fetch_bitmap[i] : 0u;
+    uint32_t bits = vs_map.vertex_fetch_bitmap[i] | ps_bits;
     uint32_t j;
     while (xe::bit_scan_forward(bits, &j)) {
       bits = xe::clear_lowest_bit(bits);
@@ -7721,6 +8830,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           uint64_t(fetch_base) + uint64_t(fetch.size) * sizeof(uint32_t));
       if (!range) {
         continue;
+      }
+      if ((ps_bits & (1u << j)) && s_ps_vfetch_logged < 8) {
+        ++s_ps_vfetch_logged;
+        XELOGI("MetalPsVfetch: draw {} ps={:016X} fc={} base={:08X} size={}",
+               trace_draw_index_, pixel_shader->ucode_data_hash(),
+               fetch_constant, fetch_base, uint32_t(fetch.size) * 4);
       }
       vertex_fetch_dependencies.push_back(
           {fetch_constant, fetch, *range});
@@ -7946,6 +9061,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // the OFF arm bit-identical (an unconditional add would also start selecting
   // overlapping pending RESOLVES that the pre-change code never selected).
   bool memexport_raster_consumer_range = false;
+  // Set when this draw's vertex or texture inputs were served by command
+  // order against a pending memexport (kOrderAgainstGpuProducers): a routed
+  // rasterizing producer in the SAME render encoder is not ordered by Metal's
+  // hazard tracking, which works per encoder, so the draw needs an in-encoder
+  // buffer barrier (see the encode below).
+  bool ordered_against_memexport = false;
+  auto note_memexport_ordering = [&](const metal::ConsumerDecision& decision) {
+    if (decision.action !=
+        metal::AuthorityAction::kOrderAgainstGpuProducers) {
+      return;
+    }
+    for (const metal::PendingProducer& p : decision.selected) {
+      if (p.state == metal::TransitState::kPendingMemexport) {
+        ordered_against_memexport = true;
+        return;
+      }
+    }
+  };
   if (MetalMemexportRasterGateOn() && use_tessellation_emulation &&
       tess_pp.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
@@ -8044,6 +9177,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     metal::ConsumerDecision authority_decision =
         QueryPendingProducerDependencies(metal::ConsumerKind::kVertex,
                                          vertex_request);
+    note_memexport_ordering(authority_decision);
     // Consumer-attribution diagnostic (XE_METAL_MEMEXPORT_LOG=1, default off,
     // log only): names the CONSUMING draw for every exported range this
     // vertex/index read depends on -- the evidence task 1.1 needs to decide
@@ -8242,9 +9376,43 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // the ownership transfers this draw needs (stage 2 of the render chain).
   // Memexport-only draws touch no EDRAM: skip the update (the next normal
   // draw re-runs it) and the attachment checks below.
+  // Predicated tiling (Canary e1f4a0d00): a whole-tile negative
+  // PA_SC_WINDOW_OFFSET moves into the EDRAM bases so every tile rasterizes
+  // at the same position as the full-surface depth prepass. The viewport,
+  // scissor and PsParamGen then use window offset 0 (the shader adds the
+  // offset back to PsParamGen). --window_offset_in_edram=false rolls back.
+  const int32_t window_offset_tiles =
+      memexport_draw ? 0
+                     : render_target_cache_->GetWindowOffsetTiles(
+                           regs, norm_depth, normalized_color_mask,
+                           guest_swap_count());
+  {
+    // Census: which window offsets reach the EDRAM bases (in_base=1) and which
+    // stay in the viewport (a wrapping base, an x offset, a 64bpp next-period
+    // target or --window_offset_in_edram off).
+    static const bool s_wo_census =
+        std::getenv("XE_GPU_DELTA_CENSUS") != nullptr;
+    auto window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+    if (s_wo_census && !memexport_draw &&
+        regs.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable &&
+        (window_offset.window_x_offset || window_offset.window_y_offset)) {
+      uint64_t n = DeltaCensusKeyedCount(
+          4, uint64_t(window_offset.value) |
+                 (uint64_t(window_offset_tiles != 0) << 32));
+      if (DeltaCensusLogCount(n)) {
+        XELOGI(
+            "DeltaCensus window_offset_route draw={} x={} y={} in_base={} "
+            "tiles={} count={}",
+            trace_draw_index_, int32_t(window_offset.window_x_offset),
+            int32_t(window_offset.window_y_offset),
+            window_offset_tiles != 0 ? 1 : 0, window_offset_tiles, n);
+      }
+    }
+  }
   if (!memexport_draw &&
       !render_target_cache_->Update(color_bound || depth_bound, norm_depth,
-                                    normalized_color_mask, *vertex_shader)) {
+                                    normalized_color_mask, *vertex_shader,
+                                    window_offset_tiles)) {
     RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "rt-cache-update");
     return true;
   }
@@ -8257,7 +9425,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     norm_depth.value = 0;
     depth_bound = false;
     if (!render_target_cache_->Update(color_bound, norm_depth,
-                                      normalized_color_mask, *vertex_shader)) {
+                                      normalized_color_mask, *vertex_shader,
+                                      window_offset_tiles)) {
       RecordDrawSkip(MetalDrawSkipReason::kDiagnosticRollback,
                      "rt-cache-update-nosmalldepth");
       return true;
@@ -8472,7 +9641,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   uint64_t vs_mod = vs_mod_decoded.value;
   auto* vs_translation = static_cast<MetalShader::MetalTranslation*>(
       vertex_shader->GetOrCreateTranslation(vs_mod));
-  if (!pipeline_cache_->TranslateShader(*vs_translation)) {
+  // Background pipelines (metal_async_pipelines): the pipeline step below
+  // translates, on a worker when the draw may use a stand-in. Not for traces,
+  // memexport-only draws or geometry emulation.
+  const bool async_pipelines = MetalPipelineCache::AsyncPipelinesEnabled() &&
+                               !trace_writer_.is_open() &&
+                               !trace_playback_context() && !memexport_draw &&
+                               !use_geometry_emulation && !kDebugSolidFragment;
+  if (!async_pipelines && !pipeline_cache_->TranslateShader(*vs_translation)) {
     RecordDrawSkip(MetalDrawSkipReason::kTranslationFailure, "vs-translate");
     return true;
   }
@@ -8710,7 +9886,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ps_mod_value = ps_mod;
     ps_translation = static_cast<MetalShader::MetalTranslation*>(
         pixel_shader->GetOrCreateTranslation(ps_mod));
-    if (!pipeline_cache_->TranslateShader(*ps_translation)) {
+    if (!async_pipelines && !pipeline_cache_->TranslateShader(*ps_translation)) {
       ps_translation = nullptr;
     }
   }
@@ -8843,6 +10019,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       pipeline_depth_format |= MetalPipelineCache::kDepthWithoutStencilBit;
     }
   }
+  // A deferred pipeline request (metal_async_pipelines): `pipeline` points at
+  // it and the encoder thread resolves it.
+  std::shared_ptr<void> deferred_pipeline;
   // Geometry-emulation config (VS output size + GS max input primitives per mesh
   // threadgroup), filled by the geometry pipeline and passed to the draw call.
   uint32_t gs_vertex_size = 0;
@@ -8876,6 +10055,78 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         blend_controls,
         normalized_color_mask,
         &gs_vertex_size, &gs_max_input_primitives);
+  } else if (async_pipelines) {
+    // A stand-in (skipping the draw until the real pipeline exists) is only
+    // harmless in a pass redrawn every frame: not for a render target drawn
+    // only now (a one-off render to a texture), a small one (generated data)
+    // or a draw with memory exports (Xenia Edge de8e60601).
+    const bool target_recurring =
+        render_target_cache_->TrackLastUpdateDrawTarget(uint64_t(swap_count_) +
+                                                        1);
+    const bool target_small =
+        render_target_cache_->IsLastUpdateDrawTargetSmall();
+    const bool stand_in_allowed =
+        target_recurring && !target_small && memexport_ranges.empty();
+    // A draw that waits hands its pipeline to the encoder thread when that
+    // replays the draws (XE_METAL_DEFERRED_PIPELINES=0: the command processor
+    // waits instead), so the pass's other new pipelines are queued meanwhile.
+    static const bool s_defer = [] {
+      const char* v = std::getenv("XE_METAL_DEFERRED_PIPELINES");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    const bool may_defer =
+        s_defer && !stand_in_allowed &&
+        encode_stream_->mode() == MetalEncodeStream::Mode::kThreaded;
+    MetalShader::MetalTranslation* ps_used = nullptr;
+    const auto async_start = std::chrono::steady_clock::now();
+    const MetalPipelineCache::AsyncPipelineStatus status =
+        pipeline_cache_->GetRenderPipelineStateAsync(
+            vs_translation, ps_translation, color_pixel_formats,
+            pipeline_depth_format, pipeline_raster_state.pipeline_key(),
+            blend_controls, normalized_color_mask, stand_in_allowed, may_defer,
+            &pipeline, &ps_used, &deferred_pipeline);
+    if (status == MetalPipelineCache::AsyncPipelineStatus::kDeferred) {
+      pipeline = deferred_pipeline.get();
+    }
+    if (!stand_in_allowed) {
+      // Why draws waited (attribution, logged every 900 swaps): only waits
+      // over 1 ms count, which is a build or a queued build finishing.
+      const double waited_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - async_start)
+              .count();
+      if (waited_ms > 1.0) {
+        const int why = !memexport_ranges.empty() ? 2
+                        : target_small            ? 1
+                                                  : 0;
+        ++async_wait_counts_[why];
+        async_wait_ms_[why] += waited_ms;
+      }
+    }
+    if (swap_count_ != async_wait_logged_swap_ && swap_count_ % 900 == 0 &&
+        (async_wait_counts_[0] | async_wait_counts_[1] |
+         async_wait_counts_[2])) {
+      async_wait_logged_swap_ = swap_count_;
+      XELOGI(
+          "MetalAsyncPipelines swap#{}: draws that waited: target not "
+          "recurring {} ({:.0f} ms), small target {} ({:.0f} ms), memexport "
+          "{} ({:.0f} ms)",
+          swap_count_, async_wait_counts_[0], async_wait_ms_[0],
+          async_wait_counts_[1], async_wait_ms_[1], async_wait_counts_[2],
+          async_wait_ms_[2]);
+    }
+    if (status == MetalPipelineCache::AsyncPipelineStatus::kPending) {
+      GetMetalShaderBuildCensus().async_skips.fetch_add(
+          1, std::memory_order_relaxed);
+      RecordDrawSkip(MetalDrawSkipReason::kAsyncPipelinePending,
+                     "async-pipeline-pending");
+      return true;
+    }
+    if (!vs_translation->has_metal_function()) {
+      RecordDrawSkip(MetalDrawSkipReason::kTranslationFailure, "vs-translate");
+      return true;
+    }
+    ps_translation = ps_used;
   } else {
     pipeline = pipeline_cache_->GetOrCreateRenderPipelineState(
         vs_translation, ps_translation, color_pixel_formats,
@@ -9389,7 +10640,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                           texture_cache_->BridgeServes(f.base_address << 12,
                                                        f.size_2d.width + 1,
                                                        f.size_2d.height + 1);
-            uint32_t fw = f.size_2d.width + 1, fh = f.size_2d.height + 1;
+            uint32_t fw = fetch_width_serve(f), fh = fetch_height_serve(f);
             uint32_t fp = f.pitch ? (uint32_t(f.pitch) << 5)
                                   : ((fw + 31u) & ~31u);
             bool strict = SharedRouteEligible(f, false, fw, fh, fp, nullptr);
@@ -9533,6 +10784,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     draw_gpu_ordering_active_ =
         authority_decision.action ==
         metal::AuthorityAction::kOrderAgainstGpuProducers;
+    note_memexport_ordering(authority_decision);
     // Bounded ordered-execution log (10395 corner artifact): name every draw
     // whose wait was elided and the producer ranges it was ordered against.
     static const bool s_order_log = std::getenv("XE_METAL_ORDER_LOG") != nullptr;
@@ -9627,8 +10879,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 fetch.type, cvars::gpu_allow_invalid_fetch_constants)) {
           continue;
         }
-        uint32_t fetch_width = fetch.size_2d.width + 1;
-        uint32_t fetch_height = fetch.size_2d.height + 1;
+        // Per-dimension size (1D and 3D pack their sizes differently).
+        uint32_t fetch_width = fetch_width_serve(fetch);
+        uint32_t fetch_height = fetch_height_serve(fetch);
         uint32_t fetch_pitch_texels = fetch.pitch
                                           ? (uint32_t(fetch.pitch) << 5)
                                           : ((fetch_width + 31u) & ~31u);
@@ -9853,7 +11106,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   draw_trace_milestone("before-primitive-processor");
   if (primitive_processor_ && !use_geometry_emulation && !point_strip_route &&
       (IsPp1Routable(regs, prim_type) || auto_fan_route ||
-       auto_quad_route || auto_line_loop_route || fixed_reset_strip_route) &&
+       auto_quad_route || auto_line_loop_route || fixed_reset_strip_route ||
+       converted_class_route) &&
       IsPp1DrawViewConsistent(
           regs, index_count, index_buffer_info != nullptr,
           index_buffer_info ? index_buffer_info->guest_base : 0,
@@ -9861,142 +11115,76 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           index_buffer_info ? index_buffer_info->endianness : xenos::Endian::kNone,
           index_buffer_info ? index_buffer_info->count : 0)) {
     if (primitive_processor_->Process(pp_result)) {
-      if (fixed_reset_strip_route) {
-        // Accept only the non-converting fixed-sentinel result proven by the
-        // PP4 L0 matrix and live census. Any future shared result-shape change
-        // fails closed; converted buffers are not owned by this slice.
-        bool fixed_reset_shape =
-            pp_result.host_primitive_type == prim_type &&
-            pp_result.host_vertex_shader_type ==
-                Shader::HostVertexShaderType::kVertex &&
-            pp_result.host_draw_vertex_count == index_count &&
-            pp_result.host_primitive_reset_enabled &&
-            pp_result.index_buffer_type ==
-                PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
-            pp_result.host_index_format == xenos::IndexFormat::kInt16;
-        if (fixed_reset_shape) {
-          pp_routed = true;
-        } else {
-          XELOGE(
-              "MetalPrimitiveProcessor: routed fixed-reset strip did not "
-              "produce the kGuestDMA/fixed-16 shape (guest_prim {} host_prim "
-              "{} vs_type {} count {}/{} reset {} ibt {} format {}); "
-              "skipping.",
-              uint32_t(prim_type), uint32_t(pp_result.host_primitive_type),
-              uint32_t(pp_result.host_vertex_shader_type),
-              pp_result.host_draw_vertex_count, index_count,
-              pp_result.host_primitive_reset_enabled,
-              uint32_t(pp_result.index_buffer_type),
-              uint32_t(pp_result.host_index_format));
-          assert_always();
-        }
-      } else if (auto_line_loop_route) {
-        // Accept exactly the auto-loop shared shape. count <= 1 deliberately
-        // produces a zero-count no-draw result with closing index 0.
-        uint32_t expected_count = PrimitiveProcessor::GetLineLoopStripIndexCount(index_count);
-        uint32_t expected_closing_index = expected_count ? expected_count - 1 : 0;
-        bool auto_loop_shape =
-            pp_result.host_primitive_type == xenos::PrimitiveType::kLineStrip &&
-            pp_result.host_vertex_shader_type == Shader::HostVertexShaderType::kVertex &&
-            !pp_result.host_primitive_reset_enabled &&
-            pp_result.index_buffer_type == PrimitiveProcessor::ProcessedIndexBufferType::kNone &&
-            pp_result.host_draw_vertex_count == expected_count &&
-            pp_result.line_loop_closing_index == expected_closing_index;
-        if (auto_loop_shape) {
-          pp_routed = true;
-        } else {
-          XELOGE("MetalPrimitiveProcessor: routed auto line loop did not produce "
-                 "the kNone/kLineStrip shape (host_prim {} vs_type {} count {}/{} "
-                 "closing {}/{} reset {} ibt {}); skipping.",
-                 uint32_t(pp_result.host_primitive_type),
-                 uint32_t(pp_result.host_vertex_shader_type), pp_result.host_draw_vertex_count,
-                 expected_count, pp_result.line_loop_closing_index, expected_closing_index,
-                 pp_result.host_primitive_reset_enabled, uint32_t(pp_result.index_buffer_type));
-          assert_always();
-        }
-      } else if (auto_quad_route) {
-        // The shared built-in quad table: (0,1,2),(0,2,3) per quad, 16-bit,
-        // 6 indices per 4 vertices (0 for fewer than 4 -> no-draw below).
-        bool builtin_quad_shape =
-            pp_result.host_primitive_type == xenos::PrimitiveType::kTriangleList &&
-            pp_result.host_vertex_shader_type == Shader::HostVertexShaderType::kVertex &&
-            !pp_result.host_primitive_reset_enabled &&
-            pp_result.index_buffer_type ==
-                PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto &&
-            pp_result.host_draw_vertex_count ==
-                (index_count / 4) * 6;
-        if (builtin_quad_shape) {
-          pp_routed = true;
-        } else {
-          XELOGE("MetalPrimitiveProcessor: routed auto quad list did not "
-                 "produce the kHostBuiltinForAuto shape (host_prim {} vs_type "
-                 "{} count {}/{} reset {} ibt {}); skipping.",
-                 uint32_t(pp_result.host_primitive_type),
-                 uint32_t(pp_result.host_vertex_shader_type),
-                 pp_result.host_draw_vertex_count,
-                 (index_count / 4) * 6,
-                 pp_result.host_primitive_reset_enabled,
-                 uint32_t(pp_result.index_buffer_type));
-          assert_always();
-        }
-      } else if (auto_fan_route) {
-        // Accept exactly the auto-fan built-in shape: a triangle list, plain
-        // vertex shader, no reset, kHostBuiltinForAuto, with the expected
-        // expanded count (0 for count<3 -> a no-draw success below).
-        bool builtin_fan_shape =
-            pp_result.host_primitive_type == xenos::PrimitiveType::kTriangleList &&
-            pp_result.host_vertex_shader_type == Shader::HostVertexShaderType::kVertex &&
-            !pp_result.host_primitive_reset_enabled &&
-            pp_result.index_buffer_type ==
-                PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto &&
-            pp_result.host_draw_vertex_count ==
-                PrimitiveProcessor::GetTriangleFanListIndexCount(index_count);
-        if (builtin_fan_shape) {
-          pp_routed = true;
-        } else {
-          XELOGE("MetalPrimitiveProcessor: routed auto fan did not produce the "
-                 "kHostBuiltinForAuto shape (host_prim {} vs_type {} count {}/{} "
-                 "reset {} ibt {}); staying inline.",
-                 uint32_t(pp_result.host_primitive_type),
-                 uint32_t(pp_result.host_vertex_shader_type),
-                 pp_result.host_draw_vertex_count,
-                 PrimitiveProcessor::GetTriangleFanListIndexCount(index_count),
-                 pp_result.host_primitive_reset_enabled,
-                 uint32_t(pp_result.index_buffer_type));
-          assert_always();
-        }
+      // The shared processor is the normalization authority for every routed
+      // class. Accept any result the emission below can bind: a plain vertex
+      // host VS type, a host topology Metal maps (the native list/strip set,
+      // kTriangleList for converted fans/quads, kLineStrip for converted
+      // loops) and one of the five index-buffer types. Anything else means
+      // the routing predicates and Process disagree about the draw; fail
+      // closed to the inline path (or the skip below for classes without
+      // one) rather than bind a shape the emission never audited.
+      MTLPrimitiveType mapped_host_prim = MTLPrimitiveTypeTriangle;
+      const bool host_type_ok =
+          pp_result.host_vertex_shader_type ==
+              Shader::HostVertexShaderType::kVertex &&
+          MapPrimitiveType(pp_result.host_primitive_type, &mapped_host_prim) &&
+          pp_result.host_primitive_type != xenos::PrimitiveType::kTriangleFan;
+      bool index_type_ok;
+      switch (pp_result.index_buffer_type) {
+        case PrimitiveProcessor::ProcessedIndexBufferType::kNone:
+        case PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA:
+        case PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted:
+        case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto:
+        case PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA:
+          index_type_ok = true;
+          break;
+        default:
+          index_type_ok = false;
+          break;
+      }
+      // Auto-indexed classes never produce a guest-DMA-backed stream, and the
+      // PP1/PP4 pass-through classes never change topology: both are
+      // invariants of the shared code, pinned here so a shared-side change
+      // cannot silently reach the emission.
+      const bool auto_source =
+          regs.Get<reg::VGT_DRAW_INITIATOR>().source_select ==
+          xenos::SourceSelect::kAutoIndex;
+      const bool source_ok =
+          !auto_source ||
+          (pp_result.index_buffer_type !=
+               PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
+           pp_result.index_buffer_type !=
+               PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA);
+      const bool topology_ok =
+          (prim_type != xenos::PrimitiveType::kLineList &&
+           prim_type != xenos::PrimitiveType::kLineStrip &&
+           prim_type != xenos::PrimitiveType::kTriangleList &&
+           prim_type != xenos::PrimitiveType::kTriangleStrip) ||
+          pp_result.host_primitive_type == prim_type;
+      if (host_type_ok && index_type_ok && source_ok && topology_ok) {
+        pp_routed = true;
       } else {
-        // Fail-closed: only accept the exact PP1 pass-through shape. Anything
-        // else (a conversion, tessellation, reset, count/topology change, or an
-        // unexpected index-buffer type) means the routed set assumptions were
-        // violated; leave pp_routed false so the inline path stays authoritative.
-        PrimitiveProcessor::ProcessedIndexBufferType expected_ibt =
-            index_buffer_info ? PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA
-                              : PrimitiveProcessor::ProcessedIndexBufferType::kNone;
-        bool pass_through_shape =
-            pp_result.host_primitive_type == prim_type &&
-            pp_result.host_vertex_shader_type == Shader::HostVertexShaderType::kVertex &&
-            pp_result.host_draw_vertex_count == index_count &&
-            !pp_result.host_primitive_reset_enabled &&
-            pp_result.index_buffer_type == expected_ibt;
-        if (pass_through_shape) {
-          pp_routed = true;
-        } else {
-          XELOGE("MetalPrimitiveProcessor: routed draw did not produce the PP1 "
-                 "pass-through shape (guest_prim {} host_prim {} vs_type {} "
-                 "count {}/{} reset {} ibt {}); staying inline.",
-                 uint32_t(prim_type), uint32_t(pp_result.host_primitive_type),
-                 uint32_t(pp_result.host_vertex_shader_type),
-                 pp_result.host_draw_vertex_count, index_count,
-                 pp_result.host_primitive_reset_enabled,
-                 uint32_t(pp_result.index_buffer_type));
-          assert_always();
-        }
+        XELOGE(
+            "MetalPrimitiveProcessor: routed draw produced a shape the "
+            "emission cannot bind (guest_prim {} host_prim {} vs_type {} "
+            "count {}/{} reset {} ibt {} format {}); staying inline.",
+            uint32_t(prim_type), uint32_t(pp_result.host_primitive_type),
+            uint32_t(pp_result.host_vertex_shader_type),
+            pp_result.host_draw_vertex_count, index_count,
+            pp_result.host_primitive_reset_enabled,
+            uint32_t(pp_result.index_buffer_type),
+            uint32_t(pp_result.host_index_format));
+        assert_always();
       }
     }
   }
 
   draw_trace_milestone("after-primitive-processor");
+  if (pp_routed &&
+      pp_result.index_buffer_type ==
+          PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted) {
+    ++prim_census_[uint32_t(prim_type) & 31][7];
+  }
 
   // Auto line loops have no valid inline Metal fallback: the guest topology is
   // intentionally unmapped. If view consistency, Process, or the exact shape
@@ -10011,6 +11199,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability, "quad-route");
     return true;
   }
+  // A guest-DMA line loop with primitive reset has no inline path either
+  // (the inline loop route only closes reset-disabled loops).
+  if (converted_class_route && !pp_routed &&
+      prim_type == xenos::PrimitiveType::kLineLoop && !dma_line_loop_route) {
+    RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
+                   "line-loop-route");
+    return true;
+  }
+  // A converted or built-in stream with nothing to draw (fan/quad with fewer
+  // than 3/4 indices, a loop with one) is a successful no-draw; skip before
+  // opening an encoder, matching the inline expansions' degenerate skips.
+  if (pp_routed && pp_result.host_draw_vertex_count == 0 &&
+      (pp_result.index_buffer_type ==
+           PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted ||
+       pp_result.index_buffer_type ==
+           PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA)) {
+    RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect, "pp-degenerate");
+    return true;
+  }
   // A degenerate loop is a successful no-draw. Skip before opening an encoder
   // or allocating constants, and never expose the synthetic closing vertex.
   if (auto_line_loop_route && pp_result.host_draw_vertex_count == 0) {
@@ -10019,24 +11226,24 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return true;
   }
 
-  // Discrete GPUs: a routed guest-DMA index buffer is bound straight from the
-  // VRAM mirror and the vertex shader swaps it (vertex_index_endian), instead
-  // of the CPU byte-swapping every index into the system-memory upload arena
-  // the GPU then reads across PCIe. The range is requested like a vertex
-  // fetch (consumed-range hazard tracking, rename on a rewrite hazard), so
-  // the bound bytes are the ones the CPU path would have swapped. Only the
-  // endian shapes SwapIndicesInto treats identically to the shader are taken;
-  // 4-byte alignment is Metal's index-buffer offset rule.
-  // XE_METAL_GPU_INDEX_SWAP=0 restores the CPU swap.
+  // A routed guest-DMA index buffer can be bound straight from the shared
+  // memory buffer with the vertex shader swapping it (vertex_index_endian),
+  // instead of the CPU byte-swapping every index into the upload arena. The
+  // range is requested like a vertex fetch (consumed-range hazard tracking,
+  // rename on a rewrite hazard), so the bound bytes are the ones the CPU path
+  // would have swapped. Only the endian shapes SwapIndicesInto treats
+  // identically to the shader are taken; 4-byte alignment is Metal's
+  // index-buffer offset rule.
+  // Default on; XE_METAL_GPU_INDEX_SWAP=0 restores the CPU swap.
   bool direct_index = false;
   xenos::Endian direct_index_endian = xenos::Endian::kNone;
   uint32_t direct_index_offset = 0;
   static const bool s_gpu_index_swap = [] {
     const char* v = std::getenv("XE_METAL_GPU_INDEX_SWAP");
-    return !(v && v[0] == '0' && !v[1]);
+    return !v || std::strcmp(v, "0") != 0;
   }();
-  if (s_gpu_index_swap && discrete_mirror_ && pp_routed &&
-      !use_tessellation_emulation && !trace_writer_.is_open() &&
+  if (s_gpu_index_swap && pp_routed && !use_tessellation_emulation &&
+      !trace_writer_.is_open() &&
       pp_result.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
       pp_result.host_draw_vertex_count &&
@@ -10114,6 +11321,17 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     prepare_fits(vertex_shader);
   }
   draw_trace_milestone("after-snapshot-fit");
+  {
+    // Set for every draw: a stale mask must never reach another draw.
+    float overwrite_rect[4] = {};
+    const uint32_t overwrite_slots =
+        memexport_draw ? 0u
+                       : ComputeDrawOverwrite(prim_type, vertex_shader,
+                                              pixel_shader,
+                                              normalized_color_mask,
+                                              norm_depth, overwrite_rect);
+    render_target_cache_->SetDrawOverwrite(overwrite_slots, overwrite_rect);
+  }
   __unsafe_unretained id<MTLRenderCommandEncoder> encoder =
       (__bridge id<MTLRenderCommandEncoder>)BeginFrameEncoder();
   if (!encoder) {
@@ -10129,6 +11347,31 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     ~StreamCommit() { stream.Commit(); }
   } stream_commit{es};
   draw_trace_milestone("after-encoder");
+  // In-encoder ordering for routed rasterizing memexport. Halo: Reach skins
+  // its faces this way: two exporting draws write a 576 KiB scratch range,
+  // the next two draws vertex-fetch it, then the next producer pair
+  // overwrites it, three times a frame, all in one render pass. Metal orders
+  // tracked resources between encoders only, so without a barrier the
+  // consumer's fetch races the producer's vertex-stage stores (faces drew as
+  // spikes) and the next producer races the previous consumer's reads.
+  // XE_METAL_RASTER_EXPORT_BARRIER=0 drops the barriers (diagnostic).
+  {
+    static const bool s_raster_export_barrier = [] {
+      const char* v = std::getenv("XE_METAL_RASTER_EXPORT_BARRIER");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    const uintptr_t encoder_id = uintptr_t((__bridge void*)encoder);
+    const bool encoder_has_raster_export =
+        raster_export_encoder_ != 0 && raster_export_encoder_ == encoder_id;
+    if (s_raster_export_barrier && encoder_has_raster_export &&
+        (memexport_raster_routed || ordered_against_memexport)) {
+      es.BufferBarrier(MTLRenderStageVertex,
+                       MTLRenderStageVertex | MTLRenderStageFragment);
+    }
+    if (memexport_raster_routed) {
+      raster_export_encoder_ = encoder_id;
+    }
+  }
   if (PassCensusEnabled() && !memexport_draw) {
     pass_census_.NoteDraw(metal::GetMetalPassAttachmentUse(
         norm_depth, normalized_color_mask, blend_controls,
@@ -10159,11 +11402,23 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         regs, norm_depth, pixel_shader && pixel_shader->writes_depth(),
         msaa_fold_scale_x * draw_resolution_scale_x_,
         msaa_fold_scale_y * draw_resolution_scale_y_, draw_resolution_scale_x_,
-        draw_resolution_scale_y_);
+        draw_resolution_scale_y_, window_offset_tiles != 0);
     draw_util::GetHostViewportInfo(&vp_args, viewport_info);
     for (uint32_t i = 0; i < 3; ++i) {
       system_constants.ndc_scale[i] = viewport_info.ndc_scale[i];
       system_constants.ndc_offset[i] = viewport_info.ndc_offset[i];
+    }
+    // Window offset carried in the EDRAM bases: PsParamGen adds it back.
+    {
+      auto pa_sc_window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
+      system_constants.param_gen_window_offset[0] =
+          window_offset_tiles ? float(pa_sc_window_offset.window_x_offset)
+                              : 0.0f;
+      system_constants.param_gen_window_offset[1] =
+          window_offset_tiles ? float(pa_sc_window_offset.window_y_offset)
+                              : 0.0f;
+      system_constants.param_gen_window_offset_padding[0] = 0;
+      system_constants.param_gen_window_offset_padding[1] = 0;
     }
     // Exact representative pixel at an even draw resolution scale
     // (metal_draw_resolution_scale.h): shift geometry half a host pixel right
@@ -10440,12 +11695,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           auto fetch = regs.GetTextureFetch(binding.fetch_constant);
           XELOGI(
               "DrawTex draw={} {} fc={} base={:08X} fmt={} {}x{} pitch={} "
-              "endian={} signed={} type={}",
+              "endian={} signed={} type={} num_format={} exp_adjust={} "
+              "signs={},{},{},{}",
               trace_draw_index_, stage, binding.fetch_constant,
               fetch.base_address << 12, uint32_t(fetch.format),
               fetch.size_2d.width + 1, fetch.size_2d.height + 1,
               uint32_t(fetch.pitch) << 5, uint32_t(fetch.endianness),
-              binding.is_signed ? 1 : 0, uint32_t(fetch.type));
+              binding.is_signed ? 1 : 0, uint32_t(fetch.type),
+              uint32_t(fetch.num_format), int32_t(fetch.exp_adjust),
+              uint32_t(fetch.sign_x), uint32_t(fetch.sign_y),
+              uint32_t(fetch.sign_z), uint32_t(fetch.sign_w));
         }
       };
       log_bindings(vertex_shader, "vs");
@@ -10476,8 +11735,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // identity. Publishing the guest endian here while binding a pre-swapped
     // stream would double-swap every adaptive factor silently.
     //
-    // The exception is a direct-bound draw (discrete GPUs, above): its raw
-    // guest indices are bound unswapped, so the shader swaps them.
+    // The exception is a direct-bound draw (above): its raw guest indices are
+    // bound unswapped, so the shader swaps them.
     system_constants.vertex_index_endian =
         direct_index ? direct_index_endian : xenos::Endian::kNone;
     system_constants.vertex_index_offset =
@@ -10771,7 +12030,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         return true;
       }
       draw_util::Scissor guest_scissor;
-      draw_util::GetScissor(regs, guest_scissor);
+      draw_util::GetScissor(regs, guest_scissor, true,
+                            window_offset_tiles != 0);
       // Scale the guest scissor by the same factor as the viewport: the draw
       // resolution scale, times the fold scale of an MSAA clear folded into
       // the 1x view (identity at 1x otherwise).
@@ -11153,12 +12413,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // XE_METAL_TEX_PROBE=<draw>: log every texture binding's fetch fields +
       // resolved bindless slot at that trace draw (slot 0 = null texture ->
       // the shader samples zero; the light-draw zero-output suspect).
-      static const int64_t s_tex_probe = [] {
+      // XE_METAL_TEX_PROBE=A-B probes every draw in that inclusive range.
+      static const std::pair<int64_t, int64_t> s_tex_probe_range = [] {
         const char* v = std::getenv("XE_METAL_TEX_PROBE");
-        return v ? strtoll(v, nullptr, 10) : -1;
+        if (!v) {
+          return std::pair<int64_t, int64_t>{-1, -1};
+        }
+        char* end = nullptr;
+        int64_t a = strtoll(v, &end, 10);
+        int64_t b = (end && *end == '-') ? strtoll(end + 1, nullptr, 10) : a;
+        return std::pair<int64_t, int64_t>{a, b};
       }();
-      bool probe = s_tex_probe >= 0 &&
-                   int64_t(trace_draw_index_) - 1 == s_tex_probe;
+      const int64_t probe_draw = int64_t(trace_draw_index_) - 1;
+      bool probe = s_tex_probe_range.first >= 0 &&
+                   probe_draw >= s_tex_probe_range.first &&
+                   probe_draw <= s_tex_probe_range.second;
       for (const auto& binding : shader->GetTextureBindingsAfterTranslation()) {
         if (binding.bindless_descriptor_index < count) {
           auto fetch = regs.GetTextureFetch(binding.fetch_constant);
@@ -11215,7 +12484,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           }
           uint32_t texture_slot = routed_slot;
           if (probe && routed_slot) {
-            XELOGI("MetalTexProbe draw={} routed slot fc={} -> {}", s_tex_probe,
+            XELOGI("MetalTexProbe draw={} routed slot fc={} -> {}", probe_draw,
                    binding.fetch_constant, routed_slot);
           }
           if (!texture_slot) {
@@ -11226,7 +12495,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             texture_slot = texture_cache_->GetTextureSlot(fetch, binding.is_signed);
             if (probe) {
               XELOGI("MetalTexProbe draw={} legacy GetTextureSlot fc={} signed={} -> {}",
-                     s_tex_probe, binding.fetch_constant, binding.is_signed,
+                     probe_draw, binding.fetch_constant, binding.is_signed,
                      texture_slot);
             }
             if (texture_cache_->binding_allocation_failed()) {
@@ -11235,18 +12504,40 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               return false;
             }
           }
-          if (xe_lineage_base() &&
-              (fetch.base_address << 12) == xe_lineage_base()) {
+          // XE_METAL_LINEAGE2=<base hex>: a second watched base for the BIND
+          // log only (a ping-pong pair's other half).
+          static const uint32_t s_lineage2 = [] {
+            const char* v = std::getenv("XE_METAL_LINEAGE2");
+            return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+          }();
+          if ((xe_lineage_base() &&
+               (fetch.base_address << 12) == xe_lineage_base()) ||
+              (s_lineage2 && (fetch.base_address << 12) == s_lineage2)) {
+            // The first two 32-bit words at the base in the shared buffer:
+            // what a routed load of texel (0,0) reads (raw guest byte order).
+            uint32_t buf_words[2] = {0, 0};
+            if (shared_memory_) {
+              id<MTLBuffer> lineage_buffer =
+                  (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+              if (lineage_buffer && lineage_buffer.contents) {
+                std::memcpy(buf_words,
+                            static_cast<const uint8_t*>(
+                                lineage_buffer.contents) +
+                                (fetch.base_address << 12),
+                            sizeof(buf_words));
+              }
+            }
             XELOGW(
                 "MetalLineage BIND swap#{} draw={} base={:08X} fc={} {}x{} "
-                "fmt={} signed={} routed={} slot={} svc={}",
+                "fmt={} signed={} routed={} slot={} svc={} buf={:08X},{:08X}",
                 swap_count_, trace_draw_index_, fetch.base_address << 12,
                 binding.fetch_constant, fetch.size_2d.width + 1,
                 fetch.size_2d.height + 1, uint32_t(fetch.format),
                 binding.is_signed, routed_slot != 0, texture_slot,
                 texture_cache_ ? uint32_t(texture_cache_->ClassifyFetchService(
                                      fetch, binding.is_signed))
-                               : 99u);
+                               : 99u,
+                buf_words[0], buf_words[1]);
           }
           indices[binding.bindless_descriptor_index] = texture_slot;
           // The audit's ENCODED side: this is the slot the shader will index,
@@ -11260,7 +12551,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 "stacked={} packedmips={} miplevels={}-{} mipaddr={:08X} "
                 "lodbias={} filters=mag{}/min{}/mip{} aniso={} clamp=({},{},{}) "
                 "swz={:03X} raw={:08X},{:08X},{:08X},{:08X},{:08X},{:08X}",
-                s_tex_probe, shader->type() == xenos::ShaderType::kPixel ? "PS" : "VS",
+                probe_draw, shader->type() == xenos::ShaderType::kPixel ? "PS" : "VS",
                 binding.fetch_constant, binding.bindless_descriptor_index,
                 indices[binding.bindless_descriptor_index],
                 uint32_t(fetch.dimension), uint32_t(fetch.format),
@@ -11439,6 +12730,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                  xenos::ClampModeUsesBorder(ncy) ||
                                  xenos::ClampModeUsesBorder(ncz);
         const uint32_t border = border_used ? uint32_t(f.border_color) : 0u;
+        // force_bc_w_to_max: border alpha forced to 1 (shared contract); like
+        // the colour it only matters when a clamp uses the border.
+        const uint32_t force_bc_w =
+            border_used ? uint32_t(f.force_bc_w_to_max) : 0u;
         const uint32_t base_map = mip == uint32_t(xenos::TextureFilter::kBaseMap)
                                       ? 1u
                                       : 0u;
@@ -11458,9 +12753,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           skey = (mag & 3) | ((mn & 3) << 2) | ((mip & 3) << 4) |
                  ((uint32_t(ncx) & 7) << 6) | ((uint32_t(ncy) & 7) << 9) |
                  ((uint32_t(ncz) & 7) << 12) | ((an & 7) << 15) |
-                 (uint64_t(border & 3) << 18) |
+                 (uint64_t(border & 3) << metal::kMetalSamplerKeyBorderShift) |
                  (uint64_t(nmin_level & 15) << 20) |
                  (uint64_t(base_map) << 24) |
+                 (uint64_t(force_bc_w & 1)
+                  << metal::kMetalSamplerKeyForceBcWShift) |
                  (metal::SharedRouteMinMipEnabled()
                       ? (uint64_t(nmax_level & 15) << 26)
                       : 0ull);
@@ -11495,14 +12792,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                xenos::ClampModeUsesBorder(ncz);
             XELOGI(
                 "MetalSamplerCensus new key={:016X} dim={} clamp=({},{},{}) "
-                "norm=({},{},{}) border_used={} border_color={} lod_bias={} "
+                "norm=({},{},{}) border_used={} border_color={} force_bc_w={} "
+                "lod_bias={} "
                 "tri_clamp={} mag={} min={} mip={} aniso={} mip_range={}-{} "
                 "vol=({},{}) shader_ovr=(mag={} min={} mip={} aniso={}) "
                 "fmt={} {}x{} fc={} draw={}",
                 ckey, uint32_t(f.dimension), uint32_t(f.clamp_x),
                 uint32_t(f.clamp_y), uint32_t(f.clamp_z), uint32_t(ncx),
                 uint32_t(ncy), uint32_t(ncz), border_used ? 1 : 0,
-                uint32_t(f.border_color), int32_t(f.lod_bias),
+                uint32_t(f.border_color), uint32_t(f.force_bc_w_to_max),
+                int32_t(f.lod_bias),
                 uint32_t(f.tri_clamp), mag, mn, mip, an, nmin, nmax,
                 uint32_t(f.vol_mag_filter), uint32_t(f.vol_min_filter),
                 sb.mag_filter != xenos::TextureFilter::kUseFetchConst ? 1 : 0,
@@ -11779,6 +13078,44 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             trace_draw_index_, tess_pp.guest_index_base, total,
             metal::MetalMemexportJoinHash(guest_indices, total));
       }
+    } else if (tess_pp.index_buffer_type ==
+                   PrimitiveProcessor::ProcessedIndexBufferType::
+                       kHostConverted ||
+               tess_pp.index_buffer_type ==
+                   PrimitiveProcessor::ProcessedIndexBufferType::
+                       kHostBuiltinForAuto) {
+      // Tessellated strip / fan converted to a triangle list (Canary
+      // 3eab2b8b3): the control-point indices come from this frame's
+      // host-converted pool (in the endianness the processor reports, swapped
+      // per element exactly like the non-tessellated converted draw) or from
+      // the built-in auto fan table (host order). Both are staged into the
+      // same scratch the guest-DMA stream uses, so the host tessellator sees
+      // one stream convention.
+      uint32_t index_size = tess_in.stream_32bit ? 4 : 2;
+      uint32_t host_count = tess_pp.host_draw_vertex_count;
+      uint32_t total = host_count * index_size;
+      host_tessellation_stream_scratch_.resize((total + 3) / 4 + 1);
+      if (tess_pp.index_buffer_type ==
+          PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted) {
+        const void* converted = primitive_processor_->GetConvertedIndexData(
+            tess_pp.host_index_buffer_handle, total);
+        if (!converted) {
+          RecordDrawSkip(MetalDrawSkipReason::kInternalInvariant,
+                         "tess-converted-range");
+          return true;
+        }
+        SwapConvertedIndicesInto(host_tessellation_stream_scratch_.data(),
+                                 converted, host_count,
+                                 tess_pp.host_index_format,
+                                 tess_pp.host_shader_index_endian);
+      } else if (!primitive_processor_->CopyBuiltinIndexData(
+                     tess_pp.host_index_buffer_handle, total,
+                     host_tessellation_stream_scratch_.data())) {
+        RecordDrawSkip(MetalDrawSkipReason::kInternalInvariant,
+                       "tess-builtin-copy");
+        return true;
+      }
+      tess_in.stream = host_tessellation_stream_scratch_.data();
     }
     if (!host_tessellator_) {
       host_tessellator_ = std::make_unique<HostTessellator>();
@@ -11895,8 +13232,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   // --- Bind. ---
   if (!state_dedupe || encoder_fixed_state_.pipeline != pipeline) {
-    es.SetRenderPipelineState((__bridge id<MTLRenderPipelineState>)pipeline);
+    if (deferred_pipeline) {
+      es.SetRenderPipelineStateDeferred(
+          MetalPipelineCache::ResolveDeferredPipeline, pipeline,
+          deferred_pipeline);
+    } else {
+      es.SetRenderPipelineState((__bridge id<MTLRenderPipelineState>)pipeline);
+    }
     encoder_fixed_state_.pipeline = pipeline;
+    encoder_fixed_state_.pipeline_owner = std::move(deferred_pipeline);
   }
 
   // Apply complete blend/stencil dynamic values on every normal draw. Metal
@@ -12408,6 +13752,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     frame_has_render_ = true;
     ++draw_count_;
     ++geo_draw_count_;
+    DumpBoundColorRtDiagnostic(pixel_shader);
     return true;
   }
 
@@ -12493,13 +13838,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     if (direct_index) {
       __unsafe_unretained id<MTLBuffer> index_buffer =
           (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
-      ir_draw_indexed(
-          pp_prim, host_count,
-          pp_result.host_index_format == xenos::IndexFormat::kInt32
-              ? MTLIndexTypeUInt32
-              : MTLIndexTypeUInt16,
-          index_buffer, direct_index_offset,
-          /*instanceCount=*/1, /*baseVertex=*/0, /*baseInstance=*/0);
+      ir_draw_indexed(pp_prim, host_count,
+                      pp_result.host_index_format == xenos::IndexFormat::kInt32
+                          ? MTLIndexTypeUInt32
+                          : MTLIndexTypeUInt16,
+                      index_buffer, direct_index_offset,
+                      /*instanceCount=*/1, /*baseVertex=*/0,
+                      /*baseInstance=*/0);
     } else if (pp_result.index_buffer_type == PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA) {
       uint32_t index_size = pp_result.host_index_format == xenos::IndexFormat::kInt32 ? 4 : 2;
       uint32_t total = host_count * index_size;
@@ -12527,19 +13872,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // PP1 auto pass-through or PP3-auto line loop: no host index byte stream.
       ir_draw( pp_prim, /*vertexStart=*/uint64_t(0), uint64_t(host_count));
     } else if (pp_result.index_buffer_type ==
-               PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForAuto) {
-      // PP2-auto triangle fan: the shared built-in 16-bit fan table expands the
-      // auto-indexed fan to a triangle list in center-first order (byte- and
-      // order-identical to the retired inline auto-fan expansion). Materialize
-      // the needed slice into the transient upload arena (same lifetime as the
-      // inline path) and draw UInt16. count<3 -> host_count 0 -> no-draw skip,
-      // matching the inline path exactly.
+                   PrimitiveProcessor::ProcessedIndexBufferType::
+                       kHostBuiltinForAuto ||
+               pp_result.index_buffer_type ==
+                   PrimitiveProcessor::ProcessedIndexBufferType::
+                       kHostBuiltinForDMA) {
+      // Built-in tables: the auto-indexed fan / quad tables (16-bit) and the
+      // two-triangle-strip table for DMA point/rect expansion (32-bit; only
+      // produced when the host VS expands those lists, which Metal's point
+      // strip route and MSC geometry emulation do not request today).
+      // Materialize the needed slice into the transient upload arena (same
+      // lifetime as the inline path) and draw with the table's index width.
+      // count<3 -> host_count 0 -> no-draw skip, matching the inline path.
       if (host_count == 0) {
         RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
                        "pp2-degenerate");
         return true;
       }
-      uint32_t total = host_count * uint32_t(sizeof(uint16_t));
+      const uint32_t builtin_index_size =
+          pp_result.host_index_format == xenos::IndexFormat::kInt32 ? 4u : 2u;
+      uint32_t total = host_count * builtin_index_size;
       MetalUploadAllocation index_alloc{};
       if (!ArenaAllocate(total, 16, &index_alloc)) {
         RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
@@ -12556,15 +13908,53 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       __unsafe_unretained id<MTLBuffer> index_buffer = (__bridge id<MTLBuffer>)index_alloc.buffer;
       use_resource(index_buffer, MTLResourceUsageRead);
-      ir_draw_indexed( pp_prim, host_count,
-                                     MTLIndexTypeUInt16, index_buffer,
-                                     index_alloc.offset, /*instanceCount=*/1,
-                                     /*baseVertex=*/0, /*baseInstance=*/0);
+      ir_draw_indexed(pp_prim, host_count,
+                      builtin_index_size == 4 ? MTLIndexTypeUInt32
+                                              : MTLIndexTypeUInt16,
+                      index_buffer, index_alloc.offset, /*instanceCount=*/1,
+                      /*baseVertex=*/0, /*baseInstance=*/0);
+    } else if (pp_result.index_buffer_type ==
+               PrimitiveProcessor::ProcessedIndexBufferType::kHostConverted) {
+      // Host-converted stream (DMA fan -> list, loop -> strip, quad -> list,
+      // custom / 32-bit reset replacement, 16-bit reset-disabled widening):
+      // the shared processor wrote it into the per-frame CPU pool in the
+      // endianness it reports; swap it per element into the transient arena
+      // (vertex_index_endian stays kNone, the one index convention of this
+      // backend) and draw with the converted width. A zero count was skipped
+      // before the encoder opened.
+      const uint32_t converted_index_size =
+          pp_result.host_index_format == xenos::IndexFormat::kInt32 ? 4u : 2u;
+      const uint32_t total = host_count * converted_index_size;
+      const void* converted = primitive_processor_->GetConvertedIndexData(
+          pp_result.host_index_buffer_handle, total);
+      if (!converted) {
+        // The handle is this frame's pool offset; an out-of-bounds range means
+        // the pool was cleared under a live result (frame-boundary bug).
+        RecordDrawSkip(MetalDrawSkipReason::kInternalInvariant,
+                       "pp-converted-range");
+        return true;
+      }
+      MetalUploadAllocation index_alloc{};
+      if (!ArenaAllocate(total, 16, &index_alloc)) {
+        RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                       "pp-converted-alloc");
+        return true;
+      }
+      SwapConvertedIndicesInto(index_alloc.cpu_ptr, converted, host_count,
+                               pp_result.host_index_format,
+                               pp_result.host_shader_index_endian);
+      __unsafe_unretained id<MTLBuffer> index_buffer =
+          (__bridge id<MTLBuffer>)index_alloc.buffer;
+      use_resource(index_buffer, MTLResourceUsageRead);
+      ir_draw_indexed(pp_prim, host_count,
+                      converted_index_size == 4 ? MTLIndexTypeUInt32
+                                                : MTLIndexTypeUInt16,
+                      index_buffer, index_alloc.offset, /*instanceCount=*/1,
+                      /*baseVertex=*/0, /*baseInstance=*/0);
     } else {
-      // Unreachable: the pre-encoder shape guards only set pp_routed for
-      // kGuestDMA / kNone (PP1/PP3/PP4) or kHostBuiltinForAuto (PP2-auto).
-      // Never
-      // silently fall into an auto draw for an unexpected index-buffer type.
+      // Unreachable: the pre-encoder validator accepts only the five shared
+      // index-buffer types, all bound above. Never silently fall into an auto
+      // draw for an unexpected index-buffer type.
       XELOGE("MetalPrimitiveProcessor: routed draw reached emission with "
              "unexpected index_buffer_type {}; skipping.",
              uint32_t(pp_result.index_buffer_type));
@@ -12838,64 +14228,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
   }
-  // Diagnostic: XE_METAL_DUMP_RT=<trace draw index> dumps the bound color-0
-  // RT texture to /tmp/xe_rt_<index>.ppm right after that draw encodes —
-  // TEXTURE-space ground truth vs the EDRAM-mapped view of the capture
-  // pipeline (splits "content mislaid in the texture" from "the dump/EDRAM
-  // mapping mislays it").
-  static const int64_t s_dump_rt_at = [] {
-    const char* v = std::getenv("XE_METAL_DUMP_RT");
-    return v ? strtoll(v, nullptr, 10) : -1ll;
-  }();
-  if (s_dump_rt_at >= 0 && int64_t(trace_draw_index_) - 1 == s_dump_rt_at) {
-    EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
-    void* rt_ptr = render_target_cache_->current_color_texture(0, nullptr);
-    if (rt_ptr) {
-      __unsafe_unretained id<MTLTexture> rt_tex = (__bridge id<MTLTexture>)rt_ptr;
-      uint32_t tw = uint32_t(rt_tex.width), th = uint32_t(rt_tex.height);
-      id<MTLBuffer> rb =
-          [rt_tex.device newBufferWithLength:size_t(tw) * th * 4
-                                     options:MTLResourceStorageModeShared];
-      __unsafe_unretained id<MTLCommandQueue> dq = (__bridge id<MTLCommandQueue>)
-          static_cast<xe::ui::metal::MetalProvider*>(
-              graphics_system_->provider())->command_queue();
-      if (rb && dq) {
-        id<MTLCommandBuffer> dcb = [dq commandBuffer];
-        id<MTLBlitCommandEncoder> dbl = [dcb blitCommandEncoder];
-        [dbl copyFromTexture:rt_tex
-                  sourceSlice:0
-                  sourceLevel:0
-                 sourceOrigin:MTLOriginMake(0, 0, 0)
-                   sourceSize:MTLSizeMake(tw, th, 1)
-                     toBuffer:rb
-            destinationOffset:0
-       destinationBytesPerRow:tw * 4
-     destinationBytesPerImage:size_t(tw) * th * 4];
-        [dbl endEncoding];
-        [dcb commit];
-        [dcb waitUntilCompleted];
-        std::string path = fmt::format("/tmp/xe_rt_{}.ppm", s_dump_rt_at);
-        FILE* f = fopen(path.c_str(), "wb");
-        if (f) {
-          fprintf(f, "P6\n%u %u\n255\n", tw, th);
-          const uint8_t* px = static_cast<const uint8_t*>(rb.contents);
-          uint64_t a_sum = 0;
-          uint8_t a_min = 255, a_max = 0;
-          for (size_t i = 0; i < size_t(tw) * th; ++i) {
-            fwrite(px + i * 4, 1, 3, f);  // RGBA8 storage: bytes are R,G,B.
-            uint8_t a = px[i * 4 + 3];
-            a_sum += a;
-            a_min = std::min(a_min, a);
-            a_max = std::max(a_max, a);
-          }
-          fclose(f);
-          XELOGW("XE_METAL_DUMP_RT: wrote {} ({}x{}) alpha min={} max={} mean={:.2f}",
-                 path, tw, th, a_min, a_max,
-                 double(a_sum) / (double(tw) * th));
-        }
-      }
-    }
-  }
+  DumpBoundColorRtDiagnostic(pixel_shader);
   return true;
 }
 
@@ -13571,6 +14904,33 @@ bool MetalCommandProcessor::IssueCopy() {
         float exp_bias_scale = std::ldexp(
             1.0f,
             int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias));
+        // Integer-number-format destination (RB_COPY_DEST_INFO
+        // copy_dest_number 2/3): the hardware stores the biased value as an
+        // integer and the guest fetches it back as integer (the fetch's
+        // texture_integer_scale_bits rescales normalized samples by
+        // 2^bits-1). A float snapshot therefore holds value * 2^bias /
+        // (2^bits-1) per channel, the RAM texture's normalized bits. Crysis 3
+        // resolves its 7e3 HDR scene with exp_bias +6 into integer 11:11:10
+        // and fetches it with exp_adjust -6; the fraction pack saturated the
+        // whole scene copy to white.
+        uint32_t dest_int_bits = 0;
+        {
+          const xenos::SurfaceNumberFormat dest_number =
+              resolve_info.copy_dest_info.copy_dest_number;
+          if (dest_number == xenos::SurfaceNumberFormat::kUnsignedInteger ||
+              dest_number == xenos::SurfaceNumberFormat::kSignedInteger) {
+            const FormatInfo* dest_format_info =
+                FormatInfo::Get(xenos::TextureFormat(
+                    resolve_info.copy_dest_info.copy_dest_format));
+            if (dest_format_info && dest_format_info->fixed) {
+              for (uint32_t c = 0; c < 4; ++c) {
+                dest_int_bits |=
+                    uint32_t(dest_format_info->component_bits[c] & 0xFF)
+                    << (c * 8);
+              }
+            }
+          }
+        }
         // Raw-copy eligibility is shared resolve semantics, not a Metal
         // decision: ask draw_util rather than re-deriving the condition here,
         // so shared changes to it cannot silently skip this backend.
@@ -13636,14 +14996,15 @@ bool MetalCommandProcessor::IssueCopy() {
                          resolve_info.copy_dest_info.copy_dest_swap != 0,
                          canonical_raw_copy,
                          snap, dest_pixel_format, rw, rh, strip_y_offset,
-                         exp_bias_scale);
+                         exp_bias_scale, /*dest_x_offset=*/0, dest_int_bits);
           }
         } else if (snap) {
           resolved = render_target_cache_->ResolveColorToSnapshot(
               frame_command_buffer_, span_base, span_row_length, span_rows,
               span_pitch,
               uint32_t(resolve_info.color_edram_info.msaa_samples), snap,
-              dest_pixel_format, rw, rh, strip_y_offset, exp_bias_scale);
+              dest_pixel_format, rw, rh, strip_y_offset, exp_bias_scale,
+              dest_int_bits);
         }
         // Draw resolution scaling: a column of a destination wider than the
         // resolve (no offset, dest pitch > width, not a vertical strip) also
@@ -13708,7 +15069,8 @@ bool MetalCommandProcessor::IssueCopy() {
                                    .copy_sample_select),
                       resolve_info.copy_dest_info.copy_dest_swap != 0,
                       canonical_raw_copy, assembly_snap, dest_pixel_format, rw,
-                      rh, /*dest_y_offset=*/0, exp_bias_scale, assembly_x)) {
+                      rh, /*dest_y_offset=*/0, exp_bias_scale, assembly_x,
+                      dest_int_bits)) {
                 assembly_snap = nullptr;
               }
             }
@@ -14196,6 +15558,36 @@ bool MetalCommandProcessor::IssueCopy() {
                   }];
             }
           }
+          // Resolve forwarding: the scatter also writes the shared texture
+          // cache's texture of this destination, which then needs no reload.
+          MetalSharedTextureCache::ResolveForwardTarget forward_target;
+          MetalRenderTargetCache::ResolveForward forward;
+          const bool forwarding =
+              scatter_eligible && canonical_packed && shared_texture_cache_ &&
+              !trace_writer_.is_open() &&
+              shared_texture_cache_->FindResolveForward(
+                  scatter_dest.dest_base, scatter_dest.dest_pitch_aligned,
+                  wb_bpp_log2, scatter_dest.dest_offset_x,
+                  scatter_dest.dest_offset_y, rw, rh,
+                  scatter_dest.dest_extent_bytes, &forward_target);
+          if (!forwarding && std::getenv("XE_METAL_RESOLVE_FORWARD_LOG")) {
+            static uint32_t s_forward_logs = 0;
+            if (s_forward_logs++ < 300 || (s_forward_logs & 31u) == 0) {
+              XELOGI("MetalResolveForward path dest={:08X} {}x{} scatter={} "
+                     "canonical_packed={} shared_dispatched={}",
+                     resolve_info.copy_dest_base, rw, rh,
+                     scatter_eligible ? 1 : 0, canonical_packed ? 1 : 0,
+                     shared_resolve_dispatched ? 1 : 0);
+            }
+          }
+          if (forwarding) {
+            forward.texture = forward_target.mtl_texture;
+            forward.kind = forward_target.kind;
+            forward.endian = forward_target.endian;
+            forward.width = forward_target.width;
+            forward.height = forward_target.height;
+            forward.origin_y = forward_target.origin_y;
+          }
           if (staging || gpu_resident_resolve) {
             bool writeback_encoded = false;
             if (shared_resolve_dispatched) {
@@ -14233,7 +15625,8 @@ bool MetalCommandProcessor::IssueCopy() {
                       ResolveNumberFormatEnabled()
                           ? uint32_t(
                                 resolve_info.copy_dest_info.copy_dest_number)
-                          : 0u);
+                          : 0u,
+                      forwarding ? &forward : nullptr);
             } else {
               id<MTLCommandBuffer> wb_cb =
                   (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
@@ -14323,6 +15716,9 @@ bool MetalCommandProcessor::IssueCopy() {
                 // The record's bytes are in the shared buffer, not staging.
                 RegisterGpuResidentResolve(resolve_info.copy_dest_base,
                                            scatter_extent_bytes);
+                if (forward.encoded) {
+                  shared_texture_cache_->CompleteResolveForward(forward_target);
+                }
               }
             }
             if (writeback_encoded &&
@@ -14449,6 +15845,10 @@ bool MetalCommandProcessor::IssueCopy() {
           parent_snap = nullptr;
           strip_y_offset = 0;
         }
+      }
+      if (!parent_snap) {
+        render_target_cache_->NoteSnapshotStripContinuation(
+            resolve_info.copy_dest_base, rw, rh, MTLPixelFormatR32Float);
       }
       void* snap = parent_snap;
       bool is_new_snapshot = false;
@@ -14597,6 +15997,9 @@ bool MetalCommandProcessor::IssueCopy() {
           // the same eligibility as color; the record is then GPU-resident and
           // never needs a staging copy or a CPU drain wait.
           bool depth_scatter = false;
+          // Resolve forwarding of the scatter (see the colour path).
+          MetalSharedTextureCache::ResolveForwardTarget depth_forward_target;
+          MetalRenderTargetCache::ResolveForward depth_forward;
           {
             const auto& dc_d = resolve_info.copy_dest_coordinate_info;
             uint32_t depth_extent_bytes = resolve_info.copy_dest_extent_start -
@@ -14643,6 +16046,19 @@ bool MetalCommandProcessor::IssueCopy() {
                       : ((rw + 31u) & ~31u),
                   uint32_t(dc_d.offset_x_div_8) << 3,
                   uint32_t(dc_d.offset_y_div_8) << 3, depth_extent_bytes};
+              if (shared_texture_cache_ && !trace_writer_.is_open() &&
+                  shared_texture_cache_->FindResolveForward(
+                      depth_dest.dest_base, depth_dest.dest_pitch_aligned, 2u,
+                      depth_dest.dest_offset_x, depth_dest.dest_offset_y, rw,
+                      rh, depth_dest.dest_extent_bytes,
+                      &depth_forward_target)) {
+                depth_forward.texture = depth_forward_target.mtl_texture;
+                depth_forward.kind = depth_forward_target.kind;
+                depth_forward.endian = depth_forward_target.endian;
+                depth_forward.width = depth_forward_target.width;
+                depth_forward.height = depth_forward_target.height;
+                depth_forward.origin_y = depth_forward_target.origin_y;
+              }
               writeback_encoded =
                   render_target_cache_->ResolveCanonicalDepthToBuffer(
                       frame_command_buffer_,
@@ -14660,7 +16076,8 @@ bool MetalCommandProcessor::IssueCopy() {
                                    .copy_sample_select),
                       shared_memory_->GetBuffer(), rw, rh,
                       uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
-                      &depth_dest);
+                      &depth_dest,
+                      depth_forward.texture ? &depth_forward : nullptr);
               if (!writeback_encoded) {
                 depth_scatter = false;
               }
@@ -14773,6 +16190,10 @@ bool MetalCommandProcessor::IssueCopy() {
               pending_writebacks_.back().gpu_current = 1u;
               RegisterGpuResidentResolve(resolve_info.copy_dest_base,
                                          extent_bytes);
+              if (depth_forward.encoded) {
+                shared_texture_cache_->CompleteResolveForward(
+                    depth_forward_target);
+              }
             }
           }
         }
@@ -15008,13 +16429,47 @@ bool MetalCommandProcessor::IssueCopy() {
   // XE_METAL_RESOLVE_DUMP: after each resolve completes, write its destination
   // extent's guest bytes to /tmp/xe_rd_<draw>_<base>.bin, so a 1x and a scaled
   // replay can be compared resolve by resolve.
-  static const bool s_resolve_dump =
-      std::getenv("XE_METAL_RESOLVE_DUMP") != nullptr;
+  // XE_METAL_RESOLVE_DUMP=1 dumps every resolve (replay use);
+  // XE_METAL_RESOLVE_DUMP=<hex dest base>[:<every>] dumps only resolves to
+  // that destination base, every <every>-th one (live use: one pass output
+  // at a comparable cost to a screenshot).
+  struct ResolveDumpSpec {
+    bool enabled;
+    uint32_t base;
+    uint32_t every;
+  };
+  static const ResolveDumpSpec s_resolve_dump_spec = [] {
+    const char* v = std::getenv("XE_METAL_RESOLVE_DUMP");
+    if (!v) return ResolveDumpSpec{false, 0u, 1u};
+    if (!strcmp(v, "1")) return ResolveDumpSpec{true, 0u, 1u};
+    char* end = nullptr;
+    uint32_t base = uint32_t(strtoul(v, &end, 16));
+    // ":trace" = only while a frame trace is being recorded (every = 0), so
+    // the live bytes and the trace's replay describe the same frame.
+    uint32_t every = 1u;
+    if (end && *end == ':') {
+      every = !strcmp(end + 1, "trace") ? 0u
+                                        : uint32_t(strtoul(end + 1, nullptr, 10));
+      if (every == 0u && strcmp(end + 1, "trace") != 0) every = 1u;
+    }
+    return ResolveDumpSpec{true, base, every};
+  }();
+  static uint32_t s_resolve_dump_seen = 0;
+  const bool s_resolve_dump =
+      s_resolve_dump_spec.enabled &&
+      (!s_resolve_dump_spec.base ||
+       (resolve_info.copy_dest_base == s_resolve_dump_spec.base &&
+        (s_resolve_dump_spec.every == 0u
+             ? (trace_writer_.is_open() && (++s_resolve_dump_seen, true))
+             : (++s_resolve_dump_seen % s_resolve_dump_spec.every) == 0)));
   if (s_resolve_dump && resolve_info.copy_dest_extent_length) {
     EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
     std::string path =
-        fmt::format("/tmp/xe_rd_{:06}_{:08X}.bin", trace_draw_index_,
-                    resolve_info.copy_dest_base);
+        s_resolve_dump_spec.base
+            ? fmt::format("/tmp/xe_rd_s{}_{:08X}_{}.bin", swap_count_,
+                          resolve_info.copy_dest_base, s_resolve_dump_seen)
+            : fmt::format("/tmp/xe_rd_{:06}_{:08X}.bin", trace_draw_index_,
+                          resolve_info.copy_dest_base);
     if (FILE* f = fopen(path.c_str(), "wb")) {
       // The shared buffer, not guest RAM: GPU-resident publication leaves
       // resolved bytes only in the buffer.
@@ -15045,9 +16500,20 @@ void MetalCommandProcessor::InitializeShaderStorage(
   gamma_ramp_dirty_ = true;
   if (pipeline_cache_) {
     pipeline_cache_->InitializeDurableStorage(cache_root, title_id);
+    // After the durable caches open, so rebuilt pipelines hit them.
+    pipeline_cache_->InitializeShaderStorage(cache_root, title_id);
   }
   if (completion_callback) {
     completion_callback();
+  }
+}
+
+void MetalCommandProcessor::SaveShaderStorageToDisk() {
+  // The app quits through std::quick_exit right after this (GPU paused), so it
+  // is the last point at which the session's new pipelines can be persisted.
+  if (pipeline_cache_) {
+    pipeline_cache_->SaveBinaryArchive("exit", true);
+    pipeline_cache_->ShutdownShaderStorage();
   }
 }
 
@@ -15779,6 +17245,38 @@ void MetalCommandProcessor::EnsureProducerIndex() const {
     index.candidate_stamp.assign(index.producers.size(), 0);
     index.selected_stamp.assign(index.producers.size(), 0);
     index.query_stamp = 0;
+    index.closure_ready = 0;
+    index.mask_words = 0;
+    if (ClosureBitsEnabled() && index.producers.size() <= 1024u) {
+      const uint32_t words = uint32_t((index.producers.size() + 63u) / 64u);
+      if (index.page_mask_slot.size() != 8192u) {
+        index.page_mask_slot.assign(8192u, 0);
+      }
+      uint32_t slots = 0;
+      for (uint32_t word = 0; word < 128u; ++word) {
+        uint64_t bits = index.pages[word];
+        while (bits) {
+          index.page_mask_slot[word * 64u + uint32_t(__builtin_ctzll(bits))] =
+              slots++;
+          bits &= bits - 1u;
+        }
+      }
+      index.page_masks.assign(size_t(slots) * words, 0);
+      for (size_t i = 0; i < index.producers.size(); ++i) {
+        const metal::PendingProducer& p = index.producers[i];
+        if (!p.range.length()) {
+          continue;
+        }
+        const uint32_t first = p.range.start() >> 16;
+        const uint32_t last = (p.range.end() - 1u) >> 16;
+        for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+          index.page_masks[size_t(index.page_mask_slot[page]) * words +
+                           (i >> 6)] |= uint64_t(1) << (i & 63u);
+        }
+      }
+      index.candidate_bits.resize(words);
+      index.mask_words = words;
+    }
     index.writebacks = pending_writebacks_.size();
     index.memexports = pending_memexports_.size();
     index.sequence = memory_authority_sequence_;
@@ -15816,10 +17314,12 @@ MetalCommandProcessor::IndexedPendingProducers(
   }
   if (SeamTimingEnabled() && (index.queries & 65535) == 0) {
     XELOGI("MetalProducerIndex: queries={} fast-empty={} indexed={} "
-           "memo-hits={} rebuilds={} pending={} verify-mismatches={}",
+           "memo-hits={} rebuilds={} pending={} verify-mismatches={} "
+           "page-entries={} seed-steps={} closure-steps={} selected={}",
            index.queries, index.fast_empty, index.indexed_decisions,
            index.memo_hits, index.rebuilds, index.producers.size(),
-           index.verify_mismatches);
+           index.verify_mismatches, index.page_entries.size(),
+           index.seed_steps, index.closure_steps, index.selected_total);
   }
   *any_page_hit = hit;
   return index.producers;
@@ -15876,6 +17376,14 @@ bool MetalCommandProcessor::LeanDecisionEnabled() {
 // Burnout: ~7,700 draws a frame, consecutive draws asking about the same
 // texture ranges, the per-page producer walk ~4.5% of the command-processor
 // thread (2026-10-18 line profile). XE_METAL_DECISION_MEMO=0 disables.
+bool MetalCommandProcessor::ClosureBitsEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_CLOSURE_BITS");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
 metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexed(
     metal::ConsumerKind consumer, const metal::ConsumerRequest& request,
     uint64_t completed_submission) const {
@@ -16021,11 +17529,31 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexedImpl(
     }
     uint32_t cur_first = 0, cur_last = 0;
     bool have = false;
+    const uint32_t mask_words = index.mask_words;
+    if (mask_words) {
+      std::fill(index.candidate_bits.begin(), index.candidate_bits.end(), 0);
+    }
     auto walk = [&](uint32_t first, uint32_t last) {
+      if (mask_words) {
+        uint64_t* cand = index.candidate_bits.data();
+        for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+          if (!(index.pages[page >> 6] & (uint64_t(1) << (page & 63u)))) {
+            continue;
+          }
+          const uint64_t* mask =
+              index.page_masks.data() +
+              size_t(index.page_mask_slot[page]) * mask_words;
+          for (uint32_t w = 0; w < mask_words; ++w) {
+            cand[w] |= mask[w];
+          }
+        }
+        return;
+      }
       for (uint32_t page = first; page <= last && page < 8192u; ++page) {
         if (!(index.pages[page >> 6] & (uint64_t(1) << (page & 63u)))) {
           continue;
         }
+        index.seed_steps += index.page_end[page] - index.page_begin[page];
         for (uint32_t k = index.page_begin[page]; k < index.page_end[page]; ++k) {
           const uint32_t i = index.page_entries[k];
           if (index.candidate_stamp[i] == stamp) {
@@ -16055,6 +17583,20 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexedImpl(
     if (have) {
       walk(cur_first, cur_last);
     }
+    // Candidates in index order: the same records, tested once each.
+    for (uint32_t w = 0; w < mask_words; ++w) {
+      uint64_t bits = index.candidate_bits[w];
+      while (bits) {
+        const uint32_t i = w * 64u + uint32_t(__builtin_ctzll(bits));
+        bits &= bits - 1u;
+        ++index.seed_steps;
+        const metal::PendingProducer& producer = producers[i];
+        if (request.ForProducer(producer.state).OverlapsAny(producer.range)) {
+          index.selected_stamp[i] = stamp;
+          frontier.push_back(i);
+        }
+      }
+    }
   } else {
     seed_from(request.resolve_ranges);
     seed_from(request.memexport_ranges);
@@ -16062,24 +17604,114 @@ metal::ConsumerDecision MetalCommandProcessor::DecideConsumerIndexedImpl(
   if (frontier.empty()) {
     return decision;
   }
-  // Closure over older overlapping predecessors (same rule as DecideConsumer;
-  // the candidates for `newer` are the producers sharing its pages).
-  for (size_t f = 0; f < frontier.size(); ++f) {
-    const metal::PendingProducer& newer = producers[frontier[f]];
-    for_each_candidate(newer.range.start(), newer.range.end(), [&](uint32_t i) {
-      if (index.selected_stamp[i] == stamp) {
-        return;
+  // Far Cry 2: ~100 pending records averaging 17 pages each, and a decision
+  // selecting ~63 of them walked ~1,800 page entries for the closure below,
+  // re-walked by the ~20 decisions between two rebuilds (2026-10-31
+  // counters). The closure depends only on the snapshot, so build it once
+  // per rebuild as bitsets and OR the seeds' closures. Index order is
+  // sequence order, so the set bits in ascending order are the sorted
+  // frontier. Up to 1024 records (128 bytes per closure); beyond that the
+  // walk below. XE_METAL_CLOSURE_BITS=0 always walks (and drops the page
+  // masks).
+  if (ClosureBitsEnabled() && producers.size() <= 1024u) {
+    const uint32_t words = uint32_t((producers.size() + 63u) / 64u);
+    if (index.closure_ready == 0) {
+      index.closure_words = words;
+      index.closure_bits.resize(size_t(words) * producers.size());
+      index.selected_bits.resize(words);
+    }
+    uint32_t newest_seed = 0;
+    for (uint32_t i : frontier) {
+      newest_seed = std::max(newest_seed, i);
+    }
+    while (index.closure_ready <= newest_seed) {
+      const uint32_t n = index.closure_ready;
+      uint64_t* own = index.closure_bits.data() + size_t(n) * words;
+      std::fill(own, own + words, 0);
+      own[n >> 6] |= uint64_t(1) << (n & 63u);
+      const metal::PendingProducer& newer = producers[n];
+      auto absorb = [&](uint32_t i) {
+        ++index.closure_steps;
+        // A record already in the closure brought its own closure with it.
+        if (i >= n || (own[i >> 6] >> (i & 63u)) & 1u) {
+          return;
+        }
+        const metal::PendingProducer& older = producers[i];
+        if (older.sequence >= newer.sequence ||
+            !older.range.Overlaps(newer.range)) {
+          return;
+        }
+        const uint64_t* theirs = index.closure_bits.data() + size_t(i) * words;
+        for (uint32_t w = 0; w <= (i >> 6); ++w) {
+          own[w] |= theirs[w];
+        }
+      };
+      if (index.mask_words == words && newer.range.length()) {
+        // Older records sharing a page with `newer`, each tested once,
+        // newest first so later absorbs are mostly already covered.
+        uint64_t* cand = index.candidate_bits.data();
+        std::fill(cand, cand + words, 0);
+        const uint32_t first = newer.range.start() >> 16;
+        const uint32_t last = (newer.range.end() - 1u) >> 16;
+        for (uint32_t page = first; page <= last && page < 8192u; ++page) {
+          const uint64_t* mask =
+              index.page_masks.data() +
+              size_t(index.page_mask_slot[page]) * words;
+          for (uint32_t w = 0; w <= (n >> 6); ++w) {
+            cand[w] |= mask[w];
+          }
+        }
+        for (uint32_t w = (n >> 6) + 1; w-- > 0;) {
+          uint64_t bits = cand[w];
+          while (bits) {
+            const uint32_t b = 63u - uint32_t(__builtin_clzll(bits));
+            bits &= ~(uint64_t(1) << b);
+            absorb(w * 64u + b);
+          }
+        }
+      } else {
+        for_each_candidate(newer.range.start(), newer.range.end(), absorb);
       }
-      const metal::PendingProducer& older = producers[i];
-      if (older.sequence >= newer.sequence ||
-          !older.range.Overlaps(newer.range)) {
-        return;
+      ++index.closure_ready;
+    }
+    uint64_t* sel = index.selected_bits.data();
+    std::fill(sel, sel + words, 0);
+    for (uint32_t i : frontier) {
+      const uint64_t* theirs = index.closure_bits.data() + size_t(i) * words;
+      for (uint32_t w = 0; w <= (i >> 6); ++w) {
+        sel[w] |= theirs[w];
       }
-      index.selected_stamp[i] = stamp;
-      frontier.push_back(i);
-    });
+    }
+    frontier.clear();
+    for (uint32_t w = 0; w < words; ++w) {
+      uint64_t bits = sel[w];
+      while (bits) {
+        frontier.push_back(w * 64u + uint32_t(__builtin_ctzll(bits)));
+        bits &= bits - 1u;
+      }
+    }
+  } else {
+    // Closure over older overlapping predecessors (same rule as DecideConsumer;
+    // the candidates for `newer` are the producers sharing its pages).
+    for (size_t f = 0; f < frontier.size(); ++f) {
+      const metal::PendingProducer& newer = producers[frontier[f]];
+      for_each_candidate(newer.range.start(), newer.range.end(), [&](uint32_t i) {
+        ++index.closure_steps;
+        if (index.selected_stamp[i] == stamp) {
+          return;
+        }
+        const metal::PendingProducer& older = producers[i];
+        if (older.sequence >= newer.sequence ||
+            !older.range.Overlaps(newer.range)) {
+          return;
+        }
+        index.selected_stamp[i] = stamp;
+        frontier.push_back(i);
+      });
+    }
+    std::sort(frontier.begin(), frontier.end());  // producers are sequence-sorted
   }
-  std::sort(frontier.begin(), frontier.end());  // producers are sequence-sorted
+  index.selected_total += frontier.size();
   bool all_gpu_current = request.access == metal::ConsumerAccess::kSharedBuffer;
   for (uint32_t i : frontier) {
     if (!all_gpu_current) {
@@ -16349,6 +17981,19 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       metal::PendingProducer producer{*range,
                                       metal::TransitState::kPendingMemexport,
                                       me.submission, me.authority_sequence};
+      // XE_METAL_MEMEXPORT_DRAIN_OWNED=0 restores whole-record copies of
+      // armed records (diagnostic rollback).
+      static const bool s_drain_owned_only = [] {
+        const char* v = std::getenv("XE_METAL_MEMEXPORT_DRAIN_OWNED");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      std::vector<std::pair<uint32_t, uint32_t>> me_owned;
+      if (s_drain_owned_only && me.lazy_armed) {
+        lazy_publication_.OwnedRangesOf(me.authority_sequence, &me_owned);
+        convergence_target.SetOwnedOnly(&me_owned);
+      } else {
+        convergence_target.SetOwnedOnly(nullptr);
+      }
       // ONE gate, shared with conformance. A tagged record is decided by its
       // own submission -- the ordinary shape since the async promotion -- while
       // an untagged one (submission 0: the XE_METAL_ASYNC=0 rollback, an S7
@@ -16804,6 +18449,18 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
             "{}x{} ({} bytes{})",
             wb.guest_addr, wb.width, wb.height, published_bytes,
             aliased ? ", aliased self-copy" : "");
+      }
+      if (xe_lineage_base() && wb.guest_addr == xe_lineage_base()) {
+        uint32_t ram_word = 0, buf_word = 0;
+        std::memcpy(&ram_word, dest, sizeof(ram_word));
+        std::memcpy(&buf_word, src_base, sizeof(buf_word));
+        XELOGW(
+            "MetalLineage PUBLISH base={:08X} swap#{} published={} "
+            "owned_ranges={} lazy_armed={} seq={} sub={} ram_after={:08X} "
+            "buf={:08X}",
+            wb.guest_addr, swap_count_, published_bytes, owned.size(),
+            uint32_t(wb.lazy_armed), wb.authority_sequence, wb.submission,
+            ram_word, buf_word);
       }
       if (clipped_texels) {
         static uint32_t s_clip_logs = 0;
@@ -18138,7 +19795,8 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   // the GPU finishes, every frame, and the GPU idles while the CPU encodes.
   // Library-wide it cut Red Dead Redemption 26.8 -> 11.8 fps, Skate 2 30 ->
   // 18.3 and LEGO Star Wars II 60 -> 24.8 on the M1 Max (2026-10-15).
-  CommitOpenFaultableWork(CompletionWaitEnabled());
+  CommitOpenFaultableWork(CompletionWaitEnabled(),
+                          cvars::metal_completion_wait_exports);
   lazy_full_domain_request_ = true;
   const bool ok = ResolveRamConsumerDependencies(
       metal::ConsumerKind::kHostCpuRead, requested);
@@ -18150,7 +19808,8 @@ bool MetalCommandProcessor::PrepareGuestMemoryForCompletionExposure() {
   return ok;
 }
 
-void MetalCommandProcessor::CommitOpenFaultableWork(bool wait) {
+void MetalCommandProcessor::CommitOpenFaultableWork(bool wait,
+                                                    bool wait_for_exports) {
   if (!LazyPublishEnabled() || !lazy_read_callback_handle_ ||
       trace_writer_.is_open() || trace_playback_context() ||
       !frame_command_buffer_) {
@@ -18168,14 +19827,21 @@ void MetalCommandProcessor::CommitOpenFaultableWork(bool wait) {
       break;
     }
   }
-  if (!open_record && FenceCommitEnabled()) {
+  bool open_export = false;
+  if (FenceCommitEnabled()) {
     for (const PendingMemexport& me : pending_memexports_) {
       if (me.lazy_armed && me.submission == encoding) {
-        open_record = true;
+        open_export = true;
         break;
       }
     }
   }
+  open_record = open_record || open_export;
+  // metal_completion_wait_exports: Rise of the Tomb Raider flashes unless the
+  // GPU has finished the open exports when the guest sees the signal
+  // (2026-10-28, waiting for open resolves alone also removes it, but costs
+  // the M4 mini about 1 fps more).
+  wait = wait || (wait_for_exports && open_export);
   if (open_record) {
     if (wait) {
       EndFrameEncoderAndWait(metal::SeamBoundaryReason::kConsumerDependency);
@@ -18215,6 +19881,48 @@ bool MetalCommandProcessor::FlushPendingWritebacksForWait(
 void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                       uint32_t frontbuffer_width,
                                       uint32_t frontbuffer_height) {
+  // Diagnostic (XE_METAL_STALE_SCAN=<swaps>): every N swaps, with the GPU
+  // idle, compare the shared buffer's uploaded pages against guest RAM and
+  // log the ranges that differ (a guest write the invalidation missed).
+  // XE_METAL_STALE_SCAN_FIX=1 also invalidates them, as a CPU write would.
+  {
+    static const uint32_t s_stale_scan = [] {
+      const char* v = std::getenv("XE_METAL_STALE_SCAN");
+      return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+    }();
+    static const bool s_stale_fix =
+        std::getenv("XE_METAL_STALE_SCAN_FIX") != nullptr;
+    static uint32_t s_stale_swaps = 0;
+    if (s_stale_scan && shared_memory_ && !shared_memory_->is_zero_copy() &&
+        ++s_stale_swaps % s_stale_scan == 0) {
+      EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
+      std::vector<std::pair<uint32_t, uint32_t>> ranges;
+      id<MTLBuffer> buffer =
+          (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+      const uint32_t compared = shared_memory_->FindStaleMirrorRanges(
+          static_cast<const uint8_t*>(buffer.contents), &ranges);
+      uint64_t stale_bytes = 0;
+      std::string list;
+      for (const auto& [start, end] : ranges) {
+        stale_bytes += end - start;
+        if (list.size() < 1200) {
+          list += fmt::format(" {:08X}+{:X}", start, end - start);
+        }
+      }
+      XELOGW("MetalStaleScan swap={} pages={} stale_ranges={} stale_KB={}{}",
+             s_stale_swaps, compared, ranges.size(), stale_bytes >> 10, list);
+      for (size_t i = 0; i < ranges.size() && i < 4; ++i) {
+        XELOGW("MetalStaleScan   {:08X}: {}", ranges[i].first,
+               memory_->DescribePhysicalWatch(ranges[i].first));
+      }
+      if (s_stale_fix) {
+        for (const auto& [start, end] : ranges) {
+          shared_memory_->MemoryInvalidationCallback(start, end - start, true,
+                                                     true);
+        }
+      }
+    }
+  }
   // XE_METAL_GPUTRACE=<path.gputrace> [XE_METAL_GPUTRACE_FRAME=N, default
   // 600]: a programmatic Xcode GPU capture of one frame at swap N, written
   // for the Xcode GPU debugger / shader profiler (the only reader of
@@ -18261,6 +19969,13 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         }
       }
     }
+  }
+  // Frame boundary for the shared primitive processor's conversion cache and
+  // this backend's converted index pool: every routed draw of the frame has
+  // already copied its slice into the upload arena, so nothing references the
+  // pool past this point.
+  if (primitive_processor_) {
+    primitive_processor_->EndFrame();
   }
   last_frontbuffer_base_ = frontbuffer_ptr;
   last_frontbuffer_bytes_ =
@@ -18670,6 +20385,10 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       XELOGI("{}", build_census.Report("periodic"));
     }
   }
+  if (pipeline_cache_) {
+    pipeline_cache_->MaybeSaveBinaryArchiveOnSwap();
+    pipeline_cache_->FlushShaderStorage();
+  }
   // Frame-cost telemetry: commits per frame is the frame-split count (each is
   // a full commit + waitUntilCompleted stall — hazard flushes, captures,
   // writeback waits). Logged every 128 swaps with the wall-clock frame rate.
@@ -18731,9 +20450,6 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                  fs.hot);
           discrete_deferred_ranges_ = 0;
         }
-        XELOGI("MetalDiscreteIndex swap#{}: gpu-swapped {:.1f}/frame",
-               count, double(direct_index_draws_) / 128.0);
-        direct_index_draws_ = 0;
         if (texture_cache_ && texture_cache_->texture_heaps_enabled()) {
           XELOGI("MetalTextureHeaps swap#{}: {} heaps {} MiB, {} textures; "
                  "per frame: useHeaps {:.1f}, skipped {:.1f}, declared {:.1f}",
@@ -18768,6 +20484,9 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                m.verified, m.mismatches);
         m.hits = m.misses = m.verified = 0;
       }
+      if (PassTimingEnabled()) {
+        XELOGI("{}", PassTimingReport(128, count));
+      }
       if (GpuBusyTimingEnabled()) {
         double busy_ms = ConsumeGpuBusySeconds() * 1000.0;
         XELOGI("MetalGpuBusy swap#{}: {:.2f} ms/frame busy, {:.1f}% of wall",
@@ -18779,6 +20498,11 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         MetalTextureCache::ByteCensus bc = texture_cache_->CensusBytes();
         if (!draw_phase_ns_.empty()) {
           XELOGI("{}", FormatDrawPhases(128));
+        }
+        if (direct_index_draws_) {
+          XELOGI("MetalDirectIndex swap#{}: gpu-swapped {:.1f}/frame", count,
+                 double(direct_index_draws_) / 128.0);
+          direct_index_draws_ = 0;
         }
         if (shared_memory_ && MetalSharedMemory::VfetchRenameEnabled()) {
           XELOGI("MetalVfetchRename swap#{}: renames={} bytes={} refusals={}",
@@ -19254,11 +20978,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         source_rt ? present_source_path : "test-pattern", draw_count_,
         draw_skip_count_, geo_draw_count_, geo_pipeline_fail_count_);
     {
-      static const char* const kPath[] = {"native", "quad",  "dmaquad", "loop",
-                                          "geo",    "tess",  "skip"};
+      // "conv" counts routed draws that bound a host-converted index stream
+      // (DMA fans/loops/quads, custom/32-bit reset, 16-bit widening); it is
+      // an additional column, the draw is also counted in its path column.
+      static const char* const kPath[] = {"native", "quad", "dmaquad", "loop",
+                                          "geo",    "tess", "skip",    "conv"};
       std::string prims;
       for (uint32_t p = 0; p < 32; ++p) {
-        for (uint32_t k = 0; k < 7; ++k) {
+        for (uint32_t k = 0; k < 8; ++k) {
           if (prim_census_[p][k]) {
             prims += fmt::format(" p{}:{}={}", p, kPath[k], prim_census_[p][k]);
           }
@@ -19856,6 +21583,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // at this quiesced boundary (encoder ended, submissions waited, publication
   // complete, presenter committed+waited), one comparable sweep per swap /
   // replay loop. Default off: one static branch per swap.
+  // XE_METAL_CLEAR_CACHES_EVERY=N (diagnostic): request the deferred cache
+  // clear every N swaps live, to test whether a defect is carried by warm
+  // host state (render-target cache, snapshots, texture caches) that a cold
+  // single-frame replay recomputes.
+  static const uint32_t s_clear_caches_every = [] {
+    const char* v = std::getenv("XE_METAL_CLEAR_CACHES_EVERY");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+  }();
+  if (s_clear_caches_every && swap_count_ &&
+      (swap_count_ % s_clear_caches_every) == 0) {
+    XELOGW("MetalCommandProcessor: periodic cache clear requested at swap#{}",
+           swap_count_);
+    ClearCaches();
+  }
   static const bool s_snaphash_enabled = [] {
     const char* value = std::getenv("XE_METAL_SNAPHASH");
     return value && value[0] && value[0] != '0';

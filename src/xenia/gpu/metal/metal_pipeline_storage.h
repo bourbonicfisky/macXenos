@@ -129,7 +129,17 @@ struct MetalTranslatorConfig {
   //       its session-local index (10822b13b / 3b586b9c5 bake per-pattern
   //       sign / scale / bias literals); entries keyed on the index can hold
   //       another session's literals.
-  static constexpr uint32_t kFetchAbiRevision = 9;
+  //  10 - Canary translator semantics ported (2026-10-26): per-axis gradient
+  //       exponent biases scale the computed-LOD gradients (0f2980de4),
+  //       scalar EXP/LOG/LOGC/RCP*/RSQ*/SQRT round to 21 mantissa bits with
+  //       RCP/RSQ built from DIV/SQRT (3a44f20c7), and the scalar `b`
+  //       component of a single-source two-component scalar op co-issued with
+  //       a three-source vector op is Z instead of X (92ada8ebc). Identical
+  //       ucode emits different DXBC.
+  //  11 - PsParamGen adds xe_param_gen_window_offset (Canary e1f4a0d00:
+  //       predicated-tiling window offsets carried in the EDRAM bases), a new
+  //       system constant at offset 592 read by every PsParamGen pixel shader.
+  static constexpr uint32_t kFetchAbiRevision = 11;
 
   // Generation of the DXBC->DXIL conversion WRAPPER — how conversions are
   // produced, as distinct from which libdxilconv is loaded (that is
@@ -152,7 +162,10 @@ struct MetalTranslatorConfig {
 struct MetalPipelineStorageIdentity {
   // 3.3e — bumped when the on-disk layout changes, so a format change
   // invalidates without relying on any other field being right.
-  static constexpr uint32_t kFormatVersion = 1;
+  //   2 - MSC entry points are named per shader content instead of "main", so
+  //       the M2 binary archive can serialize (see MetalShaderConverter::
+  //       Convert); every stored metallib carries the old name.
+  static constexpr uint32_t kFormatVersion = 2;
 
   uint32_t format_version = kFormatVersion;
 
@@ -295,8 +308,8 @@ class MetalPipelineStorage {
 
   bool is_open() const { return is_open_; }
 
-  // 3.6a — M1 libraries, the M2 archive, and the manifest live beneath the
-  // title directory. Empty when not open.
+  // 3.6a — M1 libraries, the M2 archive segments (a directory), and the
+  // manifest live beneath the title directory. Empty when not open.
   const std::filesystem::path& title_root() const { return title_root_; }
   std::filesystem::path metallib_dir() const;
   std::filesystem::path binary_archive_path() const;

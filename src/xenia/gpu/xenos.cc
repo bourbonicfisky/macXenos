@@ -101,6 +101,91 @@ float LinearToPWLGamma(float linear) {
 
 // https://github.com/Microsoft/DirectXTex/blob/master/DirectXTex/DirectXTexConvert.cpp
 
+namespace {
+// IEEE-754 binary32 -> binary16, round to nearest even, subnormals kept,
+// overflow to Inf: the host conversion (Metal half(float), DXBC f32tof16).
+uint32_t Float32ToHalfRNE(float f32) {
+  uint32_t u = xe::memory::Reinterpret<uint32_t>(f32);
+  uint32_t sign = (u >> 16) & 0x8000u;
+  uint32_t exponent = (u >> 23) & 0xFFu;
+  uint32_t mantissa = u & 0x7FFFFFu;
+  if (exponent == 0xFFu) {
+    return sign | 0x7C00u | (mantissa ? 0x200u : 0u);
+  }
+  int32_t half_exponent = int32_t(exponent) - 127 + 15;
+  if (half_exponent >= 31) {
+    return sign | 0x7C00u;
+  }
+  if (half_exponent <= 0) {
+    if (half_exponent < -10) {
+      return sign;
+    }
+    mantissa |= 0x800000u;
+    uint32_t shift = uint32_t(14 - half_exponent);
+    uint32_t half_mantissa = mantissa >> shift;
+    uint32_t remainder = mantissa & ((1u << shift) - 1u);
+    uint32_t halfway = 1u << (shift - 1u);
+    if (remainder > halfway || (remainder == halfway && (half_mantissa & 1u))) {
+      ++half_mantissa;
+    }
+    return sign | half_mantissa;
+  }
+  uint32_t half_mantissa = mantissa >> 13;
+  uint32_t remainder = mantissa & 0x1FFFu;
+  uint32_t h = sign | (uint32_t(half_exponent) << 10) | half_mantissa;
+  if (remainder > 0x1000u || (remainder == 0x1000u && (half_mantissa & 1u))) {
+    ++h;  // A carry out of the mantissa moves to the next exponent (or Inf).
+  }
+  return h;
+}
+float HalfToFloat32(uint32_t h) {
+  uint32_t sign = (h & 0x8000u) << 16;
+  uint32_t exponent = (h >> 10) & 0x1Fu;
+  uint32_t mantissa = h & 0x3FFu;
+  uint32_t u;
+  if (exponent == 0) {
+    if (!mantissa) {
+      u = sign;
+    } else {
+      // Subnormal: normalize.
+      uint32_t lz = xe::lzcnt(mantissa) - (32 - 10);
+      mantissa = (mantissa << (lz + 1)) & 0x3FFu;
+      u = sign | (uint32_t(127 - 15 - int32_t(lz)) << 23) | (mantissa << 13);
+    }
+  } else if (exponent == 31) {
+    u = sign | 0x7F800000u | (mantissa << 13);
+  } else {
+    u = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+  }
+  return xe::memory::Reinterpret<float>(u);
+}
+}  // namespace
+
+float Float16ExtendedRangeTo32(uint32_t f16) {
+  f16 &= 0xFFFFu;
+  if ((f16 & 0x7C00u) == 0x7C00u) {
+    // Exponent 31 is finite on the guest: read it as exponent 30 and double.
+    return 2.0f * HalfToFloat32(f16 - 0x0400u);
+  }
+  return HalfToFloat32(f16);
+}
+
+uint32_t Float32ToFloat16ExtendedRange(float f32) {
+  if (f32 != f32) {
+    return 0u;  // The guest has no NaN.
+  }
+  uint32_t h = Float32ToHalfRNE(f32);
+  if ((h & 0x7C00u) == 0x7C00u) {
+    // The host conversion overflowed: encode into exponent 31. Clamp to the
+    // 131008 limit, halve so the exponent lands at 30 or below, convert, then
+    // add one to the exponent to undo the halving.
+    float clamped = f32 < -131008.0f ? -131008.0f
+                    : (f32 > 131008.0f ? 131008.0f : f32);
+    h = Float32ToHalfRNE(clamped * 0.5f) + 0x0400u;
+  }
+  return h;
+}
+
 float Float7e3To32(uint32_t f10) {
   f10 &= 0x3FF;
   if (!f10) {
@@ -116,7 +201,7 @@ float Float7e3To32(uint32_t f10) {
     mantissa = (mantissa << mantissa_lzcnt) & 0x7F;
   }
   return xe::memory::Reinterpret<float>(
-      uint32_t(((exponent + 124) << 23) | (mantissa << 3)));
+      uint32_t(((exponent + 124) << 23) | (mantissa << 16)));
 }
 
 // Based on CFloat24 from d3dref9.dll and the 6e4 code from:

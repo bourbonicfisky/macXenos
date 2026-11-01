@@ -69,6 +69,28 @@ enum class SharedLoadFamily : uint32_t {
   // shadow maps were 5 ms/frame of CPU decode.
   kDepthUnormToR32,
   kDepthFloatToR32,
+  // 6:5:5 (guest R5 G5 B6) repacked into B5G6R5 with guest blue in the host
+  // green field and guest green in the blue field (the upstream
+  // texture_load_r5g5b6_b5g6r5_swizzle_rbga shader); the host swizzle RBGG
+  // reads them back, as the D3D12 and Vulkan tables do. Apple GPUs only
+  // (B5G6R5Unorm).
+  kR5G5B6ToB5G6R5Rbga,
+  // DXT3A_AS_1_1_1_1 (one bit per channel in each 4-bit group of the DXT3
+  // alpha block) expanded to 16-bit texels by the upstream
+  // texture_load_dxt3aas1111_argb4 shader: alpha in bits 0-3, red 4-7, green
+  // 8-11, blue 12-15, which Metal's ABGR4Unorm reads as A, B, G, R, so the
+  // host swizzle exchanges red and blue. Apple GPUs only. Guest 8-byte 4x4
+  // blocks, 2 host bytes per texel. Resolves already produce this format
+  // (Kinect titles' tracking masks, 5345084D).
+  kDxt3aAs1111ToAbgr4,
+  // 4:2:2 chroma-subsampled texel pairs (k_Cr_Y1_Cb_Y0_REP: the bytes Cr Y1
+  // Cb Y0, D3D's G8R8_G8B8; k_Y1_Cr_Y0_Cb_REP: R8G8_B8G8) expanded to two
+  // RGBA8 texels with the shared chroma replicated and blue written to alpha
+  // (texture_load_gbgr8_rgb8 / texture_load_bgrg8_rgb8, the decompressing
+  // alternative the D3D12 table keeps). A 2x1 guest block of 4 bytes becomes
+  // 8 host bytes.
+  kGbgr8ToRgba8,
+  kBgrg8ToRgba8,
 };
 
 struct SharedTextureFormatEntry {
@@ -100,6 +122,7 @@ enum : uint32_t {
   kMtlPixelFormatRG8Snorm = 32,
   kMtlPixelFormatR32Float = 55,
   kMtlPixelFormatRG32Float = 105,
+  kMtlPixelFormatRGBA32Float = 125,
   kMtlPixelFormatRG16Unorm = 60,
   kMtlPixelFormatRG16Snorm = 62,
   kMtlPixelFormatRG16Float = 65,
@@ -299,6 +322,36 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       {xenos::TextureFormat::k_24_8_FLOAT, SharedLoadFamily::kDepthFloatToR32,
        kMtlPixelFormatR32Float, kMtlPixelFormatR32Float,
        xenos::XE_GPU_TEXTURE_SWIZZLE_RRRR, 4, false},
+      // ---- 2026-10-26 D3D12 host-format parity (texture-matrix lane) ----
+      // Four-channel 32-bit float: 16-byte block copy (Gears of War 3's
+      // 4096x1 UE3 float tables, served by the legacy plan since 2026-09-18;
+      // the routed load keeps them off the CPU untile).
+      {xenos::TextureFormat::k_32_32_32_32_FLOAT, SharedLoadFamily::k128bpb,
+       kMtlPixelFormatRGBA32Float, kMtlPixelFormatRGBA32Float,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 16, false},
+      // 6:5:5 repacked into B5G6R5 by the upstream loader (see the family);
+      // the D3D12 table's RBGG swizzle reads guest green from the host blue
+      // field and guest blue from host green, alpha from the last stored
+      // component. Apple GPUs only (packed16); XE_METAL_TEX_655=0 drops it.
+      {xenos::TextureFormat::k_6_5_5, SharedLoadFamily::kR5G5B6ToB5G6R5Rbga,
+       kMtlPixelFormatB5G6R5Unorm, kMtlPixelFormatB5G6R5Unorm,
+       XE_GPU_MAKE_TEXTURE_SWIZZLE(R, B, G, G), 2, false},
+      // DXT3A_AS_1_1_1_1 expanded to ABGR4 (see the family): the loader's
+      // nibble order puts guest red where Metal reads blue and vice versa, so
+      // the host swizzle is BGRA, as for the 1:5:5:5 entry. Apple GPUs only;
+      // XE_METAL_TEX_DXT3A1111=0 drops it.
+      {xenos::TextureFormat::k_DXT3A_AS_1_1_1_1,
+       SharedLoadFamily::kDxt3aAs1111ToAbgr4, kMtlPixelFormatABGR4Unorm,
+       kMtlPixelFormatABGR4Unorm, XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, A), 8,
+       false},
+      // 4:2:2 pairs expanded to RGBA8 (see the families); RGBB like the D3D12
+      // table. Every GPU; XE_METAL_TEX_422=0 drops both.
+      {xenos::TextureFormat::k_Cr_Y1_Cb_Y0_REP, SharedLoadFamily::kGbgr8ToRgba8,
+       kMtlPixelFormatRGBA8Unorm, kMtlPixelFormatRGBA8Unorm,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGBB, 4, false},
+      {xenos::TextureFormat::k_Y1_Cr_Y0_Cb_REP, SharedLoadFamily::kBgrg8ToRgba8,
+       kMtlPixelFormatRGBA8Unorm, kMtlPixelFormatRGBA8Unorm,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGBB, 4, false},
   };
   if (count_out) {
     *count_out = sizeof(kTable) / sizeof(kTable[0]);
@@ -327,6 +380,11 @@ inline uint32_t SharedTextureHostBytesPerBlock(
       return 2u;
     case SharedLoadFamily::kDxt3aToR8:
       return 1u;
+    case SharedLoadFamily::kDxt3aAs1111ToAbgr4:
+      return 2u;
+    case SharedLoadFamily::kGbgr8ToRgba8:
+    case SharedLoadFamily::kBgrg8ToRgba8:
+      return 8u;
     default:
       return entry.bytes_per_block;
   }
@@ -345,10 +403,16 @@ inline bool IsSharedTextureBlockCompressedFormat(xenos::TextureFormat format) {
     case xenos::TextureFormat::k_DXN:
     case xenos::TextureFormat::k_CTX1:
     case xenos::TextureFormat::k_DXT3A:
+    case xenos::TextureFormat::k_DXT3A_AS_1_1_1_1:
       return true;
     default:
       return false;
   }
+}
+// The 4:2:2 formats: a guest block is a horizontal PAIR of texels (4 bytes).
+inline bool IsSharedTexture422Format(xenos::TextureFormat format) {
+  return format == xenos::TextureFormat::k_Cr_Y1_Cb_Y0_REP ||
+         format == xenos::TextureFormat::k_Y1_Cr_Y0_Cb_REP;
 }
 
 // Guest block edge in texels: 4 for the 4x4 block-compressed formats, 1 for
@@ -356,15 +420,30 @@ inline bool IsSharedTextureBlockCompressedFormat(xenos::TextureFormat format) {
 inline uint32_t SharedTextureBlockDim(const SharedTextureFormatEntry& entry) {
   return IsSharedTextureBlockCompressedFormat(entry.format) ? 4u : 1u;
 }
+// Guest block width and height in texels: 4x4 for the block-compressed
+// formats, 2x1 for the 4:2:2 pairs, 1x1 for everything else. The loaders
+// dispatch over guest blocks, so both axes must use the right edge.
+inline uint32_t SharedTextureBlockWidth(const SharedTextureFormatEntry& entry) {
+  return IsSharedTexture422Format(entry.format) ? 2u
+                                                : SharedTextureBlockDim(entry);
+}
+inline uint32_t SharedTextureBlockHeight(
+    const SharedTextureFormatEntry& entry) {
+  return SharedTextureBlockDim(entry);
+}
 
 // Host texels per guest block edge: the decoding families (CTX1, DXT3A)
 // write 4x4 host texels per guest block; the BC-preserving families and
 // every uncompressed format write one host block/texel per guest block.
-inline uint32_t SharedTextureHostExpand(const SharedTextureFormatEntry& entry) {
-  return entry.load_shader == SharedLoadFamily::kCtx1ToRg8 ||
-                 entry.load_shader == SharedLoadFamily::kDxt3aToR8
+inline uint32_t SharedTextureHostExpand(const SharedLoadFamily& family) {
+  return family == SharedLoadFamily::kCtx1ToRg8 ||
+                 family == SharedLoadFamily::kDxt3aToR8 ||
+                 family == SharedLoadFamily::kDxt3aAs1111ToAbgr4
              ? 4u
              : 1u;
+}
+inline uint32_t SharedTextureHostExpand(const SharedTextureFormatEntry& entry) {
+  return SharedTextureHostExpand(entry.load_shader);
 }
 
 // Whether the entry's host texture is a BC (compressed) pixel format: no
@@ -422,6 +501,13 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormatUncached(
     format = xenos::TextureFormat::k_11_11_10;
   } else if (format == xenos::TextureFormat::k_10_11_11_AS_16_16_16_16) {
     format = xenos::TextureFormat::k_10_11_11;
+  } else if (format == xenos::TextureFormat::k_8_A ||
+             format == xenos::TextureFormat::k_8_B) {
+    // The same base-format mapping as the shared TextureCache::GetBaseFormat
+    // (the key carries k_8; D3D12 serves these through the k_8 host format).
+    format = xenos::TextureFormat::k_8;
+  } else if (format == xenos::TextureFormat::k_8_8_8_8_A) {
+    format = xenos::TextureFormat::k_8_8_8_8;
   }
   size_t count = 0;
   const SharedTextureFormatEntry* table = SharedTextureFormatTable(&count);
@@ -466,6 +552,35 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormatUncached(
       }();
       if (!s_1555 ||
           !SharedTexturePacked16Supported().load(std::memory_order_relaxed)) {
+        return nullptr;
+      }
+    }
+    if (table[i].format == xenos::TextureFormat::k_6_5_5) {
+      static const bool s_655 = [] {
+        const char* v = std::getenv("XE_METAL_TEX_655");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!s_655 ||
+          !SharedTexturePacked16Supported().load(std::memory_order_relaxed)) {
+        return nullptr;
+      }
+    }
+    if (table[i].format == xenos::TextureFormat::k_DXT3A_AS_1_1_1_1) {
+      static const bool s_dxt3a1111 = [] {
+        const char* v = std::getenv("XE_METAL_TEX_DXT3A1111");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!s_dxt3a1111 ||
+          !SharedTexturePacked16Supported().load(std::memory_order_relaxed)) {
+        return nullptr;
+      }
+    }
+    if (IsSharedTexture422Format(table[i].format)) {
+      static const bool s_422 = [] {
+        const char* v = std::getenv("XE_METAL_TEX_422");
+        return !(v && v[0] == '0' && !v[1]);
+      }();
+      if (!s_422) {
         return nullptr;
       }
     }

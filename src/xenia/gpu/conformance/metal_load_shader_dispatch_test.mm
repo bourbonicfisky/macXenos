@@ -475,6 +475,206 @@ static void RunFamilyShapeCase(const char* family, uint32_t bpb,
   SUCCEED();
 }
 
+// ---- 2026-10-26 texture-matrix families: semantic oracles ----
+// Runs a converting loader over tiled guest blocks and returns the host rows.
+// The oracles below decode the guest semantics independently (component bit
+// positions from the Xenos format definitions, Metal host bit layouts from
+// the device-probed table comments) rather than replaying the shader math.
+struct ConvertedRows {
+  std::vector<uint8_t> guest;  // swapped guest bytes per block, block order
+  std::vector<uint8_t> host;
+  uint32_t host_pitch = 0;
+};
+static ConvertedRows RunConvertingFamily(const char* family, uint32_t guest_bpb,
+                                         uint32_t block_log2,
+                                         uint32_t blocks_per_thread,
+                                         uint32_t blocks_w, uint32_t blocks_h,
+                                         uint32_t pitch_aligned,
+                                         uint32_t host_row_bytes_per_block,
+                                         uint32_t host_rows_per_block,
+                                         xenos::Endian endian) {
+  auto& h = H();
+  REQUIRE(h.ok);
+  int index = h.pipelines.FindIndex(family);
+  REQUIRE(index >= 0);
+  const uint32_t padded_w =
+      ((blocks_w + blocks_per_thread - 1u) / blocks_per_thread) *
+      blocks_per_thread;
+  ConvertedRows out;
+  out.host_pitch =
+      (padded_w * host_row_bytes_per_block + 255u) & ~255u;
+  const uint32_t host_rows = blocks_h * host_rows_per_block;
+  const uint32_t dest_size = out.host_pitch * host_rows + 256;
+  int32_t max_off = 0;
+  for (uint32_t y = 0; y < blocks_h; ++y) {
+    for (uint32_t x = 0; x < padded_w; ++x) {
+      max_off = std::max(max_off, texture_address::Tiled2D(
+                                      int32_t(x), int32_t(y), pitch_aligned,
+                                      block_log2));
+    }
+  }
+  const uint32_t source_size =
+      ((uint32_t(max_off) + guest_bpb + 31u) & ~15u) + 64;
+  std::vector<uint8_t> guest(source_size);
+  uint32_t seed = 0x9E3779B9u;
+  for (uint32_t i = 0; i < source_size; ++i) {
+    seed = seed * 1664525u + 1013904223u;
+    guest[i] = uint8_t(seed >> 24);
+  }
+  out.guest.resize(size_t(blocks_w) * blocks_h * guest_bpb);
+  for (uint32_t y = 0; y < blocks_h; ++y) {
+    for (uint32_t x = 0; x < blocks_w; ++x) {
+      uint32_t src = uint32_t(texture_address::Tiled2D(
+          int32_t(x), int32_t(y), pitch_aligned, block_log2));
+      uint8_t* dst = &out.guest[(size_t(y) * blocks_w + x) * guest_bpb];
+      std::memcpy(dst, &guest[src], guest_bpb);
+      for (uint32_t i = 0; i + 1 < guest_bpb; i += 2) {
+        if (endian == xenos::Endian::k8in16) std::swap(dst[i], dst[i + 1]);
+      }
+      for (uint32_t i = 0; i + 3 < guest_bpb; i += 4) {
+        if (endian == xenos::Endian::k8in32) {
+          std::swap(dst[i], dst[i + 3]);
+          std::swap(dst[i + 1], dst[i + 2]);
+        } else if (endian == xenos::Endian::k16in32) {
+          std::swap(dst[i], dst[i + 2]);
+          std::swap(dst[i + 1], dst[i + 3]);
+        }
+      }
+    }
+  }
+  id<MTLBuffer> source =
+      [h.device newBufferWithLength:source_size
+                            options:MTLResourceStorageModeShared];
+  id<MTLBuffer> dest = [h.device newBufferWithLength:dest_size
+                                             options:MTLResourceStorageModeShared];
+  std::memcpy(source.contents, guest.data(), source_size);
+  std::memset(dest.contents, 0xC5, dest_size);
+  LoadConstants constants = {};
+  constants.is_tiled_3d_endian_scale = 1u | (uint32_t(endian) << 2);
+  constants.guest_pitch_aligned = pitch_aligned;
+  constants.size_blocks[0] = blocks_w;
+  constants.size_blocks[1] = blocks_h;
+  constants.size_blocks[2] = 1;
+  constants.host_pitch = out.host_pitch;
+  constants.height_texels = host_rows;
+  REQUIRE(h.Dispatch(h.pipelines.pipeline(size_t(index)), constants, dest,
+                     source, padded_w / blocks_per_thread, blocks_h, 1));
+  const uint8_t* got = static_cast<const uint8_t*>(dest.contents);
+  out.host.assign(got, got + size_t(out.host_pitch) * host_rows);
+  return out;
+}
+static uint16_t Load16(const uint8_t* p) { return uint16_t(p[0] | (p[1] << 8)); }
+static uint32_t Load32(const uint8_t* p) {
+  return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) |
+         (uint32_t(p[3]) << 24);
+}
+
+TEST_CASE("load shaders: 6:5:5 lands in B5G6R5 for the RBGG host swizzle",
+          "[l1][metal][texmatrix]") {
+  REQUIRE_DEVICE();
+  for (xenos::Endian e : {xenos::Endian::kNone, xenos::Endian::k8in16}) {
+    const uint32_t bw = 41, bh = 17;
+    ConvertedRows r = RunConvertingFamily(
+        "texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs", 2, 1, 16, bw, bh, 64, 2,
+        1, e);
+    for (uint32_t y = 0; y < bh; ++y) {
+      for (uint32_t x = 0; x < bw; ++x) {
+        // k_6_5_5: X (red) 5 bits at 0, Y (green) 5 at 5, Z (blue) 6 at 10.
+        uint16_t g = Load16(&r.guest[(size_t(y) * bw + x) * 2]);
+        uint32_t gr = g & 31u, gg = (g >> 5) & 31u, gb = (g >> 10) & 63u;
+        uint16_t hv = Load16(&r.host[size_t(y) * r.host_pitch + x * 2]);
+        // Metal B5G6R5Unorm: B bits 0-4, G 5-10, R 11-15. RBGG reads guest
+        // X from host R, Y from host B, Z from host G.
+        INFO("texel " << x << "," << y << " guest " << g << " host " << hv);
+        REQUIRE(((hv >> 11) & 31u) == gr);
+        REQUIRE((hv & 31u) == gg);
+        REQUIRE(((hv >> 5) & 63u) == gb);
+      }
+    }
+  }
+}
+
+TEST_CASE("load shaders: DXT3A_AS_1_1_1_1 lands in ABGR4 for the BGRA swizzle",
+          "[l1][metal][texmatrix]") {
+  REQUIRE_DEVICE();
+  const uint32_t bw = 13, bh = 9;  // guest 4x4 blocks
+  ConvertedRows r = RunConvertingFamily("texture_load_dxt3aas1111_argb4_cs", 8,
+                                        3, 4, bw, bh, 32, 4 * 2, 4,
+                                        xenos::Endian::kNone);
+  for (uint32_t by = 0; by < bh; ++by) {
+    for (uint32_t bx = 0; bx < bw; ++bx) {
+      const uint8_t* blk = &r.guest[(size_t(by) * bw + bx) * 8];
+      uint32_t w[2] = {Load32(blk), Load32(blk + 4)};
+      for (uint32_t row = 0; row < 4; ++row) {
+        uint32_t bits = (w[row >> 1] >> (16 * (row & 1))) & 0xFFFFu;
+        for (uint32_t c = 0; c < 4; ++c) {
+          // One bit per component in each nibble: red bit 0, green 1, blue 2,
+          // alpha 3 (5345084D's tracking masks test bit 0).
+          uint32_t n = (bits >> (4 * c)) & 0xFu;
+          uint16_t hv = Load16(&r.host[size_t(by * 4 + row) * r.host_pitch +
+                                       (bx * 4 + c) * 2]);
+          // Metal ABGR4Unorm: A bits 0-3, B 4-7, G 8-11, R 12-15. BGRA reads
+          // guest X from host B, Y from G, Z from host R, W from A.
+          INFO("block " << bx << "," << by << " texel " << c << "," << row
+                        << " nibble " << n << " host " << hv);
+          REQUIRE(((hv >> 4) & 0xFu) == ((n & 1u) ? 0xFu : 0u));
+          REQUIRE(((hv >> 8) & 0xFu) == ((n & 2u) ? 0xFu : 0u));
+          REQUIRE(((hv >> 12) & 0xFu) == ((n & 4u) ? 0xFu : 0u));
+          REQUIRE((hv & 0xFu) == ((n & 8u) ? 0xFu : 0u));
+        }
+      }
+    }
+  }
+}
+
+TEST_CASE("load shaders: 4:2:2 pairs expand with luma in green, shared chroma",
+          "[l1][metal][texmatrix]") {
+  REQUIRE_DEVICE();
+  struct Case {
+    const char* family;
+    // Byte index (in the swapped little-endian guest word) of Cr, Cb, Y0, Y1.
+    uint32_t cr, cb, y0, y1;
+  };
+  // k_Cr_Y1_Cb_Y0_REP: named from the most significant byte, Cr Y1 Cb Y0.
+  // k_Y1_Cr_Y0_Cb_REP: Y1 Cr Y0 Cb.
+  const Case cases[] = {{"texture_load_gbgr8_rgb8_cs", 3, 1, 0, 2},
+                        {"texture_load_bgrg8_rgb8_cs", 2, 0, 1, 3}};
+  for (const Case& k : cases) {
+    for (xenos::Endian e : {xenos::Endian::kNone, xenos::Endian::k8in32}) {
+      const uint32_t bw = 37, bh = 11;  // 2x1 texel pairs
+      ConvertedRows r = RunConvertingFamily(k.family, 4, 2, 8, bw, bh, 64, 8,
+                                            1, e);
+      for (uint32_t y = 0; y < bh; ++y) {
+        for (uint32_t x = 0; x < bw; ++x) {
+          const uint8_t* g = &r.guest[(size_t(y) * bw + x) * 4];
+          const uint8_t* t0 = &r.host[size_t(y) * r.host_pitch + x * 8];
+          const uint8_t* t1 = t0 + 4;
+          INFO(k.family << " pair " << x << "," << y);
+          // Host RGBA8 = (Cr, Y, Cb, Cb): RGBB gives guest X=Cr, Y=luma,
+          // Z=W=Cb, the D3D12 decompression path.
+          REQUIRE(t0[0] == g[k.cr]);
+          REQUIRE(t0[1] == g[k.y0]);
+          REQUIRE(t0[2] == g[k.cb]);
+          REQUIRE(t0[3] == g[k.cb]);
+          REQUIRE(t1[0] == g[k.cr]);
+          REQUIRE(t1[1] == g[k.y1]);
+          REQUIRE(t1[2] == g[k.cb]);
+          REQUIRE(t1[3] == g[k.cb]);
+        }
+      }
+    }
+  }
+}
+
+TEST_CASE("load shaders: 128bpb family matches the legacy per-block untile",
+          "[l1][metal][texmatrix]") {
+  REQUIRE_DEVICE();
+  for (xenos::Endian e : {xenos::Endian::kNone, xenos::Endian::k8in32}) {
+    RunFamilyShapeCase("texture_load_128bpb_cs", 16, 4, 2, 32, 8, 32, e);
+    RunFamilyShapeCase("texture_load_128bpb_cs", 16, 4, 2, 41, 17, 64, e);
+  }
+}
+
 TEST_CASE("load shaders: 16bpb family matches the legacy per-block untile",
           "[l1][metal][loadshader][family]") {
   REQUIRE_DEVICE();

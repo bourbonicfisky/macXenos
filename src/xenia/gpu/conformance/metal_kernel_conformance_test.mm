@@ -129,6 +129,16 @@ kernel void k_resolve_color_value(
 // Stage B (implement-metal-depth-semantics 3.3): pin the RNE f20e4 encoder
 // and the host-depth reconcile against their CPU oracles. Reconcile consumes
 // interleaved pairs (word, host-bits) so the unary harness carries it.
+kernel void k_f16ext_unpack(device const uint* in [[buffer(0)]],
+                            device uint* out [[buffer(1)]],
+                            uint i [[thread_position_in_grid]]) {
+  out[i] = as_type<uint>(xe_f16_ext_to_f32(in[i]));
+}
+kernel void k_f16ext_pack(device const uint* in [[buffer(0)]],
+                          device uint* out [[buffer(1)]],
+                          uint i [[thread_position_in_grid]]) {
+  out[i] = xe_f32_to_f16_ext(as_type<float>(in[i]));
+}
 kernel void k_f20e4_rne(device const uint* in [[buffer(0)]],
                         device uint* out [[buffer(1)]],
                         uint i [[thread_position_in_grid]]) {
@@ -183,7 +193,7 @@ kernel void k_7e3(device const uint* in [[buffer(0)]],
     exponent = 1u - lz;                    // wraps like the CPU cast
     mantissa = (mantissa << lz) & 0x7Fu;
   }
-  out[i] = ((exponent + 124u) << 23) | (mantissa << 3);
+  out[i] = ((exponent + 124u) << 23) | (mantissa << 16);
 }
 
 kernel void k_metal_sample_to_guest(device const uint* in [[buffer(0)]],
@@ -357,8 +367,13 @@ struct CanonicalResolveParamsHost {
   uint32_t scatter_enable;
   uint32_t dest_base, dest_pitch_aligned;
   uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
+  // copy_dest_number (fixed-point pack semantics) and the integer-destination
+  // component widths for float snapshots; both 0 = unsigned fraction, the
+  // pack every case below expects unless it sets dest_number itself.
+  uint32_t dest_number;
+  uint32_t dest_int_bits;
 };
-static_assert(sizeof(CanonicalResolveParamsHost) == 26u * sizeof(uint32_t));
+static_assert(sizeof(CanonicalResolveParamsHost) == 28u * sizeof(uint32_t));
 
 // Host mirror of the shared MSL CanonicalClearParams (metal_edram_msl.h). The
 // clear scatter writes one clear word (two for 64bpp) at each declared
@@ -660,7 +675,8 @@ struct MetalCompute {
       uint32_t color_format, float exp_bias_scale, uint32_t dest_format,
       uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
       const std::array<uint32_t, 4>& sample_words,
-      const std::array<uint32_t, 4>* second_sample_words = nullptr) {
+      const std::array<uint32_t, 4>* second_sample_words = nullptr,
+      uint32_t dest_number = 0u) {
     const size_t canonical_bytes = xenos::kEdramSizeBytes;
     id<MTLBuffer> canonical =
         [dev newBufferWithLength:canonical_bytes
@@ -686,6 +702,7 @@ struct MetalCompute {
         uint32_t(dest_bpp_log2 == 0u),
         exp_bias_scale, 1u, 1u, dest_format, dest_bpp_log2, dest_endian,
         uint32_t(raw_copy)};
+    params.dest_number = dest_number;
     NSError* error = nil;
     id<MTLComputePipelineState> pipeline = [dev
         newComputePipelineStateWithFunction:
@@ -1081,6 +1098,14 @@ struct MetalCompute {
     uint32_t* in_words = static_cast<uint32_t*>(canonical_in.contents);
     uint32_t* out_words = static_cast<uint32_t*>(canonical_out.contents);
     std::fill_n(out_words, canonical_bytes / sizeof(uint32_t), sentinel);
+    // MSAA: the per-pixel pack (the live default) packs the same texture into
+    // a second buffer, which must match the per-sample pack word for word.
+    id<MTLBuffer> canonical_out_px =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    REQUIRE(canonical_out_px != nil);
+    std::fill_n(static_cast<uint32_t*>(canonical_out_px.contents),
+                canonical_bytes / sizeof(uint32_t), sentinel);
     auto word_offset = [&](uint32_t x, uint32_t y, uint32_t s) {
       return XeEdramSnapshotOffsetBytes(x, y, sp.base, sp.pitch, sp.msaa,
                                         false, sp.format_ints_log2, s) >> 2;
@@ -1221,16 +1246,21 @@ struct MetalCompute {
       id<MTLRenderPipelineState> materialize =
           [dev newRenderPipelineStateWithDescriptor:rpd error:&err];
       REQUIRE(materialize != nil);
+      NSString* pack_name = raw_view
+                                ? (wide ? @"pack_color64_raw_ms_range"
+                                        : @"pack_color_raw_ms_range")
+                                : (wide ? @"pack_color64_ms_range"
+                                        : @"pack_color_ms_range");
       id<MTLComputePipelineState> pack = [dev
-          newComputePipelineStateWithFunction:
-              [lib newFunctionWithName:
-                       raw_view
-                           ? (wide ? @"pack_color64_raw_ms_range"
-                                   : @"pack_color_raw_ms_range")
-                           : (wide ? @"pack_color64_ms_range"
-                                   : @"pack_color_ms_range")]
+          newComputePipelineStateWithFunction:[lib newFunctionWithName:pack_name]
                                         error:&err];
       REQUIRE(pack != nil);
+      id<MTLComputePipelineState> pack_px = [dev
+          newComputePipelineStateWithFunction:
+              [lib newFunctionWithName:[pack_name
+                                           stringByAppendingString:@"_px"]]
+                                        error:&err];
+      REQUIRE(pack_px != nil);
       {
         MTLRenderPassDescriptor* rp =
             [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1267,6 +1297,13 @@ struct MetalCompute {
         [encoder setBytes:&kXeRowStartZero length:sizeof(kXeRowStartZero) atIndex:7];
         [encoder dispatchThreads:MTLSizeMake(w, h, num_samples)
             threadsPerThreadgroup:MTLSizeMake(tw, th, 1u)];
+        [encoder setComputePipelineState:pack_px];
+        [encoder setBuffer:canonical_out_px offset:0 atIndex:0];
+        [encoder dispatchThreads:MTLSizeMake(w, h, 1u)
+            threadsPerThreadgroup:MTLSizeMake(pack_px.threadExecutionWidth,
+                                              pack_px.maxTotalThreadsPerThreadgroup /
+                                                  pack_px.threadExecutionWidth,
+                                              1u)];
         [encoder endEncoding];
       }
     }
@@ -1286,6 +1323,10 @@ struct MetalCompute {
           }
         }
       }
+    }
+    if (num_samples > 1u) {
+      REQUIRE(std::memcmp(canonical_out.contents, canonical_out_px.contents,
+                          canonical_bytes) == 0);
     }
     return result;
   }
@@ -1430,11 +1471,21 @@ struct MetalCompute {
   // re-packed complete words in the same order. Identity <=> every sample's
   // depth AND stencil survive independently (the 4x sample dimension the
   // collapsed host loses).
+  // With `range_kernel` set, canonical is filled with kPackSentinel after the
+  // materialize and that live range kernel (pack_depth_ms_range or
+  // pack_depth_ms_range_px) packs tiles [start_tiles, end_tiles) back with the
+  // host lane on; `lane_out` receives the lane words at the same offsets.
+  static constexpr uint32_t kPackSentinel = 0xEFEFEFEFu;  // byte fill
   std::vector<uint32_t> RoundTripDepthMsaa(uint32_t w, uint32_t h,
                                            uint32_t num_samples,
                                            const SurfaceParams& sp,
                                            const std::vector<uint32_t>& words,
-                                           size_t canonical_bytes) {
+                                           size_t canonical_bytes,
+                                           const char* range_kernel = nullptr,
+                                           uint32_t start_tiles = 0,
+                                           uint32_t end_tiles = 0,
+                                           std::vector<uint32_t>* lane_out =
+                                               nullptr) {
     id<MTLBuffer> canonical =
         [dev newBufferWithLength:canonical_bytes
                          options:MTLResourceStorageModeShared];
@@ -1501,10 +1552,19 @@ struct MetalCompute {
       bds.backFaceStencil = bs;
       bit_states[b] = [dev newDepthStencilStateWithDescriptor:bds];
     }
+    const bool per_pixel =
+        range_kernel && std::strcmp(range_kernel, "pack_depth_ms_range_px") == 0;
     id<MTLComputePipelineState> pk = [dev
-        newComputePipelineStateWithFunction:[lib newFunctionWithName:@"pack_depth_ms"]
+        newComputePipelineStateWithFunction:
+            [lib newFunctionWithName:[NSString stringWithUTF8String:
+                                                   range_kernel ? range_kernel
+                                                                : "pack_depth_ms"]]
                                       error:&err];
     REQUIRE(pk != nil);
+    id<MTLBuffer> lane =
+        [dev newBufferWithLength:canonical_bytes
+                         options:MTLResourceStorageModeShared];
+    std::memset(lane.contents, 0, canonical_bytes);
     id<MTLCommandBuffer> cb = [queue commandBuffer];
     {
       MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1535,6 +1595,12 @@ struct MetalCompute {
       }
       [enc endEncoding];
     }
+    if (range_kernel) {
+      id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+      [blit fillBuffer:canonical range:NSMakeRange(0, canonical_bytes)
+                 value:uint8_t(kPackSentinel & 0xFFu)];
+      [blit endEncoding];
+    }
     {
       id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
       [enc setComputePipelineState:pk];
@@ -1542,9 +1608,17 @@ struct MetalCompute {
       [enc setTexture:sten_view atIndex:1];
       [enc setBuffer:canonical offset:0 atIndex:0];
       [enc setBuffer:sp_buf offset:0 atIndex:1];
+      if (range_kernel) {
+        const uint32_t range[2] = {start_tiles, end_tiles};
+        const uint32_t hl_mode = 1u, row_start = 0u;
+        [enc setBytes:range length:sizeof(range) atIndex:2];
+        [enc setBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
+        [enc setBuffer:lane offset:0 atIndex:4];
+        [enc setBytes:&row_start length:sizeof(row_start) atIndex:5];
+      }
       NSUInteger tw = pk.threadExecutionWidth;
       NSUInteger th = pk.maxTotalThreadsPerThreadgroup / tw;
-      [enc dispatchThreads:MTLSizeMake(w, h, num_samples)
+      [enc dispatchThreads:MTLSizeMake(w, h, per_pixel ? 1 : num_samples)
           threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
       [enc endEncoding];
     }
@@ -1552,10 +1626,19 @@ struct MetalCompute {
     [cb waitUntilCompleted];
     REQUIRE(cb.error == nil);
     std::vector<uint32_t> out(size_t(w) * h * num_samples);
+    const uint32_t* lwords = static_cast<const uint32_t*>(lane.contents);
+    if (lane_out) {
+      lane_out->assign(out.size(), 0u);
+    }
     for (uint32_t y = 0; y < h; ++y)
       for (uint32_t x = 0; x < w; ++x)
-        for (uint32_t s = 0; s < num_samples; ++s)
-          out[(y * w + x) * num_samples + s] = cwords[doff(x, y, s)];
+        for (uint32_t s = 0; s < num_samples; ++s) {
+          const size_t i = (size_t(y) * w + x) * num_samples + s;
+          out[i] = cwords[doff(x, y, s)];
+          if (lane_out) {
+            (*lane_out)[i] = lwords[doff(x, y, s)];
+          }
+        }
     return out;
   }
 
@@ -1973,6 +2056,63 @@ TEST_CASE("Metal unorm24 decode matches CPU oracle bit-for-bit", "[l1][metal][un
   }
   auto gpu = mc.Run("k_unorm24", codes);
   REQUIRE(CountMismatches(codes, gpu, cpu) == 0u);
+}
+
+TEST_CASE("Metal extended-range float16 decode matches CPU oracle bit-for-bit",
+          "[l1][metal][float16ext]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  std::vector<uint32_t> codes;
+  for (uint32_t c = 0; c < (1u << 16); ++c) codes.push_back(c);
+  std::vector<uint32_t> cpu(codes.size());
+  for (size_t i = 0; i < codes.size(); ++i) {
+    float f = xenos::Float16ExtendedRangeTo32(codes[i]);
+    std::memcpy(&cpu[i], &f, 4);
+  }
+  auto gpu = mc.Run("k_f16ext_unpack", codes);
+  REQUIRE(CountMismatches(codes, gpu, cpu) == 0u);
+}
+
+TEST_CASE("Metal extended-range float16 encode matches CPU oracle bit-for-bit",
+          "[l1][metal][float16ext]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // Every decoded code (fixed points), the midpoints between adjacent codes
+  // (rounding ties, including the 65504/65520 hand-off into exponent 31),
+  // values beyond the guest range, Inf and NaN.
+  std::vector<uint32_t> inputs;
+  auto push_f = [&](float f) {
+    uint32_t u;
+    std::memcpy(&u, &f, 4);
+    inputs.push_back(u);
+  };
+  for (uint32_t c = 0; c < 0x8000u; ++c) {
+    float lo = xenos::Float16ExtendedRangeTo32(c);
+    float hi = xenos::Float16ExtendedRangeTo32(c + 1);
+    push_f(lo);
+    push_f(-lo);
+    push_f(lo + (hi - lo) * 0.5f);
+    push_f(lo + (hi - lo) * 0.75f);
+  }
+  push_f(65519.0f);
+  push_f(65520.0f);
+  push_f(131008.0f);
+  push_f(131009.0f);
+  push_f(1.0e9f);
+  push_f(-1.0e9f);
+  push_f(INFINITY);
+  push_f(-INFINITY);
+  push_f(NAN);
+  push_f(-0.0f);
+  push_f(1.0e-9f);
+  std::vector<uint32_t> cpu(inputs.size());
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    float f;
+    std::memcpy(&f, &inputs[i], 4);
+    cpu[i] = xenos::Float32ToFloat16ExtendedRange(f);
+  }
+  auto gpu = mc.Run("k_f16ext_pack", inputs);
+  REQUIRE(CountMismatches(inputs, gpu, cpu) == 0u);
 }
 
 TEST_CASE("Metal RNE 20e4 encode matches CPU oracle bit-for-bit",
@@ -3311,6 +3451,60 @@ TEST_CASE("Canonical packed color resolve matches guest formats and Endian128",
   CHECK(l8[0] == 0x10u);
 }
 
+
+TEST_CASE("Canonical packed color resolve honors copy_dest_number integer",
+          "[l1][metal][canonical][resolve][packed][number]") {
+  // Crysis 3 resolves its 7e3 HDR scene with exp_bias +6 into an unsigned
+  // INTEGER 11:11:10 destination (RB_COPY_DEST_INFO copy_dest_number 2) and
+  // fetches it back as integer with exp_adjust -6: the stored word is
+  // round(value * 64), not saturate(value * 64) * 2047. The unsigned-fraction
+  // pack saturated the whole scene copy to 0xFFFFFFFF (the washout).
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  const uint32_t word_count =
+      uint32_t(xenos::kEdramSizeBytes / sizeof(uint32_t));
+  auto read32 = [](const std::array<uint8_t, 16>& bytes, uint32_t word = 0u) {
+    uint32_t value;
+    std::memcpy(&value, bytes.data() + word * sizeof(uint32_t), sizeof(value));
+    return value;
+  };
+  SurfaceParams rgba_sp{0u, PitchFor(1u, 2u, 0u), 2u, 0u, 0u, word_count};
+  std::array<uint32_t, 4> samples;
+  // 8888 source A=0xFF B=0x33 G=0x22 R=0x11 (word is ABGR little-endian).
+  samples.fill(0xFF332211u);
+  // Unsigned fraction (dest_number 0): every channel * 64 saturates.
+  auto fraction = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 64.0f,
+                                           16u, 2u, 0u, false, samples,
+                                           nullptr, 0u);
+  CHECK(read32(fraction) == 0xFFFFFFFFu);
+  // Unsigned integer (dest_number 2): round(c / 255 * 64) per channel.
+  // R 0x11 -> 4.27 -> 4, G 0x22 -> 8.53 -> 9, B 0x33 -> 12.8 -> 13.
+  auto integer = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 64.0f,
+                                          16u, 2u, 0u, false, samples,
+                                          nullptr, 2u);
+  CHECK(read32(integer) == (4u | (9u << 11u) | (13u << 22u)));
+  // Integer saturates at the component maximum, not at 1.0: * 65536 into
+  // 11:11:10 clamps R to 2047, G to 2047, B to 1023.
+  auto clamped = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 65536.0f,
+                                          16u, 2u, 0u, false, samples,
+                                          nullptr, 2u);
+  CHECK(read32(clamped) == 0xFFFFFFFFu);
+  // 16_16_16_16 integer with bias 2048 (Crysis 3's luminance chain):
+  // R 0x11 -> 136.5 -> 137, G 0x22 -> 273.1 -> 273, B 0x33 -> 409.6 -> 410,
+  // A 0xFF -> 2048.
+  auto wide = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 2048.0f,
+                                       26u, 3u, 0u, false, samples,
+                                       nullptr, 2u);
+  CHECK(read32(wide, 0u) == (137u | (273u << 16u)));
+  CHECK(read32(wide, 1u) == (410u | (2048u << 16u)));
+  // Signed fraction (dest_number 1) packs with the positive endpoint 127.
+  auto snorm = mc.ResolveColorPackedOne(rgba_sp, 0u, false, 0u, 1.0f,
+                                        6u, 2u, 0u, false, samples,
+                                        nullptr, 1u);
+  // 0x11/255*127 = 8.47 -> 8, 0x22 -> 16.9 -> 17, 0x33 -> 25.4 -> 25,
+  // 0xFF -> 127.
+  CHECK(read32(snorm) == (8u | (17u << 8u) | (25u << 16u) | (127u << 24u)));
+}
 TEST_CASE("Canonical resolve clear writes only the declared surface samples",
           "[l1][metal][canonical][resolve][clear]") {
   MetalCompute mc;
@@ -4014,6 +4208,60 @@ TEST_CASE("Canonical 2x/4x per-sample depth+stencil round-trips every sample",
   REQUIRE(MsaaDepthBad(mc, /*unorm24=*/1u, /*2x=*/1u) == 0u);
   REQUIRE(MsaaDepthBad(mc, /*float24=*/2u, /*4x=*/2u) == 0u);
   REQUIRE(MsaaDepthBad(mc, /*unorm24=*/1u, /*4x=*/2u) == 0u);
+}
+
+TEST_CASE("Per-pixel MSAA depth pack equals the per-sample pack",
+          "[l1][metal][pack][depth][msaa]") {
+  MetalCompute mc;
+  if (!mc.Init()) { SUCCEED("no device"); return; }
+  // Multi-tile surface at a nonzero base, packed back over a range that
+  // starts and ends mid-surface: both kernels must write the same words and
+  // lane values, only inside the range.
+  for (uint32_t msaa = 1u; msaa <= 2u; ++msaa) {
+    for (uint32_t fmt = 1u; fmt <= 2u; ++fmt) {
+      const uint32_t w = msaa == 2u ? 120u : 240u;
+      const uint32_t h = 24u;
+      const uint32_t ns = 1u << msaa;
+      const uint32_t pitch = PitchFor(w, msaa, 0u);
+      const uint32_t base = 37u;
+      SurfaceParams sp{base, pitch, msaa, fmt, 0u,
+                       uint32_t(xenos::kEdramSizeBytes / 4u)};
+      std::vector<uint32_t> words(size_t(w) * h * ns);
+      for (uint32_t i = 0; i < words.size(); ++i) {
+        uint32_t d = (i * 2654435761u) & 0xFFFFFFu;
+        uint32_t s = (i * 37u + 1u) & 0xFFu;
+        words[i] = (d << 8) | s;
+      }
+      const uint32_t start = base + 2u, end = base + 2u * pitch + 1u;
+      std::vector<uint32_t> lane_sample, lane_pixel;
+      auto by_sample =
+          mc.RoundTripDepthMsaa(w, h, ns, sp, words, xenos::kEdramSizeBytes,
+                                "pack_depth_ms_range", start, end, &lane_sample);
+      auto by_pixel = mc.RoundTripDepthMsaa(
+          w, h, ns, sp, words, xenos::kEdramSizeBytes, "pack_depth_ms_range_px",
+          start, end, &lane_pixel);
+      uint32_t in_range = 0, bad = 0;
+      for (size_t i = 0; i < words.size(); ++i) {
+        if (by_pixel[i] != by_sample[i] || lane_pixel[i] != lane_sample[i]) {
+          if (bad < 8) {
+            WARN("msaa " << msaa << " fmt " << fmt << " idx " << i
+                         << " sample " << by_sample[i] << " pixel "
+                         << by_pixel[i]);
+          }
+          ++bad;
+        }
+        if (by_sample[i] != MetalCompute::kPackSentinel) {
+          ++in_range;
+          REQUIRE(by_sample[i] == words[i]);
+        }
+      }
+      INFO("msaa " << msaa << " fmt " << fmt);
+      REQUIRE(bad == 0u);
+      // The range is a strict, non-empty part of the surface.
+      REQUIRE(in_range > 0u);
+      REQUIRE(in_range < words.size());
+    }
+  }
 }
 
 TEST_CASE("Cross-MSAA 4x->1x->4x preserves samples and propagates a 1x write",

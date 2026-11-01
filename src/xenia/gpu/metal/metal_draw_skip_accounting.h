@@ -78,6 +78,10 @@ enum class MetalDrawSkipReason : uint32_t {
   // backend controls). Always a backend/initialization bug, never guest
   // behavior; every tessellated draw fail-closed skips on it (task 4.3).
   kTessellationResourceMissing,
+  // The draw's pipeline is still being created on a background thread
+  // (metal_async_pipelines) and the draw may use a stand-in: a pass redrawn
+  // every frame, so the next frame redraws it.
+  kAsyncPipelinePending,
   kCount,
 };
 
@@ -92,6 +96,7 @@ constexpr MetalDrawSkipSeverity MetalDrawSkipSeverityFor(
   switch (reason) {
     case MetalDrawSkipReason::kExpectedNoEffect:
     case MetalDrawSkipReason::kDiagnosticRollback:
+    case MetalDrawSkipReason::kAsyncPipelinePending:
       return MetalDrawSkipSeverity::kInfo;
     case MetalDrawSkipReason::kUnsupportedCapability:
     case MetalDrawSkipReason::kInvalidGuestState:
@@ -129,6 +134,8 @@ inline const char* MetalDrawSkipReasonName(MetalDrawSkipReason reason) {
       return "tessellation-unsupported-shape";
     case MetalDrawSkipReason::kTessellationResourceMissing:
       return "tessellation-resource-missing";
+    case MetalDrawSkipReason::kAsyncPipelinePending:
+      return "async-pipeline-pending";
     default:
       return "unknown";
   }

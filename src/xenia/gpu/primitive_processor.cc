@@ -24,6 +24,8 @@
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/gpu/xenos.h"
 
+DECLARE_bool(exact_write_fault_invalidation);
+
 // All these overrides are always safe to use as all backends are expected to
 // support triangle lists and line strips.
 DEFINE_bool(
@@ -294,6 +296,17 @@ void PrimitiveProcessor::ShutdownCommon() {
 }
 
 void PrimitiveProcessor::ClearPerFrameCache() {
+  static const bool s_widen_census =
+      std::getenv("XE_WIDEN_SCAN_VERIFY") != nullptr;
+  if (++widen_census_frames_ >= 600) {
+    if (s_widen_census && (widen_census_scans_ || widen_census_memo_hits_)) {
+      XELOGI("WidenScanCensus 600 frames: scans {} positive {} memo hits {}",
+             widen_census_scans_, widen_census_positive_,
+             widen_census_memo_hits_);
+    }
+    widen_census_frames_ = widen_census_scans_ = widen_census_positive_ =
+        widen_census_memo_hits_ = 0;
+  }
   if (!memory_invalidation_callback_handle_) {
     // Only do clearing if cache has ever been used.
     return;
@@ -332,17 +345,21 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
       regs.Get<reg::VGT_HOS_CNTL>().tess_mode;
   Shader::HostVertexShaderType host_vertex_shader_type;
   if (tessellation_enabled) {
-    // Currently only supporting tessellation in known cases for safety, and not
-    // yet converting patch strips / fans to patch lists until games using them
-    // are found for easier debugging when it actually happens.
-    // TODO(Triang3l): Conversion of patch strips / fans if found.
+    // Currently only supporting tessellation in known cases for safety.
     host_vertex_shader_type = Shader::HostVertexShaderType(-1);
     switch (guest_primitive_type) {
       case xenos::PrimitiveType::kTriangleList:
+      case xenos::PrimitiveType::kTriangleFan:
+      case xenos::PrimitiveType::kTriangleStrip:
         // Also supported by triangle strips and fans according to:
         // https://www.khronos.org/registry/OpenGL/extensions/AMD/AMD_vertex_shader_tessellator.txt
-        // Would need to convert those to triangle lists, but haven't seen any
-        // games using tessellated strips / fans so far.
+        // Convert strips and fans to triangle lists for tessellation (Canary
+        // 3eab2b8b3). 4D53085B (Halo: Reach) draws tessellated triangle
+        // strips, both auto-indexed and from index buffers with primitive
+        // reset possible.
+        if (guest_primitive_type != xenos::PrimitiveType::kTriangleList) {
+          host_primitive_type = xenos::PrimitiveType::kTriangleList;
+        }
         switch (tessellation_mode) {
           case xenos::TessellationMode::kDiscrete:
             // - 415607E1 - nets above barrels in the beginning of the first
@@ -570,11 +587,54 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
                       xenos::PrimitiveType::kTriangleList);
           cacheable.host_draw_vertex_count =
               GetTriangleFanListIndexCount(cacheable.host_draw_vertex_count);
-          cacheable.index_buffer_type =
-              ProcessedIndexBufferType::kHostBuiltinForAuto;
-          assert_true(builtin_ib_offset_triangle_fans_to_lists_ != SIZE_MAX);
-          cacheable.host_index_buffer_handle =
-              builtin_ib_offset_triangle_fans_to_lists_;
+          if (builtin_ib_offset_triangle_fans_to_lists_ != SIZE_MAX) {
+            cacheable.index_buffer_type =
+                ProcessedIndexBufferType::kHostBuiltinForAuto;
+            cacheable.host_index_buffer_handle =
+                builtin_ib_offset_triangle_fans_to_lists_;
+          } else if (cacheable.host_draw_vertex_count) {
+            // The backend didn't request the built-in fan to list conversion
+            // at initialization, so there's no prebuilt index buffer. Only
+            // reached via the tessellation path above, which forces
+            // host_primitive_type to kTriangleList, so build the conversion at
+            // runtime (Canary 3eab2b8b3), in the same vertex order as the
+            // built-in table would use.
+            cacheable.index_buffer_type =
+                ProcessedIndexBufferType::kHostConverted;
+            auto host_indices = reinterpret_cast<uint16_t*>(
+                RequestHostConvertedIndexBufferForCurrentFrame(
+                    xenos::IndexFormat::kInt16,
+                    cacheable.host_draw_vertex_count, false, 0,
+                    cacheable.host_index_buffer_handle));
+            if (!host_indices) {
+              return false;
+            }
+            AutoTriangleFanToList(host_indices, guest_draw_vertex_count,
+                                  convert_triangle_fans_first_provoking_);
+          }
+          break;
+        case xenos::PrimitiveType::kTriangleStrip:
+          // Only reached via the tessellation path above, which forces
+          // host_primitive_type to kTriangleList. There's no prebuilt strip to
+          // list index buffer, so build the conversion at runtime (Canary
+          // 3eab2b8b3).
+          assert_true(host_primitive_type ==
+                      xenos::PrimitiveType::kTriangleList);
+          cacheable.host_draw_vertex_count =
+              GetTriangleStripListIndexCount(cacheable.host_draw_vertex_count);
+          if (cacheable.host_draw_vertex_count) {
+            cacheable.index_buffer_type =
+                ProcessedIndexBufferType::kHostConverted;
+            auto host_indices = reinterpret_cast<uint16_t*>(
+                RequestHostConvertedIndexBufferForCurrentFrame(
+                    xenos::IndexFormat::kInt16,
+                    cacheable.host_draw_vertex_count, false, 0,
+                    cacheable.host_index_buffer_handle));
+            if (!host_indices) {
+              return false;
+            }
+            AutoTriangleStripToList(host_indices, guest_draw_vertex_count);
+          }
           break;
         case xenos::PrimitiveType::kLineLoop:
           // Plus 1 element (if there's anything to draw) in the strip, still
@@ -736,6 +796,11 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
             break;
           case xenos::PrimitiveType::kQuadList:
             host_index_count_getter = GetQuadListTriangleListIndexCount;
+            break;
+          case xenos::PrimitiveType::kTriangleStrip:
+            // Tessellated strips only (the tessellation path converts them to
+            // triangle lists; non-tessellated strips keep host == guest).
+            host_index_count_getter = GetTriangleStripListIndexCount;
             break;
           default:
             assert_unhandled_case(guest_primitive_type);
@@ -1022,7 +1087,36 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
         } else {
           auto guest_indices =
               memory_.TranslatePhysical<const uint16_t*>(guest_index_base);
-          if (IsResetUsed(guest_indices, guest_draw_vertex_count, UINT16_MAX)) {
+          const bool memo = WidenScanMemoEnabled();
+          // Taken before the scan reads the indices: a guest write during the
+          // scan gets a later sequence number and voids the entry.
+          const uint64_t memo_stamp =
+              memo ? widen_scan_seq_.load(std::memory_order_seq_cst) : 0;
+          // XE_WIDEN_SCAN_VERIFY=1: rescan memo hits, log stale ones, and
+          // log scan / memo counts every 600 frames.
+          static const bool s_verify =
+              std::getenv("XE_WIDEN_SCAN_VERIFY") != nullptr;
+          bool memo_hit = memo && WidenScanMemoFind(guest_index_base,
+                                                    guest_draw_vertex_count);
+          if (memo_hit) {
+            ++widen_census_memo_hits_;
+          } else {
+            ++widen_census_scans_;
+          }
+          if (memo_hit && s_verify &&
+              IsResetUsed(guest_indices, guest_draw_vertex_count, UINT16_MAX)) {
+            static uint32_t s_stale = 0;
+            if (s_stale++ < 32) {
+              XELOGW("WidenScanMemo STALE base={:08X} count={}",
+                     guest_index_base, guest_draw_vertex_count);
+            }
+            memo_hit = false;
+          }
+          if (memo_hit) {
+            // Known clean: keep the guest buffer.
+          } else if (IsResetUsed(guest_indices, guest_draw_vertex_count,
+                                 UINT16_MAX)) {
+            ++widen_census_positive_;
             cacheable.index_buffer_type =
                 ProcessedIndexBufferType::kHostConverted;
             cacheable.host_index_format = xenos::IndexFormat::kInt32;
@@ -1045,6 +1139,9 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
                   "the primitive-restart drop mechanism IS present in this "
                   "title.");
             }
+          } else if (memo) {
+            WidenScanMemoStore(guest_index_base, guest_draw_vertex_count,
+                               memo_stamp);
           }
           cache_transaction.SetNewResult(cacheable);
         }
@@ -1740,6 +1837,89 @@ PrimitiveProcessor::CacheTransaction::~CacheTransaction() {
   }
 }
 
+bool PrimitiveProcessor::WidenScanMemoEnabled() const {
+  // XE_WIDEN_SCAN_MEMO=0 rescans every draw. Needs exact fault invalidation:
+  // the memo trusts the callback to name every page a guest write unwatches.
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_WIDEN_SCAN_MEMO");
+    return !(v && v[0] == '0' && !v[1]) &&
+           cvars::exact_write_fault_invalidation;
+  }();
+  return s_enabled;
+}
+
+bool PrimitiveProcessor::WidenScanMemoFind(uint32_t base,
+                                           uint32_t count) const {
+  if (!widen_scan_memo_ || !count) {
+    return false;
+  }
+  const uint32_t slot =
+      uint32_t((uint64_t(base) * 0x9E3779B1u ^ count) &
+               ((1u << kWidenScanMemoSizeLog2) - 1));
+  const WidenScanMemoEntry& entry = widen_scan_memo_[slot];
+  if (!entry.stamp || entry.base != base || entry.count != count) {
+    return false;
+  }
+  const uint32_t end = base + count * sizeof(uint16_t);
+  for (uint32_t page = base >> kWidenScanPageSizeLog2,
+                page_last = (end - 1) >> kWidenScanPageSizeLog2;
+       page <= page_last; ++page) {
+    if (widen_scan_page_seq_[page].load(std::memory_order_seq_cst) >
+        entry.stamp) {
+      return false;
+    }
+  }
+  // Uploaded and watched by shared memory (a guest write faults and reaches
+  // the invalidation callback), and not replaced by GPU output since.
+  return shared_memory_.IsRangeValidAndNotGpuWritten(base, end);
+}
+
+void PrimitiveProcessor::WidenScanMemoStore(uint32_t base, uint32_t count,
+                                            uint64_t stamp) {
+  if (!count || base >= SharedMemory::kBufferSize ||
+      count * sizeof(uint16_t) > SharedMemory::kBufferSize - base) {
+    return;
+  }
+  if (!shared_memory_.IsRangeValidAndNotGpuWritten(
+          base, base + count * uint32_t(sizeof(uint16_t)))) {
+    // Not watched: a later guest write would not be seen.
+    return;
+  }
+  if (!widen_scan_memo_) {
+    // The invalidation callback runs under the global lock on guest threads.
+    auto global_lock = global_critical_region_.Acquire();
+    widen_scan_page_seq_.reset(new std::atomic<uint64_t>[
+        SharedMemory::kBufferSize >> kWidenScanPageSizeLog2]());
+    widen_scan_memo_.reset(
+        new WidenScanMemoEntry[size_t(1) << kWidenScanMemoSizeLog2]());
+    if (!memory_invalidation_callback_handle_) {
+      memory_invalidation_callback_handle_ =
+          memory_.RegisterPhysicalMemoryInvalidationCallback(
+              MemoryInvalidationCallbackThunk, this);
+    }
+    // Writes before the callback existed were not counted.
+    return;
+  }
+  const uint32_t slot =
+      uint32_t((uint64_t(base) * 0x9E3779B1u ^ count) &
+               ((1u << kWidenScanMemoSizeLog2) - 1));
+  widen_scan_memo_[slot] = {base, count, stamp};
+}
+
+void PrimitiveProcessor::WidenScanMemoInvalidate(uint32_t start,
+                                                 uint32_t end) {
+  if (end <= start) {
+    return;
+  }
+  const uint64_t seq =
+      widen_scan_seq_.fetch_add(1, std::memory_order_seq_cst) + 1;
+  for (uint32_t page = start >> kWidenScanPageSizeLog2,
+                page_last = (end - 1) >> kWidenScanPageSizeLog2;
+       page <= page_last; ++page) {
+    widen_scan_page_seq_[page].store(seq, std::memory_order_seq_cst);
+  }
+}
+
 std::pair<uint32_t, uint32_t> PrimitiveProcessor::MemoryInvalidationCallback(
     uint32_t physical_address_start, uint32_t length, bool exact_range) {
   if (length == 0 || physical_address_start >= SharedMemory::kBufferSize) {
@@ -1747,6 +1927,19 @@ std::pair<uint32_t, uint32_t> PrimitiveProcessor::MemoryInvalidationCallback(
   }
   length = std::min(length, SharedMemory::kBufferSize - physical_address_start);
   uint32_t physical_address_end = physical_address_start + length;
+  if (widen_scan_page_seq_) {
+    if (exact_range) {
+      WidenScanMemoInvalidate(physical_address_start, physical_address_end);
+    } else {
+      // Memory may unwatch up to the surrounding 4 MB without telling this
+      // callback which pages; void them all.
+      constexpr uint32_t kMaxUnwatchExcess = 4 * 1024 * 1024;
+      WidenScanMemoInvalidate(
+          physical_address_start & ~(kMaxUnwatchExcess - 1),
+          std::min(xe::align(physical_address_end, kMaxUnwatchExcess),
+                   SharedMemory::kBufferSize));
+    }
+  }
   if (!exact_range) {
     // Invalidate entire buckets if this is an access callback rather than
     // something like a file read to disable access violation handling for a

@@ -32,6 +32,7 @@ smoother.
 | Burnout Paradise | Driving in Paradise City | 60 | 60 | Its target is 60 |
 | Call of Duty 2 | First mission | 60 | 60 |  |
 | Crysis 2 | First mission | 31 | 31 |  |
+| Crysis 3 | First mission, inside the Liberty Dome | 31 | 31 | Measured October 25; a rare freeze was seen in earlier runs |
 | Dark Souls | Undead Asylum | 30 | 30 |  |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 |  |
@@ -65,7 +66,7 @@ smoother.
 | Red Dead Redemption | Opening cutscene | 30 | 30 | Disc 1 of the Game of the Year Edition |
 | Resident Evil 5 | Chapter 1-1 | 29 | 30 |  |
 | Ridge Racer Unbounded | Domination race | 30 | 30 |  |
-| Rise of the Tomb Raider | Ascension, the mountain | 30 | 30 |  |
+| Rise of the Tomb Raider | Ascension, the mountain | 30 | 30 | Whole-screen colour flashes in gameplay (cause still open; frequent on M4 Macs, rare on an M1 Max). Graphics > Troubleshooting > "Wait for the GPU before signalling the game" removes them: no cost on M4 Macs, M1 Max 30 to 22 fps |
 | Skate 2 | Skating | 30 | 30 |  |
 | Sonic Generations | First stage | 30 | 30 |  |
 | Ultra Street Fighter IV | Arcade fight | 60 | 60 |  |

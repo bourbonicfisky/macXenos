@@ -1075,7 +1075,7 @@ TEST_CASE("An all-zero mip region declines before PrepareTransfer",
 //    mipped texture, and omits a region that has gone outdated.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("The warm trace sweep records both regions and omits an outdated one",
+TEST_CASE("The warm trace sweep records both regions, outdated or not",
           "[miproute-lifecycle]") {
   REQUIRE_DEVICE();
   @autoreleasepool {
@@ -1107,15 +1107,22 @@ TEST_CASE("The warm trace sweep records both regions and omits an outdated one",
           std::vector<TraceMemoryRead>{{kMippedBase, expected_base_bytes},
                                        {kMippedMips, expected_mip_bytes}});
 
-    // Outdate the MIP region only: a replay would restore bytes the capture
-    // never proved current, so only the still-warm base is recorded.
+    // Outdating a region no longer drops it from the sweep (ae39e2b7d):
+    // guest RAM is converged for a host read just before the sweep, and an
+    // outdated texture over GPU-written pages is neither re-uploaded by
+    // WriteTraceInitialState nor reloaded during the frame, so leaving it
+    // out built replays from zeros (Rise of the Tomb Raider's tone curve).
+    // Both regions stay recorded with the mips outdated...
     Env().shared_memory->MemoryInvalidationCallback(kMippedMips, 0x20000, true);
     CHECK(SweepTraceMemoryReads(*f.cache, *Env().memory, 1) ==
-          std::vector<TraceMemoryRead>{{kMippedBase, expected_base_bytes}});
+          std::vector<TraceMemoryRead>{{kMippedBase, expected_base_bytes},
+                                       {kMippedMips, expected_mip_bytes}});
 
-    // Outdate the base too and the sweep records nothing at all.
+    // ...and with the base outdated too.
     Env().shared_memory->MemoryInvalidationCallback(kMippedBase, 0x40000, true);
-    CHECK(SweepTraceMemoryReads(*f.cache, *Env().memory, 2).empty());
+    CHECK(SweepTraceMemoryReads(*f.cache, *Env().memory, 2) ==
+          std::vector<TraceMemoryRead>{{kMippedBase, expected_base_bytes},
+                                       {kMippedMips, expected_mip_bytes}});
   }
 }
 

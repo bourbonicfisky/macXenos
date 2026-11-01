@@ -478,6 +478,12 @@ class DxbcShaderTranslator : public ShaderTranslator {
     // constant a cached shader reads.
     uint32_t texture_integer_scale_bits[32];
 
+    // PA_SC_WINDOW_OFFSET the PsParamGen position needs added when the offset
+    // is carried in the EDRAM bases rather than the viewport.
+    // 0 when it's in the viewport.
+    float param_gen_window_offset[2];
+    uint32_t param_gen_window_offset_padding[2];
+
    private:
     friend class DxbcShaderTranslator;
 
@@ -533,6 +539,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
 
       kTextureIntegerScaleBits,
 
+      kParamGenWindowOffset,
+
       kCount,
     };
     static_assert(
@@ -585,8 +593,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // Appended by implement-unsigned-integer-texture-scaling. 16-byte aligned, so
   // it starts on a cbuffer register boundary.
   XE_DXBC_PIN_SYSTEM_CONSTANT(texture_integer_scale_bits, 464);
+  XE_DXBC_PIN_SYSTEM_CONSTANT(param_gen_window_offset, 592);
 #undef XE_DXBC_PIN_SYSTEM_CONSTANT
-  static_assert(sizeof(SystemConstants) == 592,
+  static_assert(sizeof(SystemConstants) == 608,
                 "SystemConstants total size changed; bump every shader and "
                 "pipeline cache identity that stores binaries compiled "
                 "against this layout.");
@@ -940,6 +949,15 @@ class DxbcShaderTranslator : public ShaderTranslator {
   // Adds the surviving coverage MSAA counts from ROV params to the active ZPD
   // counter slot after the final PS depth/stencil decision.
   void ROV_AddPassedMSAASamplesToZPD();
+  // Converts the float32 components of the register to extended-range float16
+  // in their low 16 bits. Exponent 31 holds finite values up to 131008 of
+  // either sign on the Xbox 360 instead of Inf or NaN, and NaN maps to 0.
+  // Pushes and pops its own temporary registers.
+  void Float32ToF16ExtendedRange(uint32_t reg, uint32_t components);
+  // Converts extended-range float16 in the low 16 bits of the components of
+  // the register, with zeros above, back to float32. Pushes and pops its own
+  // temporary registers.
+  void Float16ExtendedRangeTo32(uint32_t reg, uint32_t components);
   // Unpacks a 32bpp or a 64bpp color in packed_temp.packed_temp_components to
   // color_temp, using 2 temporary VGPRs.
   void ROV_UnpackColor(uint32_t rt_index, uint32_t packed_temp,
@@ -1110,6 +1128,10 @@ class DxbcShaderTranslator : public ShaderTranslator {
       const ParsedAluInstruction& instr,
       uint8_t memexport_eM_potentially_written_before, uint32_t& result_swizzle,
       bool& predicate_written);
+  // Reduces finite host approximations to a chosen mantissa width.
+  // We still don't know the exact precision or rounding.
+  void ReduceFloatPrecision(const dxbc::Dest& dest, const dxbc::Src& value,
+                            uint32_t mantissa_bits);
   void ProcessScalarAluOperation(
       const ParsedAluInstruction& instr,
       uint8_t memexport_eM_potentially_written_before, bool& predicate_written);

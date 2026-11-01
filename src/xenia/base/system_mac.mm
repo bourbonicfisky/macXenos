@@ -54,12 +54,28 @@ void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
         style = NSAlertStyleCritical;
         break;
     }
-    NSAlert* alert = [[NSAlert alloc] init];
-    [alert setAlertStyle:style];
-    [alert setMessageText:title];
-    [alert setInformativeText:[NSString stringWithUTF8String:std::string(message)
-                                                                 .c_str()]];
-    [alert runModal];
+    NSString* text =
+        [NSString stringWithUTF8String:std::string(message).c_str()];
+    void (^show)(void) = ^{
+      NSAlert* alert = [[NSAlert alloc] init];
+      [alert setAlertStyle:style];
+      [alert setMessageText:title];
+      [alert setInformativeText:text];
+      [alert runModal];
+    };
+    // AppKit instantiates NSAlert's panel from a nib and throws
+    // NSInternalInconsistencyException ("NSWindow should only be instantiated
+    // on the main thread") from any other thread. FatalError reaches here
+    // from guest threads (a corrupted disc image detected inside NtReadFile
+    // aborted the process instead of showing the message, 2026-10-25), so
+    // hop to the main thread when its run loop is live. Without a running
+    // application there is nothing to host the alert; the message is already
+    // in the log.
+    if ([NSThread isMainThread]) {
+      show();
+    } else if (NSApp && [NSApp isRunning]) {
+      dispatch_sync(dispatch_get_main_queue(), show);
+    }
   }
 }
 

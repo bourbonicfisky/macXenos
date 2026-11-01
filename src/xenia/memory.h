@@ -314,6 +314,9 @@ class PhysicalHeap : public BaseHeap {
   // fault, the pages the range only partly covers, so the write lands over what
   // they are still waiting for.
   void ProvideReadWatchedEdgePages(uint32_t virtual_address, uint32_t length);
+  // Diagnostic: the watch flags, host protection and guest page state of the
+  // host page holding a physical address in this view.
+  std::string DescribeAccessState(uint32_t physical_address) const;
 
   // The most permissive guest access of any guest page inside a host page
   // (host pages are 16 KiB on arm64 macOS, guest pages 4 KiB in the E0 heap).
@@ -546,12 +549,17 @@ class Memory {
   // read fault's second, global-lock-held pass; the first pass already
   // provided the page without the lock, so this one publishes only what needs
   // no wait (anything newer is re-armed) instead of blocking every other
-  // global-lock user on the GPU.
+  // global-lock user on the GPU. kWriteUnlocked: a write fault's first pass,
+  // without the global lock; the only access that may ask the GPU thread to
+  // commit (it cannot while this thread holds the lock). kWriteNoWait: the
+  // write fault's global-lock-held second pass, the write twin of kReadNoWait.
   enum class PhysicalAccess {
     kRead,
     kWrite,
     kDiscard,
     kReadNoWait,
+    kWriteUnlocked,
+    kWriteNoWait,
   };
   typedef void (*PhysicalMemoryReadCallback)(void* context_ptr,
                                              uint32_t physical_address_start,
@@ -580,6 +588,8 @@ class Memory {
   [[nodiscard]] global_unique_lock_type
   LockPhysicalMemoryInvalidationCallbacks();
 
+  // Diagnostic: PhysicalHeap::DescribeAccessState in every physical view.
+  std::string DescribePhysicalWatch(uint32_t physical_address);
   // Enables physical memory access callbacks for the specified memory range,
   // snapped to system page boundaries.
   void EnablePhysicalMemoryAccessCallbacks(

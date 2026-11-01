@@ -9,7 +9,12 @@
 
 #include "xenia/cpu/ppc/ppc_frontend.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+
 #include "xenia/base/atomic.h"
+#include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mutex.h"
 #include "xenia/cpu/ppc/ppc_context.h"
@@ -80,6 +85,52 @@ void LeaveGlobalLock(PPCContext* ppc_context, void* arg0, void* arg1) {
   global_mutex->unlock();
 }
 
+namespace {
+struct GuestProbeRecord {
+  uint64_t ns;
+  uint32_t thread_id, pc, r3, r4, r30, r31, w0, w1;
+};
+constexpr size_t kGuestProbeRing = 65536;
+GuestProbeRecord g_guest_probes[kGuestProbeRing];
+std::atomic<uint64_t> g_guest_probe_count{0};
+}  // namespace
+
+// The probed address arrives in scratch (written just before the call).
+void GuestProbe(PPCContext* ppc_context, void* arg0, void* arg1) {
+  GuestProbeRecord r;
+  r.ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+  r.thread_id = ppc_context->thread_id;
+  r.pc = uint32_t(ppc_context->scratch);
+  r.r3 = uint32_t(ppc_context->r[3]);
+  r.r4 = uint32_t(ppc_context->r[4]);
+  r.r30 = uint32_t(ppc_context->r[30]);
+  r.r31 = uint32_t(ppc_context->r[31]);
+  r.w0 = r.w1 = 0;
+  if (r.r31 >= 0x10000 && r.r31 < 0xF0000000 && !(r.r31 & 3)) {
+    r.w0 = xe::load_and_swap<uint32_t>(ppc_context->virtual_membase + r.r31);
+    r.w1 =
+        xe::load_and_swap<uint32_t>(ppc_context->virtual_membase + r.r31 + 4);
+  }
+  const uint64_t n = g_guest_probe_count.fetch_add(1, std::memory_order_relaxed);
+  g_guest_probes[n % kGuestProbeRing] = r;
+}
+
+std::string FormatGuestProbes(size_t max_records) {
+  const uint64_t n = g_guest_probe_count.load(std::memory_order_acquire);
+  const uint64_t count = std::min<uint64_t>({n, kGuestProbeRing, max_records});
+  std::string out = fmt::format("GuestProbes: {} recorded, last {}\n", n, count);
+  for (uint64_t i = n - count; i < n; ++i) {
+    const GuestProbeRecord& r = g_guest_probes[i % kGuestProbeRing];
+    out.append(fmt::format(
+        "  {} t={:08X} pc={:08X} r3={:08X} r4={:08X} r30={:08X} r31={:08X} "
+        "[r31]={:08X} {:08X}\n",
+        r.ns, r.thread_id, r.pc, r.r3, r.r4, r.r30, r.r31, r.w0, r.w1));
+  }
+  return out;
+}
+
 void SyscallHandler(PPCContext* ppc_context, void* arg0, void* arg1) {
   uint64_t syscall_number = ppc_context->r[0];
   switch (syscall_number) {
@@ -102,6 +153,8 @@ bool PPCFrontend::Initialize() {
       processor_->DefineBuiltin("LeaveGlobalLock", LeaveGlobalLock, arg0, arg1);
   builtins_.syscall_handler = processor_->DefineBuiltin(
       "SyscallHandler", SyscallHandler, nullptr, nullptr);
+  builtins_.guest_probe =
+      processor_->DefineBuiltin("GuestProbe", GuestProbe, nullptr, nullptr);
   return true;
 }
 

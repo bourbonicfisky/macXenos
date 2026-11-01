@@ -192,10 +192,21 @@ fi
 log "Bundling Vulkan loader + MoltenVK"
 # Resolve the real (symlink-dereferenced) dylibs the loader dlopens.
 resolve() { local p; for p in "$@"; do [[ -e "$p" ]] && { readlink -f "$p"; return 0; }; done; return 1; }
-VK_LOADER_SRC="$(resolve /usr/local/lib/libvulkan.1.dylib /opt/homebrew/lib/libvulkan.1.dylib)" \
-  || die "libvulkan.1.dylib not found (install vulkan-loader via Homebrew)"
-MVK_SRC="$(resolve /usr/local/lib/libMoltenVK.dylib /opt/homebrew/lib/libMoltenVK.dylib)" \
+# Apple Silicon Homebrew first: a Mac migrated from Intel can still hold a
+# stale x86_64-only Homebrew in /usr/local (the M1 Max had MoltenVK 1.2.0
+# from 2022 there, which beat 1.4.2 under /opt/homebrew).
+# The loader built by build_vulkan_loader_mac.sh comes first: Universal 2 at
+# the app's minimum macOS. Homebrew's bottle targets the macOS it was poured
+# on, which the deployment-target check below refuses when that is newer.
+VK_LOADER_SRC="$(resolve "${REPO_ROOT}/build/universal-deps/vulkan-loader/lib/libvulkan.1.dylib" \
+                         /opt/homebrew/lib/libvulkan.1.dylib /usr/local/lib/libvulkan.1.dylib)" \
+  || die "libvulkan.1.dylib not found (run tools/build/build_vulkan_loader_mac.sh)"
+MVK_SRC="$(resolve /opt/homebrew/lib/libMoltenVK.dylib /usr/local/lib/libMoltenVK.dylib)" \
   || die "libMoltenVK.dylib not found (install molten-vk via Homebrew)"
+for src in "${VK_LOADER_SRC}" "${MVK_SRC}"; do
+  lipo -archs "${src}" | grep -qw arm64 \
+    || die "${src} has no arm64 slice (got: $(lipo -archs "${src}")); install the Apple Silicon Homebrew package"
+done
 
 cp "${VK_LOADER_SRC}" "${CONTENTS}/Frameworks/libvulkan.1.dylib"
 cp "${MVK_SRC}"       "${CONTENTS}/Frameworks/libMoltenVK.dylib"
@@ -272,7 +283,7 @@ JSON
 
 # Provenance: record what we bundled.
 MVK_VER="$(basename "$(dirname "$(dirname "${MVK_SRC}")")")"
-VKL_VER="$(basename "$(dirname "$(dirname "${VK_LOADER_SRC}")")")"
+VKL_VER="$(basename "${VK_LOADER_SRC}" .dylib)"; VKL_VER="${VKL_VER#libvulkan.}"
 cat > "${CONTENTS}/Resources/VERSIONS.txt" <<EOF
 macXenos (unofficial macOS port) — Xenia Canary ${SHORT_VERSION} (${BRANCH} ${COMMIT_SHORT})
 Bundled MoltenVK : ${MVK_SRC} (${MVK_VER})
@@ -332,6 +343,32 @@ if [[ "${UNIVERSAL}" -eq 1 ]]; then
   done
   log "Universal 2 verified: all shipping binaries are arm64 + x86_64"
 fi
+
+# Every shipping Mach-O (every slice) must load on the app's minimum macOS: a
+# dependency built for a newer one fails to load there (the beta 5 arm64
+# Vulkan loader was Homebrew's macOS 27 bottle under a macOS 15 app).
+MIN_MACOS="$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "${CONTENTS}/Info.plist")" \
+  || die "Info.plist has no LSMinimumSystemVersion"
+version_gt() {  # $1 > $2, dotted versions
+  awk -v a="$1" -v b="$2" 'BEGIN { na = split(a, x, "."); nb = split(b, y, ".");
+    for (i = 1; i <= (na > nb ? na : nb); ++i) { if (x[i] + 0 != y[i] + 0) exit !(x[i] + 0 > y[i] + 0) }
+    exit 1 }'
+}
+log "Verifying deployment targets (LSMinimumSystemVersion ${MIN_MACOS})"
+too_new=0
+while IFS= read -r -d '' f; do
+  archs="$(lipo -archs "$f" 2>/dev/null)" || continue
+  for arch in ${archs}; do
+    minos="$(vtool -arch "${arch}" -show-build "$f" 2>/dev/null \
+             | awk '/minos|^ *version/ {print $2; exit}')"
+    [[ -n "${minos}" ]] || die "no deployment target in ${f#"${CONTENTS}/"} (${arch})"
+    if version_gt "${minos}" "${MIN_MACOS}"; then
+      echo "  ${f#"${CONTENTS}/"} (${arch}) needs macOS ${minos}" >&2
+      too_new=1
+    fi
+  done
+done < <(find "${CONTENTS}" -type f -print0)
+[[ "${too_new}" -eq 0 ]] || die "bundled code needs a newer macOS than ${MIN_MACOS} (see above; for the Vulkan loader run tools/build/build_vulkan_loader_mac.sh)"
 
 # ===========================================================================
 # 3. Sign (frameworks first, then deep-sign the app) + DMG

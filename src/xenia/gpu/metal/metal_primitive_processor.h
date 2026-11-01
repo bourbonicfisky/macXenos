@@ -61,6 +61,34 @@ inline void SwapIndicesInto(void* dst, const void* src, uint32_t count,
   }
 }
 
+// Byte-swaps a HOST-CONVERTED index stream (PrimitiveProcessor
+// kHostConverted) into the upload arena. The shared processor writes converted
+// indices in the endianness it reports as host_shader_index_endian (guest
+// order for pass-through conversions, 0xFFFF / 0xFFFFFFFF sentinels are
+// endian-invariant), and Direct3D 12 / Vulkan swap them per element in the
+// vertex shader with xenos::GpuSwap semantics. Metal keeps CPU-swapped index
+// bytes and publishes vertex_index_endian = kNone, so this applies the exact
+// per-element GpuSwap here: 32-bit streams that came from widened 16-bit
+// guest indices carry a 16-bit endian (k8in16), which must swap bytes within
+// the low half only, not reverse the whole dword.
+inline void SwapConvertedIndicesInto(void* dst, const void* src,
+                                     uint32_t count, xenos::IndexFormat format,
+                                     xenos::Endian endian) {
+  if (format == xenos::IndexFormat::kInt16) {
+    SwapIndicesInto(dst, src, count, format, endian);
+    return;
+  }
+  const uint32_t* s = static_cast<const uint32_t*>(src);
+  uint32_t* d = static_cast<uint32_t*>(dst);
+  if (endian == xenos::Endian::kNone) {
+    std::memcpy(d, s, size_t(count) * sizeof(uint32_t));
+    return;
+  }
+  for (uint32_t i = 0; i < count; ++i) {
+    d[i] = xenos::GpuSwapInline(s[i], endian);
+  }
+}
+
 // PP1 routing predicate. Returns true for exactly the native, non-expanded,
 // non-tessellated, restart-disabled line/triangle list/strip draws — from an
 // auto-indexed or guest-DMA index source — that the shared PrimitiveProcessor
@@ -342,6 +370,57 @@ inline bool IsAutoLineLoopRoutable(const RegisterFile& regs,
   return true;
 }
 
+// Converted-class routing predicate (2026-10-26): the draws the shared
+// PrimitiveProcessor normalizes through a HOST-CONVERTED index buffer
+// (ProcessedIndexBufferType::kHostConverted), which Metal now consumes:
+//   - guest-DMA triangle fans and line loops, with or without primitive
+//     reset (fan -> list / loop -> strip conversion, per-segment on reset);
+//   - guest-DMA quad lists on devices converting quads to triangle lists;
+//   - reset-enabled line/triangle strips whose reset index is NOT the fixed
+//     0xFFFF 16-bit sentinel PP4 admits: a custom 16-bit reset index
+//     (replaced with 0xFFFF, or widened to 32-bit when 0xFFFF is also a real
+//     vertex) and 32-bit reset indices (pre-masked to 24 bits, replaced with
+//     0xFFFFFFFF).
+// Reset-DISABLED 16-bit lists/strips that use 0xFFFF as a real index are not
+// a routing question: PP1 already routes them, and with
+// host_primitive_reset_always_enabled the processor widens them to 32-bit
+// (Metal cannot disable primitive restart), returning kHostConverted.
+// Auto-indexed fans/loops/quads keep their built-in-table routes
+// (IsAutoFanRoutable / IsAutoLineLoopRoutable / IsAutoQuadRoutable). Same
+// exclusions as every other predicate: the local prim_type must match the
+// register, and tessellated draws never route here.
+inline bool IsConvertedClassRoutable(const RegisterFile& regs,
+                                     xenos::PrimitiveType prim_type,
+                                     bool convert_quad_lists) {
+  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+  if (prim_type != vgt_draw_initiator.prim_type ||
+      vgt_draw_initiator.source_select != xenos::SourceSelect::kDMA) {
+    return false;
+  }
+  if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, prim_type) &&
+      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
+          xenos::VGTOutputPath::kTessellationEnable) {
+    return false;
+  }
+  switch (prim_type) {
+    case xenos::PrimitiveType::kTriangleFan:
+    case xenos::PrimitiveType::kLineLoop:
+      return true;
+    case xenos::PrimitiveType::kQuadList:
+      return convert_quad_lists;
+    case xenos::PrimitiveType::kLineStrip:
+    case xenos::PrimitiveType::kTriangleStrip:
+      // Reset-enabled strips PP4 does not own (fixed 0xFFFF 16-bit). Process
+      // decides whether the reset index is actually used; an unused one keeps
+      // the stream kGuestDMA with host reset semantics, which the emission
+      // also handles.
+      return regs.Get<reg::PA_SU_SC_MODE_CNTL>().multi_prim_ib_ena &&
+             !IsFixedResetStripRoutable(regs, prim_type);
+    default:
+      return false;
+  }
+}
+
 // PP1 + PP2-auto + PP3-auto + PP4-fixed slice: a real shared
 // `PrimitiveProcessor` subclass
 // that is the single guest-semantic NORMALIZATION authority for the routed
@@ -358,16 +437,20 @@ inline bool IsAutoLineLoopRoutable(const RegisterFile& regs,
 //     shared code provisions the auto-index fan built-in table) and
 //     convert_triangle_fans_first_provoking = true (so both the built-in table
 //     and TriangleFanToList emit Metal's historical center-first fan order).
-//     host_primitive_reset_always_enabled = false keeps the 16->32
-//     primitive-reset widening path statically unreachable (a later capability
-//     slice). No host-CONVERTED buffer is ever provisioned for the routed set:
-//     PP4 admits only the fixed 16-bit reset shape that stays kGuestDMA, while
-//     custom/32-bit reset and reset-disabled maximum protection stay parked.
+//     host_primitive_reset_always_enabled = true (2026-10-26) lets the shared
+//     code widen reset-disabled 16-bit buffers that use 0xFFFF as a real
+//     index, since Metal cannot disable primitive restart.
+//   - provisions HOST-CONVERTED index buffers from a per-frame CPU pool
+//     (RequestHostConvertedIndexBufferForCurrentFrame): DMA fans/loops/quads,
+//     custom and 32-bit reset replacement, and the widening above all return
+//     kHostConverted; the command processor swaps each draw's slice into its
+//     transient upload arena (GetConvertedIndexData +
+//     SwapConvertedIndicesInto) and EndFrame clears the pool with the shared
+//     per-frame cache at swap.
 //   - implements InitializeBuiltinIndexBuffer to own the immutable fan table on
 //     the CPU (no persistent MTL resource); the command processor materializes
 //     each auto-fan draw's slice into the same transient upload arena via
-//     CopyBuiltinIndexData. RequestHostConvertedIndexBufferForCurrentFrame
-//     stays an unreachable invariant guard (no DMA fan is routed).
+//     CopyBuiltinIndexData.
 //   - overrides RequestGuestIndexSharedMemoryRange as a true no-op so Process
 //     performs no shared-memory RequestRange for the routed set. That avoids
 //     the unwanted shared-memory-buffer upload and its intra-frame hazard flush
@@ -376,11 +459,12 @@ inline bool IsAutoLineLoopRoutable(const RegisterFile& regs,
 //     guest index memory), and the command processor's existing explicit
 //     WriteMemoryRead of any DMA index range preserves capture. Distinct facts.
 // PP3-auto declares line loops unsupported to activate the shared loop-to-strip
-// result, but routes only auto-indexed reset-disabled loops. PP4 additionally
-// routes fixed-sentinel DMA line/triangle strips without conversion. DMA/reset
-// loops, point/rectangle/quad expansion (MSC mesh shaders), DMA/reset triangle
-// fans, custom/32-bit reset, and reset-disabled maximum protection stay
-// wholly on their existing paths. Tessellated draws are consumed by the
+// result. PP4 routes fixed-sentinel DMA line/triangle strips without
+// conversion. IsConvertedClassRoutable routes DMA/reset loops, DMA/reset
+// triangle fans, DMA quads (converting devices), custom/32-bit reset strips
+// through host-converted buffers; reset-disabled maximum protection comes
+// from the widening above. Point/rectangle expansion (vertex-shader point
+// strips, MSC mesh shaders) stays on its existing paths. Tessellated draws are consumed by the
 // dedicated XE_METAL_TESSELLATION route ahead of every predicate here (gate
 // on), or keep their historical inline behavior (gate off) — the four
 // tessellation rejections in the predicates are what keeps the non-routed
@@ -410,6 +494,34 @@ class MetalPrimitiveProcessor final : public PrimitiveProcessor {
   // read past the table). The data never escapes this processor by reference.
   bool CopyBuiltinIndexData(size_t handle, size_t byte_count, void* dst) const;
 
+  // Copies `byte_count` bytes of this frame's HOST-CONVERTED index data
+  // starting at `handle` (the ProcessingResult host_index_buffer_handle of a
+  // kHostConverted result, a byte offset into the per-frame CPU pool) into
+  // `dst`. Returns false if the range is out of the pool's bounds. The command
+  // processor materializes the bytes into its transient upload arena per draw
+  // (swapping with SwapConvertedIndicesInto), exactly like the built-in table:
+  // no persistent MTL resource, and the pool's lifetime is the frame.
+  bool CopyConvertedIndexData(size_t handle, size_t byte_count,
+                              void* dst) const;
+  // Read access to the same range (nullptr when out of bounds); the command
+  // processor swaps straight from the pool into the arena without a staging
+  // copy. Valid until EndFrame.
+  const void* GetConvertedIndexData(size_t handle, size_t byte_count) const {
+    if (handle > converted_index_data_.size() ||
+        byte_count > converted_index_data_.size() - handle) {
+      return nullptr;
+    }
+    return converted_index_data_.data() + handle;
+  }
+
+  // Frame boundary (call at swap): clears the shared per-frame conversion
+  // cache and releases this frame's converted index pool. Cached results
+  // reference pool offsets, so the two are cleared together.
+  void EndFrame();
+
+  // Bytes currently held by the per-frame converted pool (diagnostics/tests).
+  size_t converted_pool_bytes() const { return converted_index_data_.size(); }
+
  protected:
   // PP2-auto: provisions the auto-index triangle-fan built-in index table. The
   // shared InitializeCommon calls this once with the full table size; the
@@ -419,10 +531,11 @@ class MetalPrimitiveProcessor final : public PrimitiveProcessor {
   bool InitializeBuiltinIndexBuffer(
       size_t size_bytes, std::function<void(void*)> fill_callback) override;
 
-  // Unreachable in PP1/PP2-auto/PP3-auto/PP4-fixed: the routed set returns only
-  // kNone / kGuestDMA / kHostBuiltinForAuto. PP4 accepts only the matching
-  // fixed-16 reset case; every converted reset class stays inline. Fail loudly
-  // as an invariant guard.
+  // Host-converted index buffers (DMA fans/loops/quads, custom and 32-bit
+  // reset indices, 16-bit reset-disabled widening): allocated from a per-frame
+  // CPU byte pool; the handle is the byte offset of the (SIMD-coaligned)
+  // start. Process writes through the returned pointer immediately, so pool
+  // growth after the call cannot invalidate anything the shared code holds.
   void* RequestHostConvertedIndexBufferForCurrentFrame(
       xenos::IndexFormat format, uint32_t index_count, bool coalign_for_simd,
       uint32_t coalignment_original_address,
@@ -446,6 +559,9 @@ class MetalPrimitiveProcessor final : public PrimitiveProcessor {
   // InitializeBuiltinIndexBuffer. Lifetime is the processor's; never handed out
   // by reference.
   std::vector<uint8_t> builtin_index_data_;
+  // Per-frame host-converted index pool (see
+  // RequestHostConvertedIndexBufferForCurrentFrame); cleared by EndFrame.
+  std::vector<uint8_t> converted_index_data_;
 };
 
 }  // namespace metal

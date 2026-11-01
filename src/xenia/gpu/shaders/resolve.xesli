@@ -90,6 +90,7 @@ struct XeResolveInfo {
     bool dest_is_array;
     uint dest_slice;
     uint dest_format;
+    uint dest_num_format;
     float dest_exp_bias_factor;
     bool dest_swap;
     uint dest_row_pitch_macro_tiles;
@@ -141,6 +142,7 @@ XeResolveInfo XeResolveGetInfo(param_push_consts_xe) {
     resolve_info.dest_is_array = (dest_info & (1u << 3u)) != 0u;
     resolve_info.dest_slice = (dest_info >> 4u) & ((1u << 3u) - 1u);
     resolve_info.dest_format = (dest_info >> 7u) & ((1u << 6u) - 1u);
+    resolve_info.dest_num_format = (dest_info >> 13u) & ((1u << 3u) - 1u);
     resolve_info.dest_exp_bias_factor = int_bits_to_float_xe(
         (int(dest_info) << (32 - (16 + 6)) >> (32 - 6) << 23) +
         float_bits_to_int_xe(1.0f));

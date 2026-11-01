@@ -2688,7 +2688,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                    : 0;
   if (!render_target_cache_->Update(is_rasterization_done,
                                     normalized_depth_control,
-                                    normalized_color_mask, *vertex_shader)) {
+                                    normalized_color_mask, *vertex_shader,
+                                    0)) {
     return false;
   }
 
@@ -2811,7 +2812,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                     render_target_cache_->depth_float24_convert_in_pixel_shader(),
                 host_render_targets_used,
                 pixel_shader && pixel_shader->writes_depth());
-  gviargs.SetupRegisterValues(regs);
+  gviargs.SetupRegisterValues(regs, false);
 
   draw_util::GetHostViewportInfo(&gviargs, viewport_info);
   // Update dynamic graphics pipeline state.
@@ -4735,16 +4736,16 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
     }
   }
 
-  // Disable depth and stencil if it aliases a color render target (for
-  // instance, during the XBLA logo in 58410954, though depth writing is already
-  // disabled there).
+  // Disable depth and stencil only if an aliased color target writes bits used
+  // by either test. Otherwise its keep-masked store preserves them.
   bool depth_stencil_enabled = normalized_depth_control.stencil_enable ||
                                normalized_depth_control.z_enable;
   if (edram_fragment_shader_interlock && depth_stencil_enabled) {
     for (uint32_t i = 0; i < 4; ++i) {
       if (rb_depth_info.depth_base == color_infos[i].color_base &&
-          (rt_keep_masks[i][0] != UINT32_MAX ||
-           rt_keep_masks[i][1] != UINT32_MAX)) {
+          RenderTargetCache::ColorOverlapsDepthStencil(
+              color_infos[i].color_format, rt_keep_masks[i][0],
+              rt_keep_masks[i][1], normalized_depth_control)) {
         depth_stencil_enabled = false;
         break;
       }

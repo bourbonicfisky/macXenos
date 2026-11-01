@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -147,10 +148,32 @@ class RenderTargetCache {
                                     float& clamp_alpha_high,
                                     uint32_t& keep_mask_low,
                                     uint32_t& keep_mask_high);
+  // Whether an aliased color write touches enabled depth or stencil bits.
+  static bool ColorOverlapsDepthStencil(
+      xenos::ColorRenderTargetFormat color_format, uint32_t color_keep_mask_low,
+      uint32_t color_keep_mask_high,
+      reg::RB_DEPTHCONTROL normalized_depth_control);
 
   virtual ~RenderTargetCache();
 
   virtual Path GetPath() const = 0;
+
+  // Whether host render target keys with next_period set (64bpp color rows in
+  // the EDRAM addressing period after their base, created when a window
+  // offset is carried in the bases) are supported by this backend's transfer,
+  // resolve and dump code. Backends that don't support them keep such draws'
+  // window offset in the viewport.
+  virtual bool AreNextPeriodRenderTargetsSupported() const { return true; }
+  // Whether a host render target may wrap the EDRAM ring with a window offset
+  // in its base (the base with the offset before tile 0, or its rows from
+  // there past the last tile). Backends that don't support it keep such draws'
+  // window offset in the viewport.
+  virtual bool AreWrappedWindowOffsetBasesSupported() const { return true; }
+  // Whether this backend can carry a predicated-tiling window offset in the
+  // EDRAM bases at all (window_offset_in_edram). Backends whose host render
+  // targets don't span the rows above the draw's scissor keep every window
+  // offset in the viewport.
+  virtual bool IsWindowOffsetInEdramSupported() const { return true; }
 
   // Resolution scaling on the EDRAM side is performed by multiplying the EDRAM
   // tile size by the resolution scale.
@@ -198,15 +221,44 @@ class RenderTargetCache {
 
   virtual void BeginFrame();
 
+  // Keeps each tile on one window offset path. If a draw has to leave its
+  // offset in the viewport, later draws with the same offset, surface pitch,
+  // and MSAA do the same until a frame passes without one. This keeps a tiled
+  // depth prepass, and the passes using it, on the same transform instead of
+  // moving the tile between host render targets.
+  int32_t GetWindowOffsetTiles(const RegisterFile& regs,
+                               reg::RB_DEPTHCONTROL normalized_depth_control,
+                               uint32_t normalized_color_mask, uint64_t frame);
+
   virtual bool Update(bool is_rasterization_done,
                       reg::RB_DEPTHCONTROL normalized_depth_control,
                       uint32_t normalized_color_mask,
-                      const Shader& vertex_shader);
+                      const Shader& vertex_shader, int32_t window_offset_tiles);
 
   // Returns bits where 0 is whether a depth render target is currently bound on
   // the host and 1... are whether the same applies to color render targets, and
   // formats (resource formats, but if needed, with gamma taken into account) of
   // each.
+  // Records the render target the last update draws into (the first bound
+  // color one, else depth) as drawn in `frame`, and returns whether it was also
+  // drawn in one of the kDrawTargetRecurringFrames frames before - telling a
+  // pass redrawn every frame from a one-off render to a texture, for async
+  // pipeline stand-ins. True with no render target, as nothing is kept then.
+  // (Xenia Edge de8e60601.)
+  static constexpr uint64_t kDrawTargetRecurringFrames = 4;
+  bool TrackLastUpdateDrawTarget(uint64_t frame);
+  // Whether the last update's render target is at most
+  // kDrawTargetSmallPitchTiles wide (160 pixels without MSAA) - generated data
+  // like impostors or lookup tables, often kept past the frame even when
+  // redrawn every frame (4541094A's tree impostors).
+  static constexpr uint32_t kDrawTargetSmallPitchTiles = 2;
+  bool IsLastUpdateDrawTargetSmall() const {
+    return !last_update_draw_target_.IsEmpty() &&
+           last_update_draw_target_.pitch_tiles_at_32bpp <=
+               kDrawTargetSmallPitchTiles;
+  }
+  std::string GetLastUpdateDrawTargetName() const;
+
   uint32_t GetLastUpdateBoundRenderTargets(
       uint32_t* depth_and_color_formats_out = nullptr) const;
 
@@ -264,6 +316,10 @@ class RenderTargetCache {
       uint32_t is_depth : 1;                                      // 22
       // Ignoring the blending precision.
       uint32_t resource_format : xenos::kRenderTargetFormatBits;  // 26
+      // The render target's rows are in the next EDRAM addressing period past
+      // its base, 64bpp color rows span two. The rows in the first period at
+      // the same base are another render target.
+      uint32_t next_period : 1;  // 27
     };
 
     RenderTargetKey() : key(0) { static_assert_size(*this, sizeof(key)); }
@@ -308,6 +364,14 @@ class RenderTargetCache {
     uint32_t GetPitchTiles() const {
       return pitch_tiles_at_32bpp << uint32_t(Is64bpp());
     }
+    // The tile index, past the tile count for the tail wrapped around the end
+    // of EDRAM and again for the next period, minus the base it's the offset
+    // into the render target's rows.
+    uint32_t GetNonWrappedTileIndex(uint32_t tile_index) const {
+      return tile_index +
+             (tile_index < base_tiles ? xenos::kEdramTileCount : 0) +
+             (uint32_t(next_period) << xenos::kEdramBaseTilesBits);
+    }
     static constexpr uint32_t GetWidth(uint32_t pitch_tiles_at_32bpp,
                                        xenos::MsaaSamples msaa_samples) {
       return pitch_tiles_at_32bpp *
@@ -319,9 +383,9 @@ class RenderTargetCache {
     }
 
     std::string GetDebugName() const {
-      return fmt::format("RT @ {}t, <{}t>, {}xMSAA, {}", base_tiles,
+      return fmt::format("RT @ {}t, <{}t>, {}xMSAA, {}{}", base_tiles,
                          GetPitchTiles(), uint32_t(1) << uint32_t(msaa_samples),
-                         GetFormatName());
+                         GetFormatName(), next_period ? ", next period" : "");
     }
   };
 
@@ -368,17 +432,13 @@ class RenderTargetCache {
     // Cutout can be specified for resolve clears - not to transfer areas that
     // will be cleared to a single value anyway.
     static uint32_t GetRangeRectangles(uint32_t start_tiles, uint32_t end_tiles,
-                                       uint32_t base_tiles,
-                                       uint32_t pitch_tiles,
-                                       xenos::MsaaSamples msaa_samples,
-                                       bool is_64bpp, Rectangle* rectangles_out,
+                                       RenderTargetKey key,
+                                       Rectangle* rectangles_out,
                                        const Rectangle* cutout = nullptr);
-    uint32_t GetRectangles(uint32_t base_tiles, uint32_t pitch_tiles,
-                           xenos::MsaaSamples msaa_samples, bool is_64bpp,
-                           Rectangle* rectangles_out,
+    uint32_t GetRectangles(RenderTargetKey key, Rectangle* rectangles_out,
                            const Rectangle* cutout = nullptr) const {
-      return GetRangeRectangles(start_tiles, end_tiles, base_tiles, pitch_tiles,
-                                msaa_samples, is_64bpp, rectangles_out, cutout);
+      return GetRangeRectangles(start_tiles, end_tiles, key, rectangles_out,
+                                cutout);
     }
     bool AreSourcesSame(const Transfer& other_transfer) const {
       return source == other_transfer.source &&
@@ -544,6 +604,13 @@ class RenderTargetCache {
     assert_true(GetPath() == Path::kHostRenderTargets);
     return last_update_used_render_target_lengths_tiles_;
   }
+  // Where each used span starts, in tiles past the render target's base. 0
+  // unless the draw's window offset is carried in the EDRAM bases, when the
+  // span starts at the scissor's first row.
+  const uint32_t* last_update_used_render_target_starts_tiles() const {
+    assert_true(GetPath() == Path::kHostRenderTargets);
+    return last_update_used_render_target_starts_tiles_;
+  }
   RenderTarget* FindCachedRenderTarget(uint32_t key) const {
     RenderTargetKey render_target_key;
     render_target_key.key = key;
@@ -639,6 +706,9 @@ class RenderTargetCache {
     // render targets.
     // Render target this range is last used by.
     RenderTargetKey render_target;
+    // Host target containing the current depth bits (8:31).
+    // Stencil-only color writes leave it current.
+    RenderTargetKey depth_bits_target;
     // Last host-side depth render targets that used this range even if it has
     // been used by a different render target since then, only used if the
     // respective format has a different encoding on the host. They are tracked
@@ -661,6 +731,7 @@ class RenderTargetCache {
                    RenderTargetKey host_depth_render_target_float24)
         : end_tiles(end_tiles),
           render_target(render_target),
+          depth_bits_target(render_target),
           host_depth_render_target_unorm24(host_depth_render_target_unorm24),
           host_depth_render_target_float24(host_depth_render_target_float24) {}
     const RenderTargetKey& GetHostDepthRenderTarget(
@@ -696,6 +767,7 @@ class RenderTargetCache {
     }
     bool AreOwnersSame(const OwnershipRange& other_range) const {
       return render_target == other_range.render_target &&
+             depth_bits_target == other_range.depth_bits_target &&
              host_depth_render_target_unorm24 ==
                  other_range.host_depth_render_target_unorm24 &&
              host_depth_render_target_float24 ==
@@ -723,12 +795,17 @@ class RenderTargetCache {
   bool WouldOwnershipChangeRequireTransfers(RenderTargetKey dest,
                                             uint32_t start_tiles_base_relative,
                                             uint32_t length_tiles) const;
+  bool IsHostDepthCurrent(RenderTargetKey depth_target,
+                          uint32_t start_tiles_base_relative,
+                          uint32_t length_tiles) const;
   // Updates ownership_ranges_, adds the transfers needed for the ownership
-  // change to transfers_append_out if it's not null.
+  // change to transfers_append_out if it's not null. If keep_depth_bits is true
+  // the existing depth bits target is preserved.
   void ChangeOwnership(
       RenderTargetKey dest, uint32_t start_tiles_base_relative,
       uint32_t length_tiles, std::vector<Transfer>* transfers_append_out,
-      const Transfer::Rectangle* resolve_clear_cutout = nullptr);
+      const Transfer::Rectangle* resolve_clear_cutout = nullptr,
+      bool keep_depth_bits = false);
 
   // Diagnostic hook for XE_GPU_TILE_TRACE ownership logging: backends that
   // track a trace/draw index can override so ownership-change events can be
@@ -747,16 +824,38 @@ class RenderTargetCache {
   // since standard containers use dynamic allocation for elements, though
   // changes to this throughout a frame are pretty rare.
   std::map<uint32_t, OwnershipRange> ownership_ranges_;
+  // PA_SC_WINDOW_OFFSET of the last interlock draw with the offset in the
+  // EDRAM bases, 0 for one with it in the viewport, UINT32_MAX after a full
+  // barrier. Bits 15 and 31 aren't used.
+  uint32_t interlock_last_window_offset_ = UINT32_MAX;
+  // Tiles with the window offset kept in the viewport, the offset with the
+  // surface pitch and MSAA, with the last frame a draw was at them.
+  struct WindowOffsetKeptInViewport {
+    uint32_t window_offset;
+    uint32_t surface_pitch;
+    xenos::MsaaSamples msaa_samples;
+    uint64_t frame;
+  };
+  std::vector<WindowOffsetKeptInViewport> window_offsets_kept_in_viewport_;
 
   // Render targets actually used by the draw call with the last successful
   // update. 0 is depth, color starting from 1, nullptr if not bound.
   // Only valid for non-pixel-shader-interlock paths.
   RenderTarget*
       last_update_used_render_targets_[1 + xenos::kMaxColorRenderTargets];
+  // See TrackLastUpdateDrawTarget.
+  RenderTargetKey last_update_draw_target_;
+  // The latest frame each render target was drawn in, and the one before it,
+  // 0 for never.
+  std::unordered_map<RenderTargetKey, std::pair<uint64_t, uint64_t>,
+                     RenderTargetKey::Hasher>
+      draw_target_last_frames_;
   // Exact ownership span used by the last draw for each slot, in physical
   // EDRAM tiles. Backends with attachment/canonical authority use this instead
   // of conservatively dirtying an entire render-target allocation.
   uint32_t last_update_used_render_target_lengths_tiles_[
+      1 + xenos::kMaxColorRenderTargets] = {};
+  uint32_t last_update_used_render_target_starts_tiles_[
       1 + xenos::kMaxColorRenderTargets] = {};
   // Render targets used by the draw call with the last successful update or
   // previous updates, unless a different or a totally new one was bound (or

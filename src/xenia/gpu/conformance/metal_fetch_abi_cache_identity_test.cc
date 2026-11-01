@@ -177,7 +177,7 @@ TEST_CASE("The production fetch ABI revision is the current one",
   //     of its session-local index, so index-keyed revision-8 entries (which
   //     can hold another session's sign / scale / bias literals) are dropped.
   // Each boundary is pinned by its own transition case below.
-  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 9);
+  CHECK(MetalTranslatorConfig::kFetchAbiRevision == 11);
 }
 
 TEST_CASE("The revision-3 to revision-4 boundary discards, not filters",
