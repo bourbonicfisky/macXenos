@@ -621,6 +621,25 @@ bool MetalMemexportPixelGateOn() {
   return s_gate_on;
 }
 
+// Pixel-stage memexport from a draw that binds NO render target (default on;
+// XE_METAL_MEMEXPORT_PIXEL_NO_RT=0 restores the old skip). Virtua Tennis 4
+// (53450857) builds every UI texture this way: it uploads the linear image to
+// a staging buffer, then draws one quad per texture with color writes off and
+// a pixel shader that memexports each texel to its tiled address. Skipping
+// the draw left the destination holding whatever was there before (logo
+// noise, empty or scrambled glyph pages). The draw runs in its own pass with
+// a scratch depth attachment covering the scissor; only the exports matter.
+bool MetalMemexportPixelNoTargetGateOn() {
+  static const bool s_gate_on = [] {
+    const char* value = std::getenv("XE_METAL_MEMEXPORT_PIXEL_NO_RT");
+    bool on = !(value && value[0] == '0' && !value[1]);
+    XELOGI("Metal pixel-stage memexport without render targets: {}",
+           on ? "on" : "off");
+    return on;
+  }();
+  return s_gate_on;
+}
+
 // ATTRIBUTION DIAGNOSTICS (both default-off, log/route-filter only; neither
 // can alter behavior unless explicitly set).
 //
@@ -3318,14 +3337,23 @@ std::string PassTimingReport(uint32_t swaps, uint64_t count) {
 void* MetalCommandProcessor::BeginFrameEncoder() {
   // Attach whatever the RT cache accumulated for the current draw (Update()
   // ran in IssueDraw). The attachment key detects guest pass changes.
-  if (!memexport_pass_ &&
+  // Passes that bind no guest target: memexport-only (VS) draws and
+  // pixel-export draws with no render target (scratch depth only).
+  const bool scratch_only_pass = memexport_pass_ || pixel_export_pass_;
+  if (!scratch_only_pass &&
       !render_target_cache_->PrepareCurrentRasterViews()) {
     return nullptr;
   }
-  const uint64_t want_key = PassAttachmentKey(dummy_depth_pass_, memexport_pass_);
+  uint64_t want_key = PassAttachmentKey(dummy_depth_pass_, memexport_pass_);
+  if (pixel_export_pass_) {
+    // Own encoder per scratch extent; never shared with attachment passes.
+    want_key = 0x5049584558505254ull ^  // 'PIXEXPRT'
+               (uint64_t(pixel_export_extent_[0]) << 32) ^
+               uint64_t(pixel_export_extent_[1]);
+  }
   // D2: the attachment subset this draw's pass must bind. Under the legacy
   // policy every present attachment is bound and the subset test is skipped.
-  const bool by_use = PassAttachmentsByUseEnabled() && !memexport_pass_;
+  const bool by_use = PassAttachmentsByUseEnabled() && !scratch_only_pass;
   const uint32_t want_bound =
       by_use ? pending_pass_bound_ : metal::kMetalPassAttachmentAll;
   const bool attachments_covered =
@@ -3370,12 +3398,13 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     return nullptr;
   }
   uint32_t raster_sample_count =
-      memexport_pass_ ? 1u : render_target_cache_->current_raster_sample_count();
+      scratch_only_pass ? 1u
+                        : render_target_cache_->current_raster_sample_count();
   void* color_resolves[xenos::kMaxColorRenderTargets] = {};
   void* color_targets[xenos::kMaxColorRenderTargets] = {};
   void* primary_color_target = nullptr;
   bool any_color_target = false;
-  if (!memexport_pass_) {
+  if (!scratch_only_pass) {
     for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
       if (by_use && !(want_bound & metal::MetalPassColorAttachmentBit(i))) {
         // D2: no draw of this pass can touch the target; leave it unbound so
@@ -3395,10 +3424,10 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     }
   }
   void* depth_resolve =
-      (kDepthEnabled && !memexport_pass_)
+      (kDepthEnabled && !scratch_only_pass)
           ? render_target_cache_->current_depth_texture()
           : nullptr;
-  void* depth = (kDepthEnabled && !memexport_pass_)
+  void* depth = (kDepthEnabled && !scratch_only_pass)
                     ? render_target_cache_->current_depth_raster_texture()
                     : nullptr;
   // D2: the depth plane and the stencil plane of the combined texture bind
@@ -3411,7 +3440,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     depth = nullptr;
     depth_resolve = nullptr;
   }
-  if (!any_color_target && !depth && !memexport_pass_) {
+  if (!any_color_target && !depth && !scratch_only_pass) {
     // Nothing to attach (the caller should have skipped such draws).
     return nullptr;
   }
@@ -3435,7 +3464,7 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
   // drawn over the composited front buffer after its resolve) keeps working,
   // while distinct targets no longer bleed into each other through a shared
   // texture (each has its own now).
-  if (!memexport_pass_) {
+  if (!scratch_only_pass) {
     // A deferred clear load whose attachment this pass does not bind must
     // materialize after all (compute, ahead of the render pass).
     uint32_t bound_color_mask = 0;
@@ -3481,6 +3510,48 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       scratch = [dev newTextureWithDescriptor:dd];
       scratch.label = @"cp:memexport-scratch-depth";
       dummy_depth_textures_.emplace(dk, (__bridge_retained void*)scratch);
+    }
+    if (!scratch) {
+      return nullptr;
+    }
+    pass.depthAttachment.texture = scratch;
+    pass.depthAttachment.loadAction = MTLLoadActionDontCare;
+    pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+    pass.stencilAttachment.texture = scratch;
+    pass.stencilAttachment.loadAction = MTLLoadActionDontCare;
+    pass.stencilAttachment.storeAction = MTLStoreActionDontCare;
+  } else if (pixel_export_pass_) {
+    // Pixel-export draw with no guest render target: the pixel shader must
+    // run over the guest scissor, so rasterize into a scratch depth of that
+    // extent (default depth state: test Always, write off). Memoryless on
+    // Apple GPUs (DontCare load/store, never backed), private elsewhere.
+    const uint32_t scratch_w = pixel_export_extent_[0];
+    const uint32_t scratch_h = pixel_export_extent_[1];
+    uint64_t dk = (1ull << 62) | (uint64_t(scratch_w) << 24) | scratch_h;
+    id<MTLTexture> scratch = nil;
+    auto dit = dummy_depth_textures_.find(dk);
+    if (dit != dummy_depth_textures_.end()) {
+      scratch = (__bridge id<MTLTexture>)dit->second;
+    } else {
+      id<MTLDevice> dev = (__bridge id<MTLDevice>)
+          static_cast<xe::ui::metal::MetalProvider*>(
+              graphics_system_->provider())->device();
+      MTLTextureDescriptor* dd = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:(MTLPixelFormat)
+                                                 MetalRenderTargetCache::
+                                                     kDepthFormat
+                                       width:scratch_w
+                                      height:scratch_h
+                                   mipmapped:NO];
+      dd.usage = MTLTextureUsageRenderTarget;
+      dd.storageMode = [dev supportsFamily:MTLGPUFamilyApple1]
+                           ? MTLStorageModeMemoryless
+                           : MTLStorageModePrivate;
+      scratch = [dev newTextureWithDescriptor:dd];
+      scratch.label = @"cp:pixel-export-scratch-depth";
+      if (scratch) {
+        dummy_depth_textures_.emplace(dk, (__bridge_retained void*)scratch);
+      }
     }
     if (!scratch) {
       return nullptr;
@@ -8071,12 +8142,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // predicate owns the whole decision matrix, including the two permanent
   // exclusions (pixel-stage export; tessellated producers, which the
   // tessellation route already fail-closed skips upstream at "tess-memexport").
+  // A pixel shader that exports with no render target bound (color writes
+  // off, no depth) still rasterizes on the guest: its exports are the whole
+  // effect of the draw. Route it like a rasterizing pixel producer, in a pass
+  // of its own with only a scratch depth attachment (see
+  // MetalMemexportPixelNoTargetGateOn).
+  bool pixel_export_only =
+      !rt_bound_for_export && ps_writes_eM && pixel_memexport_ranges_present &&
+      MetalMemexportPixelGateOn() && MetalMemexportPixelNoTargetGateOn();
   const metal::MetalMemexportRasterRoute memexport_raster_route =
       metal::DecideMetalMemexportRoute(
           MetalMemexportRasterGateOn(), MetalMemexportPixelGateOn(),
-          rt_bound_for_export, vertex_memexport_range_count != 0,
-          ps_writes_eM, pixel_memexport_ranges_present,
-          use_tessellation_emulation);
+          rt_bound_for_export || pixel_export_only,
+          vertex_memexport_range_count != 0, ps_writes_eM,
+          pixel_memexport_ranges_present, use_tessellation_emulation);
   bool memexport_raster_routed =
       metal::MetalMemexportRasterRouteRoutes(memexport_raster_route);
   // Bisect filter (XE_METAL_MEMEXPORT_RASTER_ONLY, empty by default and
@@ -8092,6 +8171,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
   }
+  // Anything the route did not accept (tessellated, vertex gate off, bisect
+  // filter) keeps the old no-target skip below.
+  pixel_export_only = pixel_export_only && memexport_raster_routed;
   // Report memexport producer classes this backend does not route. Bounded and
   // deduplicated by MemexportGapReporter; unconditional by design, because the
   // symptom is missing guest data with nothing to attribute it to, and a
@@ -8244,7 +8326,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
-  if (!color_bound && !(kDepthEnabled && depth_bound)) {
+  if (!color_bound && !(kDepthEnabled && depth_bound) && !pixel_export_only) {
     bool ps_exports = pixel_shader && pixel_shader->memexport_eM_written();
     if (memexport_ranges.empty() || ps_exports) {
       // Nothing to render and nothing exportable via the v1 path (plain
@@ -9019,7 +9101,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // scissor and PsParamGen then use window offset 0 (the shader adds the
   // offset back to PsParamGen). --window_offset_in_edram=false rolls back.
   const int32_t window_offset_tiles =
-      memexport_draw ? 0
+      (memexport_draw || pixel_export_only) ? 0
                      : render_target_cache_->GetWindowOffsetTiles(
                            regs, norm_depth, normalized_color_mask,
                            guest_swap_count());
@@ -9046,7 +9128,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
   }
-  if (!memexport_draw &&
+  if (!memexport_draw && !pixel_export_only &&
       !render_target_cache_->Update(color_bound || depth_bound, norm_depth,
                                     normalized_color_mask, *vertex_shader,
                                     window_offset_tiles)) {
@@ -9082,7 +9164,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   }
   depth_bound = !memexport_draw && kDepthEnabled &&
                 render_target_cache_->current_depth_texture() != nullptr;
-  if (!have_color && !depth_bound && !memexport_draw) {
+  if (!have_color && !depth_bound && !memexport_draw && !pixel_export_only) {
     RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
                    "no-bound-targets");
     return true;
@@ -9540,9 +9622,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // (e.g. Sonic: the skip hid a white-out from bad composite inputs).
   static const bool s_no_dummy_depth =
       std::getenv("XE_METAL_NO_DUMMY_DEPTH") != nullptr;
+  // A pixel-export-only draw always carries the scratch depth: its pass has
+  // no other attachment to rasterize against.
   bool dummy_depth =
-      !s_no_dummy_depth && pixel_shader && pixel_shader->writes_depth() &&
-      !(kDepthEnabled && depth_bound);
+      pixel_export_only ||
+      (!s_no_dummy_depth && pixel_shader && pixel_shader->writes_depth() &&
+       !(kDepthEnabled && depth_bound));
   uint64_t pipeline_depth_format =
       ((kDepthEnabled && depth_bound) || dummy_depth)
           ? MetalRenderTargetCache::kDepthFormat
@@ -9570,7 +9655,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     pass_present |= metal::kMetalPassAttachmentDepthStencil;
   }
   uint32_t pass_bound = pass_present;
-  if (PassAttachmentsByUseEnabled() && !memexport_draw) {
+  if (PassAttachmentsByUseEnabled() && !memexport_draw && !pixel_export_only) {
     metal::MetalPassAttachmentUse use = metal::GetMetalPassAttachmentUse(
         norm_depth, normalized_color_mask, blend_controls,
         regs[XE_GPU_REG_RB_STENCILREFMASK],
@@ -9664,8 +9749,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // strict raster gate selects the common real 2x/4x attachment count.
   MetalPipelineRasterState pipeline_raster_state =
       GetMetalPipelineRasterState(
-          memexport_draw ? 1u
-                         : render_target_cache_->current_raster_sample_count(),
+          (memexport_draw || pixel_export_only)
+              ? 1u
+              : render_target_cache_->current_raster_sample_count(),
           regs.Get<reg::RB_COLORCONTROL>());
   uint32_t raster_sample_count =
       pipeline_raster_state.pipeline_key().raster_sample_count;
@@ -10921,6 +11007,57 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
 
   dummy_depth_pass_ = dummy_depth;
   memexport_pass_ = memexport_draw;
+  pixel_export_pass_ = pixel_export_only;
+  if (pixel_export_only) {
+    // The pass's only attachment is a scratch depth covering the guest
+    // scissor (and the viewport when clipping is on), bucketed to powers of
+    // two so consecutive export draws share one encoder and one texture.
+    draw_util::Scissor export_scissor;
+    draw_util::GetScissor(regs, export_scissor, true, false);
+    uint32_t export_right = export_scissor.offset[0] + export_scissor.extent[0];
+    uint32_t export_bottom =
+        export_scissor.offset[1] + export_scissor.extent[1];
+    if (!regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable) {
+      draw_util::ViewportInfo export_viewport;
+      draw_util::GetViewportInfoArgs export_vp_args = GetMetalViewportInfoArgs(
+          regs, norm_depth, pixel_shader->writes_depth());
+      draw_util::GetHostViewportInfo(&export_vp_args, export_viewport);
+      auto viewport_end = [&](uint32_t axis) {
+        int64_t end = int64_t(export_viewport.xy_offset[axis]) +
+                      int64_t(export_viewport.xy_extent[axis]);
+        return uint32_t(std::max<int64_t>(end, 0));
+      };
+      export_right = std::min(export_right, viewport_end(0));
+      export_bottom = std::min(export_bottom, viewport_end(1));
+    }
+    export_right *= draw_resolution_scale_x_;
+    export_bottom *= draw_resolution_scale_y_;
+    if (!export_right || !export_bottom) {
+      RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                     "pixel-export-empty-area");
+      return true;
+    }
+    auto bucket = [](uint32_t v) {
+      uint32_t b = 64;
+      while (b < v && b < 16384) {
+        b <<= 1;
+      }
+      return b;
+    };
+    pixel_export_extent_[0] = bucket(export_right);
+    pixel_export_extent_[1] = bucket(export_bottom);
+    if (s_memexport_log) {
+      for (const auto& range : memexport_ranges) {
+        XELOGW(
+            "MetalMemexportPixelNoRTExec draw={} PS shader={:016X} "
+            "dest={:08X} bytes={} prim={} n={} area={}x{} pass={}x{}",
+            trace_draw_index_, pixel_shader->ucode_data_hash(),
+            range.base_address_dwords << 2, range.size_bytes,
+            uint32_t(prim_type), index_count, export_right, export_bottom,
+            pixel_export_extent_[0], pixel_export_extent_[1]);
+      }
+    }
+  }
   pending_pass_bound_ = pass_bound;
   // Host scissor rows of this draw (pack census dirty rows); whole range
   // until the scissor is applied below.
@@ -11659,6 +11796,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           efs.extent_height = render_height;
           efs.extent_valid = true;
         }
+      }
+      if (pixel_export_only) {
+        // The scratch depth is the pass's whole render area.
+        render_width = pixel_export_extent_[0];
+        render_height = pixel_export_extent_[1];
+        have_render_extent = true;
       }
       if (!have_render_extent) {
         RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
@@ -12981,6 +13124,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     es.DrawPrimitives(prim, vertex_start, vertex_count);
   };
   auto mark_raster_targets_written = [&] {
+    if (pixel_export_only) {
+      // Only a scratch depth is bound; no guest target was written.
+      return;
+    }
     if (PassCensusEnabled()) {
       // Materialize-fate census: can this draw observe each target's old
       // content? Pixel kill and alpha test leave pixels unwritten, so they
