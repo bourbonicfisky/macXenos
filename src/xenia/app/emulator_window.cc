@@ -1378,7 +1378,7 @@ void EmulatorWindow::FileDrop(const std::filesystem::path& path) {
   RunTitle(path);
 }
 
-void EmulatorWindow::FileOpen() {
+bool EmulatorWindow::FileOpen() {
   std::filesystem::path path;
 
   auto file_picker = xe::ui::FilePicker::Create();
@@ -1401,7 +1401,9 @@ void EmulatorWindow::FileOpen() {
     }
     // Only run the title if a file is selected
     RunTitle(path);
+    return true;
   }
+  return false;
 }
 
 void EmulatorWindow::FileClose() {
@@ -1504,7 +1506,7 @@ void EmulatorWindow::FlushBeforeRelaunch() {
   }
 }
 
-void EmulatorWindow::InstallContent() {
+bool EmulatorWindow::InstallContent() {
   std::vector<std::filesystem::path> paths;
 
   auto file_picker = xe::ui::FilePicker::Create();
@@ -1520,7 +1522,7 @@ void EmulatorWindow::InstallContent() {
   }
 
   if (paths.empty()) {
-    return;
+    return false;
   }
 
   std::shared_ptr<std::vector<Emulator::ContentInstallEntry>>
@@ -1544,6 +1546,7 @@ void EmulatorWindow::InstallContent() {
 
   new ContentInstallDialog(imgui_drawer_.get(), *this,
                            content_installation_status);
+  return true;
 }
 
 void EmulatorWindow::ExtractZarchive() {
