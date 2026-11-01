@@ -1118,7 +1118,11 @@ constexpr uint32_t kViewBindlessHeapSlots = 16384;
 // long sessions, turning every later new sampler into a skipped draw. Clamped
 // to the device's argument-buffer sampler limit at heap creation.
 constexpr uint32_t kSamplerBindlessHeapSlots = 2048;
-constexpr uint32_t kUploadArenaSize = 32u * 1024 * 1024;
+// Per-draw constants for a whole open submission must fit: a frame of ~10k
+// draws (NBA 2K11's arena light show) filled 32 MB inside one submission and
+// dropped ~700k draws a session (sysconst-alloc), since ArenaAllocate can only
+// wait for committed submissions.
+constexpr uint32_t kUploadArenaSize = 128u * 1024 * 1024;
 // XE_METAL_ARENA_SIZE=<bytes>: ring-stress override — a small ring forces
 // constant wrapping/reclaim pressure in trace replay, turning any ring
 // lifetime bug into a deterministic headless corruption vs the baselines.
