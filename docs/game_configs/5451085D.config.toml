@@ -1,0 +1,15 @@
+# macXenos built-in per-title config: WWE SmackDown vs. Raw 2011 (5451085D).
+# At match setup the title builds a handle heap from two 6.5 MB pools, each
+# requested with MmAllocatePhysicalMemoryEx over a physical window exactly as
+# large as the pool (e.g. 19EC0000-1A540000), and it rejects any result whose
+# address & 0x1FFFFFFF is below the window's start. With the 4 KB 0xE0000000
+# heap's 0x1000 physical offset the result is F9EBF000 (one page low), the
+# title frees it, keeps a NULL pool base, and runs the heap at guest address 0
+# (not host-protected on 16 KB-page hosts). Handle allocations then fail and
+# return 0; callers memset through the garbage at guest 0/4, which crashed in
+# memset (828F2918, write to 0x70000000) while skipping ring entrances and
+# hung after the opening cutscene. Ignoring the offset for ranged
+# allocations gives F9EC0000/FA540000 and a working heap.
+# (xenia-mac-evidence defects-20261101/svr2011)
+[Memory]
+ignore_offset_for_ranged_allocations = true
