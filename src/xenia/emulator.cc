@@ -38,6 +38,7 @@
 #include "xenia/cpu/backend/code_cache.h"
 #include "xenia/cpu/backend/null_backend.h"
 #include "xenia/cpu/cpu_flags.h"
+#include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/thread_state.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
@@ -1418,6 +1419,9 @@ void Emulator::LogGuestThreadStates(std::string_view reason) {
       msg.append(fmt::format(" {:08X}", lr));
     }
     msg.append("\n");
+  }
+  if (!cvars::guest_probe_pcs.empty()) {
+    msg.append(cpu::ppc::FormatGuestProbes(4096));
   }
   XELOGW("{}", msg);
 }

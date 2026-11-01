@@ -61,5 +61,12 @@ DEFINE_uint64(break_condition_value, 0, "value compared against", "CPU");
 DEFINE_string(break_condition_op, "eq", "comparison operator", "CPU");
 DEFINE_bool(break_condition_truncate, true, "truncate value to 32-bits", "CPU");
 
+// Probes (diagnostic): guest addresses whose execution is recorded in a ring
+// that the stall dump prints (thread, r3/r4/r30/r31, the two words at r31).
+DEFINE_string(guest_probe_pcs, "",
+              "Comma-separated hex guest addresses to record (diagnostic; "
+              "printed by the stall dump).",
+              "CPU");
+
 DEFINE_bool(break_on_debugbreak, true, "int3 on JITed __debugbreak requests.",
             "CPU");

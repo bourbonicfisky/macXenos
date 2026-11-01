@@ -11,6 +11,7 @@
 #define XENIA_CPU_PPC_PPC_FRONTEND_H_
 
 #include <memory>
+#include <string>
 
 #include "xenia/base/type_pool.h"
 #include "xenia/cpu/function.h"
@@ -34,7 +35,12 @@ struct PPCBuiltins {
   Function* enter_global_lock;
   Function* leave_global_lock;
   Function* syscall_handler;
+  Function* guest_probe;
 };
+
+// The last `max_records` guest probe records (--guest_probe_pcs), oldest
+// first, one line each.
+std::string FormatGuestProbes(size_t max_records);
 
 class PPCFrontend {
  public:

@@ -1173,6 +1173,14 @@ void EmulatorWindow::AutoScreenshotLoop() {
           stall_logged = true;
           emulator_->LogGuestThreadStates(fmt::format(
               "no guest swap for {} s", stall_limit.count()));
+        } else if (!count && !stall_logged &&
+                   now - stall_since >= 4 * stall_limit) {
+          // A title that never presents (Half-Life 2 after The Orange Box
+          // relaunch sat at 0 fps with no dump): the window from the title
+          // id becoming known.
+          stall_logged = true;
+          emulator_->LogGuestThreadStates(fmt::format(
+              "no guest swap in the first {} s", 4 * stall_limit.count()));
         }
         if (!fps_started) {
           fps_started = true;
