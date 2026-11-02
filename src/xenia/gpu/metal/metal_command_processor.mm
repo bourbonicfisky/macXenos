@@ -36,6 +36,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include <cstring>
 #include <exception>
 #include <iterator>
+#include <map>
 #include <set>
 #include <string>
 #include <string_view>
@@ -5209,6 +5210,24 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
                  : "(unknown)",
              shared_texture_cache_ ? shared_texture_cache_->DescribeRecentLoads()
                                    : std::string("(no shared cache)"));
+      {
+        std::map<std::pair<uint64_t, uint64_t>, std::pair<uint32_t, uint32_t>>
+            pairs;
+        for (const DrawPairNote& note : draw_pair_ring_) {
+          if (note.submission == faulted_submission) {
+            auto& entry = pairs[{note.vs, note.ps}];
+            entry.first += note.count;
+            entry.second = note.prim;
+          }
+        }
+        std::string draws;
+        for (const auto& [pair, entry] : pairs) {
+          draws += fmt::format(" {:016X}/{:016X}:{}x{}", pair.first,
+                               pair.second, entry.second, entry.first);
+        }
+        XELOGE("  draws (vs/ps:prim x count):{}",
+               draws.empty() ? std::string(" (none recorded)") : draws);
+      }
       if (s_cb_errors > 32) {
         XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
       }
@@ -7629,6 +7648,22 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // vertices. Cleared below for draws that only export memory.
   bool rect_strip_route =
       prim_type == xenos::PrimitiveType::kRectangleList && rect_vs_expansion_;
+  {
+    const uint64_t vs_hash = vertex_shader->ucode_data_hash();
+    const uint64_t ps_hash = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+    DrawPairNote& last = draw_pair_ring_[(draw_pair_next_ - 1) % 8192];
+    if (draw_pair_next_ && last.submission == submission_counter_ + 1 &&
+        last.vs == vs_hash && last.ps == ps_hash) {
+      ++last.count;
+    } else {
+      DrawPairNote& note = draw_pair_ring_[draw_pair_next_++ % 8192];
+      note.submission = submission_counter_ + 1;
+      note.vs = vs_hash;
+      note.ps = ps_hash;
+      note.count = 1;
+      note.prim = uint32_t(prim_type);
+    }
+  }
   if (prim_type == xenos::PrimitiveType::kRectangleList && !rect_strip_route) {
     geometry_type = PipelineGeometryShader::kRectangleList;
   } else if (prim_type == xenos::PrimitiveType::kPointList &&

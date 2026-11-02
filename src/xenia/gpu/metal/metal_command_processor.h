@@ -1198,6 +1198,16 @@ class MetalCommandProcessor : public CommandProcessor {
   // Seam boundary reason of the last 64 submissions, by submission serial
   // (fault attribution: why the faulted command buffer was committed).
   uint8_t submission_reason_ring_[64] = {};
+  // Shader pairs of the last 8192 draws, by submission serial (consecutive
+  // repeats counted): names what a faulted command buffer was running.
+  struct DrawPairNote {
+    uint64_t submission;
+    uint64_t vs, ps;
+    uint32_t count;
+    uint32_t prim;
+  };
+  DrawPairNote draw_pair_ring_[8192] = {};
+  uint32_t draw_pair_next_ = 0;
   // Draws by guest primitive type and the path that issued them (census):
   // 0 native, 1 auto quad->tri, 2 DMA quad->tri, 3 auto line loop,
   // 4 geometry emulation, 5 tessellation, 6 unmappable (skipped).
