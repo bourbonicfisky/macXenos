@@ -1207,6 +1207,8 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t prim;
   };
   DrawPairNote draw_pair_ring_[8192] = {};
+  // XE_METAL_SLOT_AUDIT: the current draw's texture slots.
+  std::vector<uint32_t> audit_draw_slots_;
   uint32_t draw_pair_next_ = 0;
   // Draws by guest primitive type and the path that issued them (census):
   // 0 native, 1 auto quad->tri, 2 DMA quad->tri, 3 auto line loop,

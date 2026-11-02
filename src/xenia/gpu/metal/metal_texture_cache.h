@@ -403,6 +403,12 @@ class MetalTextureCache {
   uint32_t AllocateExternalSlot() { return AllocateSlot(); }
   // Points `slot` at a retained id<MTLTexture> the caller keeps alive.
   void BindExternalSlot(uint32_t slot, void* texture_bridge);
+  static bool SlotAuditEnabled();
+  // XE_METAL_SLOT_AUDIT: checks one draw's texture slots, referenced by
+  // `submission`: each must hold a texture registered active for the draw or
+  // one in a texture heap (heaps are resident on every encoder).
+  void AuditDrawSlots(const uint32_t* slots, size_t count,
+                      uint64_t submission);
   void RetireExternalSlot(uint32_t slot) {
     RetireSlot(RetireSubmission(), slot);
   }
@@ -489,6 +495,15 @@ class MetalTextureCache {
   // IRDescriptorTableSetTexture sites route through this, so the descriptor
   // write has exactly one implementation.
   void WriteSlotDescriptor(uint32_t slot, void* texture_bridge);
+  // XE_METAL_SLOT_AUDIT=1 (diagnostic): what each slot holds and the last
+  // submission whose draws index it.
+  static std::string DescribeAuditTexture(void* texture_bridge);
+  static std::string DescribeAuditCaller(void* address);
+  std::vector<void*> audit_slot_texture_;
+  std::vector<uint64_t> audit_slot_last_ref_;
+  uint64_t audit_completed_ = 0;
+  uint32_t audit_live_rewrites_ = 0;
+  uint32_t audit_unresident_ = 0;
   std::vector<std::pair<uint64_t, uint32_t>> stale_slots_;
   std::vector<uint32_t> free_slots_;
   // Textures evicted by InvalidateRange, released once their submissions

@@ -12604,6 +12604,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 buf_words[0], buf_words[1]);
           }
           indices[binding.bindless_descriptor_index] = texture_slot;
+          if (MetalTextureCache::SlotAuditEnabled()) {
+            audit_draw_slots_.push_back(texture_slot);
+          }
           // The audit's ENCODED side: this is the slot the shader will index,
           // captured with the identity the descriptor holds right now. The
           // stage mask is the draw's own requirement, taken from the same
@@ -12913,7 +12916,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     return 1u;
   }();
-  const bool bind_memo_on = s_bind_memo && !xe_lineage_base();
+  const bool bind_memo_on = s_bind_memo && !xe_lineage_base() &&
+                            !MetalTextureCache::SlotAuditEnabled();
+  audit_draw_slots_.clear();
   // The key: fixed state compared as one block, plus "no fetch constant the
   // shaders read was written since the memo was stored" (WriteRegister marks
   // written slots in bind_memo_fetch_written_; storing clears it).
@@ -13596,6 +13601,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       encoder_heaps_declared_ = heap_count;
       ++heap_declarations_;
     }
+  }
+  if (MetalTextureCache::SlotAuditEnabled()) {
+    texture_cache_->AuditDrawSlots(audit_draw_slots_.data(),
+                                   audit_draw_slots_.size(),
+                                   CurrentEncodingSubmission());
   }
   constexpr uint32_t kHeapBackedBit = 0x80000000u;
   for (void* tex : texture_cache_->active_textures()) {
