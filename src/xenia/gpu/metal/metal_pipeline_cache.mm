@@ -558,6 +558,7 @@ void MetalPipelineCache::Shutdown() {
     }
   }
   render_pipeline_states_.clear();
+  async_memo_ = {};
   // Release geometry-emulation pipelines + stage libraries (all retained void*).
   for (auto& pair : geometry_pipelines_) {
     if (pair.second.pipeline) {
@@ -1441,6 +1442,22 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
   *pixel_out = nullptr;
   deferred_out->reset();
   DrainAsyncPipelines();
+  static const bool s_memo_enabled = [] {
+    const char* v = std::getenv("XE_METAL_PIPELINE_MEMO");
+    return !(v && v[0] == '0');
+  }();
+  AsyncPipelineMemo& memo = async_memo_;
+  const uint32_t sample_count = raster_key.raster_sample_count;
+  if (s_memo_enabled && memo.pipeline && memo.vertex == vertex &&
+      memo.pixel == pixel && memo.depth == depth_pixel_format &&
+      memo.sample_count == sample_count &&
+      memo.write_mask == color_write_mask &&
+      !std::memcmp(memo.colors, color_pixel_formats, sizeof(memo.colors)) &&
+      !std::memcmp(memo.blends, blend_controls, sizeof(memo.blends))) {
+    *pipeline_out = memo.pipeline;
+    *pixel_out = memo.pixel_used;
+    return AsyncPipelineStatus::kReady;
+  }
   auto from_key = [&](uint64_t key, MetalShader::MetalTranslation* pixel_used) {
     auto it = render_pipeline_states_.find(key);
     if (it == render_pipeline_states_.end() || !it->second) {
@@ -1450,16 +1467,46 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
     *pixel_out = pixel_used;
     return AsyncPipelineStatus::kReady;
   };
+  auto remember = [&]() {
+    memo.vertex = vertex;
+    memo.pixel = pixel;
+    std::memcpy(memo.colors, color_pixel_formats, sizeof(memo.colors));
+    memo.depth = depth_pixel_format;
+    memo.sample_count = sample_count;
+    std::memcpy(memo.blends, blend_controls, sizeof(memo.blends));
+    memo.write_mask = color_write_mask;
+    memo.pipeline = *pipeline_out;
+    memo.pixel_used = *pixel_out;
+  };
   const uint64_t async_key =
       AsyncPipelineKey(vertex, pixel, color_pixel_formats, depth_pixel_format,
                        raster_key, blend_controls, color_write_mask);
   {
     auto it = async_results_.find(async_key);
     if (it != async_results_.end()) {
-      return it->second.key ? from_key(it->second.key, it->second.pixel_used)
-                            : AsyncPipelineStatus::kFailed;
+      if (!it->second.key) {
+        return AsyncPipelineStatus::kFailed;
+      }
+      AsyncPipelineStatus status =
+          from_key(it->second.key, it->second.pixel_used);
+      if (status == AsyncPipelineStatus::kReady) {
+        remember();
+      }
+      return status;
     }
   }
+  // A state found or built below (stored pipelines replayed at startup,
+  // synchronous builds) is recorded like a finished async build, so later
+  // draws take the lookup above instead of hashing the key again and probing
+  // three maps (GTA IV on the Mac Pro: ~0.3 ms/frame of the CP thread).
+  auto ready = [&](uint64_t key, MetalShader::MetalTranslation* pixel_used) {
+    AsyncPipelineStatus status = from_key(key, pixel_used);
+    if (status == AsyncPipelineStatus::kReady) {
+      async_results_.emplace(async_key, AsyncPipelineResult{key, pixel_used});
+      remember();
+    }
+    return status;
+  };
   auto defer = [&](const std::shared_ptr<AsyncPipelineJob>& job) {
     *pixel_out = job->pixel_used;
     *deferred_out = job;
@@ -1522,7 +1569,7 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
                             depth_pixel_format, raster_key, blend_controls,
                             color_write_mask);
       if (render_pipeline_states_.count(key)) {
-        return from_key(key, pixel_used);
+        return ready(key, pixel_used);
       }
     }
     if (stand_in_allowed) {
@@ -1550,7 +1597,7 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
                           depth_pixel_format, raster_key, blend_controls,
                           color_write_mask);
     if (render_pipeline_states_.count(key)) {
-      return from_key(key, pixel_used);
+      return ready(key, pixel_used);
     }
     std::shared_ptr<AsyncPipelineJob> job = new_job();
     job->deferred = true;
@@ -1574,6 +1621,15 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
   }
   *pipeline_out = state;
   *pixel_out = pixel_used;
+  const uint64_t key =
+      RenderPipelineKey(vertex, pixel_used, color_pixel_formats,
+                        depth_pixel_format, raster_key, blend_controls,
+                        color_write_mask);
+  auto it = render_pipeline_states_.find(key);
+  if (it != render_pipeline_states_.end() && it->second == state) {
+    async_results_.emplace(async_key, AsyncPipelineResult{key, pixel_used});
+    remember();
+  }
   return AsyncPipelineStatus::kReady;
 }
 
