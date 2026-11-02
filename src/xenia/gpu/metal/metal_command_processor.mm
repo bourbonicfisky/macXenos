@@ -1150,6 +1150,27 @@ static uint32_t UploadArenaSize() {
   return v ? uint32_t(strtoul(v, nullptr, 10)) : kUploadArenaSize;
 }
 
+// A resolve joining a parent snapshot as a vertical strip: FindContainingSnapshot
+// gives the row of the strip's adjusted destination base, which draw_util
+// aligns down to a 32-row tile row, leaving the rest of the start row in the
+// destination offset. Adds that offset to strip_y; false (no join) for an x
+// offset, which is not a vertical strip. XE_METAL_STRIP_DEST_OFFSET=0 restores
+// joining at the base row.
+bool ApplyStripJoinDestOffset(const draw_util::ResolveInfo& resolve_info,
+                              uint32_t& strip_y) {
+  static const bool s_enabled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_STRIP_DEST_OFFSET"), true);
+  if (!s_enabled) {
+    return true;
+  }
+  const auto& dest = resolve_info.copy_dest_coordinate_info;
+  if (dest.offset_x_div_8) {
+    return false;
+  }
+  strip_y += uint32_t(dest.offset_y_div_8) << 3;
+  return true;
+}
+
 bool MapPrimitiveType(xenos::PrimitiveType type, MTLPrimitiveType* out) {
   switch (type) {
     case xenos::PrimitiveType::kPointList:
@@ -15125,6 +15146,17 @@ bool MetalCommandProcessor::IssueCopy() {
               int32_t(resolve_info.copy_dest_info.copy_dest_exp_bias),
               parent_snap != nullptr, strip_y_offset);
         }
+        // The strip's rows start at its destination offset below the
+        // adjusted base: draw_util aligns copy_dest_base down to a 32-row
+        // tile row and leaves the rest in offset_y (Tiger Woods PGA Tour 06
+        // tiles 720p 4x as 240-row strips; the middle one lands at base row
+        // 224 with offset 16 and joined at 224, so rows 464-479 stayed
+        // stale). An x offset is not a vertical strip: no join.
+        if (parent_snap &&
+            !ApplyStripJoinDestOffset(resolve_info, strip_y_offset)) {
+          parent_snap = nullptr;
+          strip_y_offset = 0;
+        }
         // A resolve must NEVER join a parent strip of a different format:
         // "render in the snapshot's REAL format" would silently skip the
         // guest-requested conversion. JC2 exposed this first with an
@@ -16132,6 +16164,13 @@ bool MetalCommandProcessor::IssueCopy() {
                 ? uint64_t(((__bridge id<MTLTexture>)parent_snap).pixelFormat)
                 : 0,
             strip_y_offset);
+      }
+      // The strip's rows start at its destination offset below the adjusted
+      // base, as for colour.
+      if (parent_snap &&
+          !ApplyStripJoinDestOffset(resolve_info, strip_y_offset)) {
+        parent_snap = nullptr;
+        strip_y_offset = 0;
       }
       // Address containment alone doesn't prove that this resolve is a
       // vertical strip of the earlier snapshot. Tiled column resolves may
