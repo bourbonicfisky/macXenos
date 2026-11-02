@@ -5235,6 +5235,27 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
         }
         XELOGE("  draws (vs/ps:prim x count):{}",
                draws.empty() ? std::string(" (none recorded)") : draws);
+        // The same runs in issue order, by draw index, to place them in the
+        // encoders the execution status names (draws@ labels).
+        std::string sequence;
+        uint32_t runs = 0;
+        for (uint32_t i = 0; i < 8192; ++i) {
+          const DrawPairNote& note =
+              draw_pair_ring_[(draw_pair_next_ + i) % 8192];
+          if (note.submission != faulted_submission) {
+            continue;
+          }
+          if (++runs > 400) {
+            sequence += " ...";
+            break;
+          }
+          sequence += fmt::format(" @{}:{:08X}/{:08X}:{}x{}", note.first_draw,
+                                  uint32_t(note.vs), uint32_t(note.ps),
+                                  note.prim, note.count);
+        }
+        if (!sequence.empty()) {
+          XELOGE("  draw sequence:{}", sequence);
+        }
       }
       if (s_cb_errors > 32) {
         XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
@@ -7671,6 +7692,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       note.ps = ps_hash;
       note.count = 1;
       note.prim = uint32_t(prim_type);
+      note.first_draw = draw_count_;
     }
   }
   if (prim_type == xenos::PrimitiveType::kRectangleList && !rect_strip_route) {

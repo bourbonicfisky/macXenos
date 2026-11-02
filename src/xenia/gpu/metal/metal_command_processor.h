@@ -1208,6 +1208,9 @@ class MetalCommandProcessor : public CommandProcessor {
     uint64_t vs, ps;
     uint32_t count;
     uint32_t prim;
+    // draw_count_ when the first of the run was issued (encoder labels
+    // carry the same counter as draws@).
+    uint32_t first_draw;
   };
   DrawPairNote draw_pair_ring_[8192] = {};
   // XE_METAL_SLOT_AUDIT: the current draw's texture slots.
