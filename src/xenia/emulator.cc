@@ -231,6 +231,10 @@ X_STATUS Emulator::Setup(
         input_driver_factory) {
   X_STATUS result = X_STATUS_UNSUCCESSFUL;
 
+  if (cvars::headless) {
+    xe::SetFatalErrorMessageBox(false);
+  }
+
   display_window_ = display_window;
   imgui_drawer_ = imgui_drawer;
 
