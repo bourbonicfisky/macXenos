@@ -261,7 +261,8 @@ class PrimitiveProcessor {
                         bool point_sprites_supported_without_vs_expansion,
                         bool rectangle_lists_supported_without_vs_expansion,
                         bool host_primitive_reset_always_enabled = false,
-                        bool convert_triangle_fans_first_provoking = false);
+                        bool convert_triangle_fans_first_provoking = false,
+                        bool host_primitive_reset_strips_only = false);
   // If any primitive type conversion is needed for auto-indexed draws, called
   // from InitializeCommon (thus only once in the primitive processor's
   // lifetime) to set up the backend's index buffer containing indices for
@@ -823,6 +824,10 @@ class PrimitiveProcessor {
   };
   static constexpr uint32_t kWidenScanMemoSizeLog2 = 14;
   static constexpr uint32_t kWidenScanPageSizeLog2 = 12;
+  // host_primitive_reset_strips_only_: whether a draw of this host type is a
+  // plain list, which the host never restarts.
+  static bool HostListDrawIgnoresRestart(
+      xenos::PrimitiveType host_primitive_type);
   bool WidenScanMemoEnabled() const;
   bool WidenScanMemoFind(uint32_t base, uint32_t count) const;
   void WidenScanMemoStore(uint32_t base, uint32_t count, uint64_t stamp);
@@ -833,6 +838,9 @@ class PrimitiveProcessor {
   // XE_WIDEN_SCAN_VERIFY census, logged every 600 frames.
   uint64_t widen_census_scans_ = 0, widen_census_positive_ = 0,
            widen_census_memo_hits_ = 0, widen_census_frames_ = 0;
+  // List draws that skipped the scan (host_primitive_reset_strips_only_) and,
+  // with XE_WIDEN_SCAN_VERIFY, how many of them held a 0xFFFF index.
+  uint64_t widen_census_list_skips_ = 0, widen_census_list_ffff_ = 0;
 
   const RegisterFile& register_file_;
   Memory& memory_;
@@ -852,6 +860,12 @@ class PrimitiveProcessor {
   // drop the primitive, so such buffers are widened to 32-bit (0xFFFF -> 0x0000FFFF,
   // which is never the 32-bit restart sentinel).
   bool host_primitive_reset_always_enabled_ = false;
+  // With host_primitive_reset_always_enabled_: the host restarts only strip
+  // topologies, like D3D12's IBStripCutValue. Native Metal: a 16-bit 0xFFFF in
+  // a triangle or line list is an ordinary vertex (probed 2026-11-01 on an M1
+  // Max, an RX 6900 XT and a Radeon Pro 580X), so plain list draws skip the
+  // 0xFFFF scan. MoltenVK keeps scanning every type.
+  bool host_primitive_reset_strips_only_ = false;
   // Fan-to-list vertex order within each output triangle. Default (false) is the
   // Direct3D order (v1,v2,v0),(v2,v3,v0),... used by D3D12/Vulkan unchanged. When
   // true, emit the center-first order (v0,v1,v2),(v0,v2,v3),... which the Metal
