@@ -524,6 +524,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // prerequisite for the MSC geometry-emulation path that expands
   // rectangle/point/quad lists. Set in InitializeDrawResources.
   bool mesh_shader_supported_ = false;
+  // Rectangle lists expanded in the vertex shader (two-triangle strips,
+  // HostVertexShaderType::kRectangleListAsTriangleStrip) instead of MSC
+  // geometry emulation: GPUs other than Apple's (metal_rect_vs_expansion).
+  bool rect_vs_expansion_ = false;
   // Auto-indexed quad lists become triangle lists through the shared
   // primitive processor instead of MSC geometry emulation: the mesh-shader
   // quad expansion streaks Red Dead's foliage on AMD (RX 6900 XT, 2026-10-10).

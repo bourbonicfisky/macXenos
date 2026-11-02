@@ -2715,6 +2715,26 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   if (std::getenv("XE_METAL_DISABLE_GEO")) {
     mesh_shader_supported_ = false;
   }
+  // Rectangle lists in the vertex shader on non-Apple GPUs: the Radeon Pro
+  // 580X's shader compiler (Polaris) crashes building every MSC geometry
+  // emulation pipeline (MTLCompilerService segfault in register allocation,
+  // XPC_ERROR_CONNECTION_INTERRUPTED), so all rectangle lists were dropped
+  // there. Pre-Metal 3 GPUs only: on the RX 6900 XT geometry emulation
+  // compiles and the per-draw index tables cost Mafia II ~9% (80.6 vs 72.3
+  // fps). XE_METAL_RECT_VS=0/1 overrides.
+  bool metal3 = false;
+  if (@available(macOS 13.0, *)) {
+    metal3 = [device supportsFamily:MTLGPUFamilyMetal3];
+  }
+  rect_vs_expansion_ =
+      ![device supportsFamily:MTLGPUFamilyApple7] && !metal3;
+  if (const char* v = std::getenv("XE_METAL_RECT_VS")) {
+    rect_vs_expansion_ = v[0] == '1';
+  }
+  if (rect_vs_expansion_) {
+    XELOGI("MetalCommandProcessor: rectangle lists expand in the vertex "
+           "shader");
+  }
 
 
   upload_arena_ = std::make_unique<MetalUploadArena>(device_ptr, UploadArenaSize());
@@ -7604,7 +7624,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   const bool point_strip_route =
       prim_type == xenos::PrimitiveType::kPointList &&
       PointSpriteVsExpansionEnabled();
-  if (prim_type == xenos::PrimitiveType::kRectangleList) {
+  // Rectangle lists the same way (rect_vs_expansion_): 4 host vertices per
+  // guest rectangle, the vertex shader running the guest program for its 3
+  // vertices. Cleared below for draws that only export memory.
+  bool rect_strip_route =
+      prim_type == xenos::PrimitiveType::kRectangleList && rect_vs_expansion_;
+  if (prim_type == xenos::PrimitiveType::kRectangleList && !rect_strip_route) {
     geometry_type = PipelineGeometryShader::kRectangleList;
   } else if (prim_type == xenos::PrimitiveType::kPointList &&
              !point_strip_route) {
@@ -7860,7 +7885,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // topology (task 4.4).
   if (!use_tessellation_emulation && !use_geometry_emulation &&
       !auto_line_loop_route && !auto_quad_route && !dma_quad_route &&
-      !dma_line_loop_route && !converted_class_route &&
+      !dma_line_loop_route && !converted_class_route && !rect_strip_route &&
       !MapPrimitiveType(prim_type, &mtl_prim)) {
     ++prim_census_[uint32_t(prim_type) & 31][6];
     RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
@@ -8661,6 +8686,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     memexport_draw = true;
     pixel_shader = nullptr;
     use_geometry_emulation = false;
+    rect_strip_route = false;
     if (!MapPrimitiveType(prim_type, &mtl_prim)) {
       if (s_memexport_log) {
         XELOGW("MetalMemexportSkip draw={} unmappable prim {} for export",
@@ -9590,6 +9616,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           use_tessellation_emulation ? tess_pp.host_vertex_shader_type
           : point_strip_route
               ? Shader::HostVertexShaderType::kPointListAsTriangleStrip
+          : rect_strip_route
+              ? Shader::HostVertexShaderType::kRectangleListAsTriangleStrip
               : Shader::HostVertexShaderType::kVertex));
   vs_mod_decoded.vertex.interpolator_mask = interpolator_mask;
   vs_mod_decoded.vertex.fill_unwritten_interpolators =
@@ -11105,6 +11133,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   PrimitiveProcessor::ProcessingResult pp_result{};
   draw_trace_milestone("before-primitive-processor");
   if (primitive_processor_ && !use_geometry_emulation && !point_strip_route &&
+      !rect_strip_route &&
       (IsPp1Routable(regs, prim_type) || auto_fan_route ||
        auto_quad_route || auto_line_loop_route || fixed_reset_strip_route ||
        converted_class_route) &&
@@ -13198,6 +13227,100 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
+  // Rectangle VS expansion: the rectangles' guest vertex indices in host
+  // order, 3 dwords per rectangle (auto-indexed: 3r..3r+2), exposed to the
+  // vertex shader as entry 1 of a per-draw SRV space-0 table like the host
+  // tessellation records; host indices 4r..4r+3 and a strip restart.
+  MetalUploadAllocation rect_index_table_alloc{};
+  MetalUploadAllocation rect_host_indices_alloc{};
+  MetalUploadAllocation rect_srv_table_alloc{};
+  uint32_t rect_host_index_count = 0;
+  if (rect_strip_route) {
+    const uint32_t rects = index_count / 3;
+    if (!rects) {
+      RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                     "rect-degenerate");
+      return true;
+    }
+    rect_host_index_count = rects * 5;
+    if (!ArenaAllocate(rects * 3 * sizeof(uint32_t), 16,
+                       &rect_index_table_alloc) ||
+        !ArenaAllocate(rect_host_index_count * sizeof(uint32_t), 16,
+                       &rect_host_indices_alloc) ||
+        !ArenaAllocate(2 * sizeof(IRDescriptorTableEntry), 256,
+                       &rect_srv_table_alloc)) {
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                     "rect-index-alloc");
+      return true;
+    }
+    // The arena is write-combined: write only, swap in cached stack chunks.
+    uint32_t* table = static_cast<uint32_t*>(rect_index_table_alloc.cpu_ptr);
+    const uint32_t table_count = rects * 3;
+    if (index_buffer_info && index_buffer_info->guest_base) {
+      const void* guest_indices =
+          memory_->TranslatePhysical(index_buffer_info->guest_base);
+      if (!guest_indices) {
+        RecordDrawSkip(MetalDrawSkipReason::kInvalidGuestState,
+                       "rect-index-guest-null");
+        return true;
+      }
+      auto widen = [&](auto* src) {
+        using T = std::remove_const_t<std::remove_pointer_t<decltype(src)>>;
+        constexpr uint32_t kChunk = 256;
+        T chunk[kChunk];
+        uint32_t widened[kChunk];
+        for (uint32_t i0 = 0; i0 < table_count; i0 += kChunk) {
+          const uint32_t n = std::min(kChunk, table_count - i0);
+          SwapIndicesInto(chunk, src + i0, n, index_buffer_info->format,
+                          index_buffer_info->endianness);
+          for (uint32_t i = 0; i < n; ++i) {
+            widened[i] = uint32_t(chunk[i]);
+          }
+          std::memcpy(table + i0, widened, n * sizeof(uint32_t));
+        }
+      };
+      if (index_buffer_info->format == xenos::IndexFormat::kInt32) {
+        widen(static_cast<const uint32_t*>(guest_indices));
+      } else {
+        widen(static_cast<const uint16_t*>(guest_indices));
+      }
+    } else {
+      for (uint32_t i = 0; i < table_count; ++i) {
+        table[i] = i;
+      }
+    }
+    uint32_t* host_indices =
+        static_cast<uint32_t*>(rect_host_indices_alloc.cpu_ptr);
+    for (uint32_t r = 0; r < rects; ++r) {
+      uint32_t* o = host_indices + size_t(r) * 5;
+      o[0] = r * 4u;
+      o[1] = r * 4u + 1;
+      o[2] = r * 4u + 2;
+      o[3] = r * 4u + 3;
+      o[4] = UINT32_MAX;
+    }
+    auto* rect_table_entries =
+        static_cast<IRDescriptorTableEntry*>(rect_srv_table_alloc.cpu_ptr);
+    std::memset(rect_table_entries, 0, 2 * sizeof(IRDescriptorTableEntry));
+    __unsafe_unretained id<MTLBuffer> rect_shared_buffer =
+        (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+    IRDescriptorTableSetBuffer(&rect_table_entries[0],
+                               [rect_shared_buffer gpuAddress],
+                               shared_memory_->gpu_visible_length());
+    IRDescriptorTableSetBuffer(&rect_table_entries[1],
+                               rect_index_table_alloc.gpu_address,
+                               table_count * sizeof(uint32_t));
+    static bool s_rect_engaged_logged = false;
+    if (!s_rect_engaged_logged) {
+      s_rect_engaged_logged = true;
+      XELOGI("MetalCommandProcessor: rectangle VS expansion engaged, first "
+             "draw={} rectangles={} {}",
+             trace_draw_index_, rects,
+             index_buffer_info && index_buffer_info->guest_base ? "indexed"
+                                                                : "auto");
+    }
+  }
+
   MetalBindingAddresses binding_addresses;
   binding_addresses.null_buffer = null_gpu;
   binding_addresses.view_heap = view_heap_gpu;
@@ -13205,6 +13328,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   binding_addresses.shared_memory_srv =
       tess_host_table_alloc.buffer
           ? tess_host_table_alloc.gpu_address
+      : rect_srv_table_alloc.buffer
+          ? rect_srv_table_alloc.gpu_address
           : system_view_gpu +
                 kSystemViewSharedMemorySRV * sizeof(IRDescriptorTableEntry);
   binding_addresses.null_uav =
@@ -13820,6 +13945,31 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     frame_has_render_ = true;
     ++draw_count_;
+    return true;
+  }
+  if (rect_strip_route) {
+    // Rectangle VS expansion (table and indices built before the bindings).
+    __unsafe_unretained id<MTLBuffer> rect_table_buffer =
+        (__bridge id<MTLBuffer>)rect_index_table_alloc.buffer;
+    __unsafe_unretained id<MTLBuffer> rect_indices_buffer =
+        (__bridge id<MTLBuffer>)rect_host_indices_alloc.buffer;
+    __unsafe_unretained id<MTLBuffer> rect_srv_table_buffer =
+        (__bridge id<MTLBuffer>)rect_srv_table_alloc.buffer;
+    use_resource(rect_table_buffer, MTLResourceUsageRead);
+    use_resource(rect_indices_buffer, MTLResourceUsageRead);
+    use_resource(rect_srv_table_buffer, MTLResourceUsageRead);
+    ir_draw_indexed(MTLPrimitiveTypeTriangleStrip, rect_host_index_count,
+                    MTLIndexTypeUInt32, rect_indices_buffer,
+                    rect_host_indices_alloc.offset, /*instanceCount=*/1,
+                    /*baseVertex=*/0, /*baseInstance=*/0);
+    mark_raster_targets_written();
+    // Returns before the common tail, like the fan path.
+    if (memexport_draw || memexport_raster_routed) {
+      publish_memexport_ranges();
+    }
+    frame_has_render_ = true;
+    ++draw_count_;
+    ++draws_since_commit_;
     return true;
   }
   if (pp_routed) {
