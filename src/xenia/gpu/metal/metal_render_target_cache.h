@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <vector>
 
@@ -153,6 +154,17 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // `depth_bound` (both planes).
   bool FlushPendingClearLoads(const void* command_buffer,
                               uint32_t bound_color_mask, bool depth_bound);
+  // Whether FlushPendingClearLoads with these arguments would encode anything.
+  bool HasPendingClearLoadsOutside(uint32_t bound_color_mask,
+                                   bool depth_bound) const {
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (pending_clear_load_[i + 1u].valid &&
+          !(bound_color_mask & (1u << i))) {
+        return true;
+      }
+    }
+    return pending_clear_load_[0].valid && !depth_bound;
+  }
   // Pass census: does any tile of the resolve span [edram_base, rows x
   // row_length_used at pitch_tiles) belong to a render target in the
   // accumulated (currently bound) attachment set? Ownership-truth query, no
@@ -402,6 +414,19 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // early GPU-page-faults when those draws execute. The command processor calls
   // this only after the frame command buffer has completed (commit + wait).
   void DrainDeferredReleases(uint64_t completed_submission);
+  // Consulted before a deferred texture is freed: returns true when a texture
+  // cache bridge still named it (and was retired just now). The texture is
+  // then held until the CURRENT encoding submission completes, since draws
+  // encoded after the replacement may have sampled it through that bridge.
+  // Optional Private-texture allocator for resolve snapshots (texture heaps
+  // on discrete AMD GPUs): returns a retained id<MTLTexture> or nullptr.
+  // Snapshot releases already wait for their submission (deferred list).
+  void SetSnapshotTextureAllocator(std::function<void*(void*)> allocator) {
+    snapshot_texture_allocator_ = std::move(allocator);
+  }
+  void SetDeferredReleaseGuard(std::function<bool(void*)> guard) {
+    deferred_release_guard_ = std::move(guard);
+  }
 
   // Cache-clear release (implement-metal-cache-clearing step 5).
   //
@@ -1171,6 +1196,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // by DrainDeferredReleases() once the submissions encoded against them
   // complete (tagged with the last submission that may reference them).
   std::vector<std::pair<uint64_t, void*>> deferred_texture_releases_;
+  std::function<bool(void*)> deferred_release_guard_;
+  std::function<void*(void*)> snapshot_texture_allocator_;
 
   // Scratch for GetResolveCopyRectanglesToDump.
   std::vector<ResolveCopyDumpRectangle> resolve_dump_rectangles_;

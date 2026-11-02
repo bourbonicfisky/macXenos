@@ -25,6 +25,7 @@
 #include "xenia/gpu/shader_interpreter.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/host_tessellator.h"
+#include "xenia/gpu/metal/metal_flat_index_map.h"
 #include "xenia/gpu/metal/metal_graphics_system.h"
 #include "xenia/gpu/metal/metal_pass_census.h"
 #include "xenia/gpu/metal/metal_auto_trace_trigger.h"
@@ -383,6 +384,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // the open pass's attachments.
   void EndRenderEncoder(metal::MetalPassEndReason reason, uint32_t detail = 0,
                         bool resolve_touches_pass = false);
+  // Render passes begin and end on the encoder thread (see
+  // MetalEncodeStream::BeginRenderPass).
+  bool DeferredPassLifecycle() const;
+  // Waits for an undrained deferred pass end (pass_end_undrained_).
+  void DrainUndrainedPassEnd();
   // XE_METAL_PASS_CENSUS=1 (exact-1, default OFF): observational draw-pass
   // census (reduce-metal-draw-pass-traffic task 0.1).
   static bool PassCensusEnabled();
@@ -415,6 +421,24 @@ class MetalCommandProcessor : public CommandProcessor {
   // copies guest RAM [offset, offset+length) into a staging buffer and
   // encodes a blit into the shared buffer on the open frame command buffer.
   uint64_t StageHazardUpload(uint32_t offset, uint32_t length);
+  // Discrete shared-memory mirror (MetalSharedMemory::is_discrete_mirror):
+  // copies a CPU-mirror range into the VRAM copy with a blit on the side
+  // command buffer, which runs ahead of the open submission's draws.
+  void EncodeDiscreteMirrorUpload(uint32_t offset, uint32_t length);
+  void EndDiscreteUploadBlit();
+  // At commit: blits this submission's GPU-produced ranges (writebacks,
+  // memexports) from the VRAM copy back into the CPU mirror, so publication
+  // and lazy reads after the submission completes see them.
+  void EncodeDiscreteMirrorReadback(void* command_buffer, uint64_t submission);
+  void NoteDiscreteProducedRange(uint32_t start, uint32_t length) {
+    if (discrete_mirror_ && length) {
+      discrete_produced_ranges_.emplace_back(start, length);
+    }
+  }
+  // A lazily published resolve: the CPU rarely reads it, so it stays in VRAM
+  // and is fetched on demand (MetalSharedMemory::EnsureCpuCurrent) unless an
+  // earlier fetch made its base hot.
+  void NoteDiscreteProducedResolve(uint32_t start, uint32_t length);
 
   // Depth-resolve bridge: runs a pass that samples the Depth32Float depth
   // texture (as depth2d) and writes its value into the R32Float snapshot
@@ -500,6 +524,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // prerequisite for the MSC geometry-emulation path that expands
   // rectangle/point/quad lists. Set in InitializeDrawResources.
   bool mesh_shader_supported_ = false;
+  // Rectangle lists expanded in the vertex shader (two-triangle strips,
+  // HostVertexShaderType::kRectangleListAsTriangleStrip) instead of MSC
+  // geometry emulation: GPUs other than Apple's (metal_rect_vs_expansion).
+  bool rect_vs_expansion_ = false;
   // Auto-indexed quad lists become triangle lists through the shared
   // primitive processor instead of MSC geometry emulation: the mesh-shader
   // quad expansion streaks Red Dead's foliage on AMD (RX 6900 XT, 2026-10-10).
@@ -523,7 +551,41 @@ class MetalCommandProcessor : public CommandProcessor {
   // frame into passes.
   void* frame_command_buffer_ = nullptr;
   void* frame_render_encoder_ = nullptr;
+  // 4 MiB GPU-zeroed buffer for heap fitted-snapshot views (retained).
+  void* snapshot_zero_buffer_ = nullptr;
   bool frame_open_ = false;  // a render encoder is currently open.
+  // The open pass was begun on the encoder thread (MetalEncodeStream::
+  // BeginRenderPass): frame_render_encoder_ is then a token, not an encoder.
+  bool frame_encoder_deferred_ = false;
+  // A deferred pass was ended without a Drain (the next pass begins on the
+  // encoder thread too); the frame command buffer must not be used directly
+  // until DrainUndrainedPassEnd().
+  bool pass_end_undrained_ = false;
+  // Set while BeginFrameEncoder ends the open pass to begin the next one.
+  bool ending_for_next_pass_ = false;
+  // IssueDraw's texture binding memo (XE_METAL_BIND_MEMO).
+  struct BindMemo {
+    struct Key {
+      const void* vertex_shader;
+      const void* pixel_shader;
+      uint32_t route_mask, flags, scale, pending_writebacks, pending_memexports,
+          pad;
+      uint64_t submission, binding_generation, registry_epoch,
+          serve_generation, authority_sequence;
+    };
+    bool valid = false;
+    Key key{};
+    // Fetch constants the memo's shaders read (cached per shader pair).
+    const void* mask_vertex_shader = nullptr;
+    const void* mask_pixel_shader = nullptr;
+    uint32_t fetch_mask = 0;
+    std::vector<uint32_t> indices[2];  // vertex, pixel descriptor indices
+    std::vector<void*> active;         // the residency list they declared
+    uint64_t hits = 0, misses = 0, verified = 0, mismatches = 0;
+  } bind_memo_;
+  uint32_t bind_memo_fetch_written_ = 0;
+  // marshal_desc_indices builds each stage's indices here (vertex, pixel).
+  std::vector<uint32_t> bind_index_scratch_[2];
   // Hot-path render-encoder calls (direct, or recorded and replayed on the
   // encoder thread; XE_METAL_ENCODE_THREAD). Drained before the command
   // processor ends or otherwise touches frame_render_encoder_ directly.
@@ -539,7 +601,19 @@ class MetalCommandProcessor : public CommandProcessor {
   // same submission id.
   void* side_command_buffer_ = nullptr;
   void* PrepareSideTransferCommandBuffer();
+  void* EnsureSideCommandBuffer();
+  bool discrete_mirror_ = false;
+  void* discrete_upload_blit_ = nullptr;  // id<MTLBlitCommandEncoder>, retained
+  std::vector<std::pair<uint32_t, uint32_t>> discrete_produced_ranges_;
+  uint64_t discrete_upload_blits_ = 0, discrete_upload_bytes_ = 0;
+  uint64_t discrete_readback_blits_ = 0, discrete_readback_bytes_ = 0;
+  uint64_t discrete_deferred_ranges_ = 0;
   uint64_t direct_index_draws_ = 0;  // guest indices swapped by the VS
+  // Texture heaps: heaps declared on the open encoder and for which stages.
+  uint32_t encoder_heaps_declared_ = 0;
+  uint32_t encoder_heap_stages_ = 0;
+  uint64_t heap_declarations_ = 0, heap_skipped_declarations_ = 0;
+  uint64_t texture_declarations_ = 0;
   // Fetch constants written since the shared texture cache last parsed
   // them (bit = fetch constant index). Set by WriteRegister, consumed by the
   // draw prep: a draw whose fetch constants did not change since the previous
@@ -580,7 +654,7 @@ class MetalCommandProcessor : public CommandProcessor {
   // a pass boundary between blended draws moves colour LSBs) while planes the
   // key never touches stay unbound. Bounded by the number of attachment
   // configurations a title uses.
-  std::unordered_map<uint64_t, uint32_t> pass_learned_use_;
+  MetalFlatIndexMap pass_learned_use_;
   // The learned-set signature of the open pass and of the pass the next draw
   // opens: the attachment key mixed with the pass's first draw's shader pair,
   // so passes of one key that differ in content (a stencil-masked UI pass and
@@ -1242,9 +1316,42 @@ class MetalCommandProcessor : public CommandProcessor {
     size_t writebacks = ~size_t(0);
     size_t memexports = ~size_t(0);
     bool trace_open = false;
-    // hash -> exact key (shader pointers, bound mask, bound fetch words).
-    std::unordered_map<uint64_t, std::vector<uint32_t>> entries;
+    // hash -> exact key (shader pointers, bound mask, bound fetch words):
+    // index maps the hash to a span of key_pool. Flat so clearing keeps the
+    // storage (the node-per-insert map was ~1% of the Mac Pro CP thread).
+    struct KeySpan {
+      uint32_t offset;
+      uint32_t length;
+    };
+    MetalFlatIndexMap index;
+    std::vector<KeySpan> spans;
+    std::vector<uint32_t> key_pool;
     std::vector<uint32_t> key_scratch;
+    bool Empty() const { return spans.empty(); }
+    void Clear() {
+      index.Clear();
+      spans.clear();
+      key_pool.clear();
+    }
+    bool Contains(uint64_t hash, const std::vector<uint32_t>& key) {
+      const uint32_t* i = index.Find(hash);
+      if (!i) {
+        return false;
+      }
+      const KeySpan& span = spans[*i];
+      return span.length == key.size() &&
+             std::equal(key.begin(), key.end(),
+                        key_pool.begin() + span.offset);
+    }
+    void Insert(uint64_t hash, const std::vector<uint32_t>& key) {
+      // Overwritten keys stay in the pool until the next clear; bound it.
+      if (key_pool.size() + key.size() > (size_t(1) << 20)) {
+        Clear();
+      }
+      spans.push_back({uint32_t(key_pool.size()), uint32_t(key.size())});
+      key_pool.insert(key_pool.end(), key.begin(), key.end());
+      index.Insert(hash, uint32_t(spans.size() - 1), true);
+    }
     uint64_t hits = 0, misses = 0, inserts = 0, clears = 0;
     uint64_t verify_checked = 0, verify_mismatches = 0;
   };

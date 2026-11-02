@@ -45,6 +45,10 @@ bool MetalPrimitiveProcessor::Initialize(bool convert_quad_lists) {
   //     widens such buffers to 32-bit (kHostConverted, 0x0000FFFF), which the
   //     command processor now consumes. Buffers without 0xFFFF are untouched
   //     (kGuestDMA, byte-identical to before).
+  //   host_primitive_reset_strips_only = true (2026-11-01)
+  //     Metal restarts strips only: 0xFFFF in a triangle or line list draws
+  //     as a vertex (probed on M1 Max, RX 6900 XT, Radeon Pro 580X), so those
+  //     draws skip the scan.
   // PP2-auto: triangle_fans_supported = false enables shared fan-to-list
   // conversion. Only auto-indexed fans are routed into Process by the command
   // processor (kHostBuiltinForAuto); DMA/reset fans stay on the inline path.
@@ -59,7 +63,8 @@ bool MetalPrimitiveProcessor::Initialize(bool convert_quad_lists) {
       /*point_sprites_supported_without_vs_expansion=*/true,
       /*rectangle_lists_supported_without_vs_expansion=*/true,
       /*host_primitive_reset_always_enabled=*/true,
-      /*convert_triangle_fans_first_provoking=*/true);
+      /*convert_triangle_fans_first_provoking=*/true,
+      /*host_primitive_reset_strips_only=*/true);
 }
 
 bool MetalPrimitiveProcessor::InitializeBuiltinIndexBuffer(

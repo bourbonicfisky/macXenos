@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_PIPELINE_CACHE_H_
 
 #include <chrono>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -307,6 +308,9 @@ class MetalPipelineCache {
   std::condition_variable async_done_cv_;
   std::deque<std::shared_ptr<AsyncPipelineJob>> async_queue_;
   std::vector<std::shared_ptr<AsyncPipelineJob>> async_done_;
+  // Set with async_done_ (under async_mutex_) so DrainAsyncPipelines, called
+  // for every draw, skips the lock while no build has finished.
+  std::atomic<bool> async_done_pending_{false};
   bool async_stop_ = false;
   // GPU thread only.
   std::unordered_map<uint64_t, std::shared_ptr<AsyncPipelineJob>>

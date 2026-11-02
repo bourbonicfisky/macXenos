@@ -52,6 +52,10 @@ class MetalTextureCache;
 // prep-time and serve-time can never disagree.
 class MetalSharedTextureCache : public TextureCache {
  public:
+  // Bumped by every change that can alter GetServedSlot's answer for an
+  // unchanged fetch constant: loads, binding updates, views, slot releases,
+  // a new submission, faults, and any prep that left a binding outdated.
+  uint64_t serve_generation() const { return serve_generation_; }
   // Fault attribution: the last eight loads encoded (base page, extent,
   // levels, side/frame buffer, submission), newest last.
   struct RecentLoad {
@@ -258,6 +262,8 @@ class MetalSharedTextureCache : public TextureCache {
   void UpdateTextureBindingsImpl(uint32_t fetch_constant_mask) override;
 
  private:
+  // Dedicated-VRAM GPUs: texture memory limits sized from the working set.
+  void SizeHostMemoryLimitsForDevice();
   class MetalTexture;
 
   // Per-fetch-constant slot state mirroring the base texture_bindings_:
@@ -314,6 +320,7 @@ class MetalSharedTextureCache : public TextureCache {
   std::function<bool(uint64_t)> submission_fault_query_;
   std::function<uint64_t()> completed_submission_provider_;
   uint64_t last_begun_submission_ = 0;
+  uint64_t serve_generation_ = 0;
 
   // Private scratch ring for the buffer-writing families: a load shader
   // untiles into a linear scratch region, then a blit copies it into the

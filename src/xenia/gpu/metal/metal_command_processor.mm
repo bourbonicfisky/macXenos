@@ -1190,6 +1190,37 @@ bool MapPrimitiveType(xenos::PrimitiveType type, MTLPrimitiveType* out) {
   }
 }
 
+// XE_METAL_HEAP_MISS_LOG=1: names each distinct texture that the
+// heap path still declares per draw (diagnostic only).
+void LogHeapMissTexture(void* tex) {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_METAL_HEAP_MISS_LOG");
+    return v && v[0] == '1';
+  }();
+  if (!enabled) {
+    return;
+  }
+  static std::unordered_set<void*> seen;
+  if (seen.size() >= 256 || !seen.insert(tex).second) {
+    return;
+  }
+  __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tex;
+  __unsafe_unretained id<MTLTexture> root = t;
+  uint32_t depth = 0;
+  while (root.parentTexture && depth < 4) {
+    root = root.parentTexture;
+    ++depth;
+  }
+  XELOGI(
+      "MetalHeapMiss: {} '{}' root '{}' depth {} {}x{}x{} fmt {} type {} "
+      "storage {} usage {:X} samples {} buffer {}",
+      fmt::ptr(tex), t.label ? [t.label UTF8String] : "",
+      root.label ? [root.label UTF8String] : "", depth, uint32_t(root.width),
+      uint32_t(root.height), uint32_t(root.arrayLength), uint32_t(root.pixelFormat),
+      uint32_t(root.textureType), uint32_t(root.storageMode), uint32_t(root.usage),
+      uint32_t(root.sampleCount), root.buffer ? 1 : 0);
+}
+
 // SwapIndicesInto (guest index byte-swap into the host arena) and IsPp1Routable
 // (the routing predicate) are the shared production contracts, defined once in
 // metal_primitive_processor.h so the device-free conformance test exercises the
@@ -1419,7 +1450,7 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
       !memory_ || !length) {
     return;
   }
-  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
   const uint8_t* contents =
       buffer ? static_cast<const uint8_t*>(buffer.contents) : nullptr;
   if (!contents) {
@@ -1448,6 +1479,7 @@ void MetalCommandProcessor::TracePlaybackWroteMemory(uint32_t base_ptr,
     if (s0 >= s1 || pending_over(s0, s1)) {
       continue;
     }
+    shared_memory_->EnsureCpuCurrent(uint32_t(s0), uint32_t(s1 - s0));
     uint8_t* ram = memory_->TranslatePhysical<uint8_t*>(uint32_t(s0));
     if (!ram) {
       continue;
@@ -1985,6 +2017,142 @@ uint64_t MetalCommandProcessor::StageHazardUpload(uint32_t offset,
   return CurrentEncodingSubmission();
 }
 
+void MetalCommandProcessor::EndDiscreteUploadBlit() {
+  if (!discrete_upload_blit_) {
+    return;
+  }
+  id<MTLBlitCommandEncoder> blit =
+      (__bridge_transfer id<MTLBlitCommandEncoder>)discrete_upload_blit_;
+  discrete_upload_blit_ = nullptr;
+  [blit endEncoding];
+}
+
+// Blit copies on macOS need 4-byte aligned offsets and sizes. Uploads are
+// page pieces and vfetch renames are 4-byte multiples; a stray unaligned
+// edge widens to the enclosing words (the CPU mirror holds the same bytes
+// the GPU copy should, outside GPU-produced spans).
+static inline void AlignBlitRange(uint32_t& offset, uint32_t& length,
+                                  uint64_t limit) {
+  uint64_t start = offset & ~uint64_t(3);
+  uint64_t end = (uint64_t(offset) + length + 3) & ~uint64_t(3);
+  end = std::min(end, limit);
+  offset = uint32_t(start);
+  length = uint32_t(end - start);
+}
+
+void MetalCommandProcessor::EncodeDiscreteMirrorUpload(uint32_t offset,
+                                                       uint32_t length) {
+  id<MTLBuffer> cpu = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
+  id<MTLBuffer> gpu = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  if (!cpu || !gpu || cpu == gpu) {
+    return;
+  }
+  AlignBlitRange(offset, length, gpu.length);
+  if (!length) {
+    return;
+  }
+  if (!frame_command_buffer_ &&
+      !PrepareTransferCommandBuffer(
+          uint32_t(metal::MetalTransferSite::kHazardUpload))) {
+    XELOGE("MetalSharedMemory: no command buffer for a VRAM upload");
+    return;
+  }
+  if (!discrete_upload_blit_) {
+    id<MTLCommandBuffer> side =
+        (__bridge id<MTLCommandBuffer>)EnsureSideCommandBuffer();
+    if (!side) {
+      XELOGE("MetalSharedMemory: no side command buffer for a VRAM upload");
+      return;
+    }
+    id<MTLBlitCommandEncoder> blit = [side blitCommandEncoder];
+    if (!blit) {
+      return;
+    }
+    blit.label = @"shared memory upload";
+    discrete_upload_blit_ = (__bridge_retained void*)blit;
+  }
+  id<MTLBlitCommandEncoder> blit =
+      (__bridge id<MTLBlitCommandEncoder>)discrete_upload_blit_;
+  [blit copyFromBuffer:cpu
+          sourceOffset:offset
+              toBuffer:gpu
+     destinationOffset:offset
+                  size:length];
+  ++discrete_upload_blits_;
+  discrete_upload_bytes_ += length;
+}
+
+void MetalCommandProcessor::NoteDiscreteProducedResolve(uint32_t start,
+                                                        uint32_t length) {
+  if (!discrete_mirror_ || !length) {
+    return;
+  }
+  if (MetalSharedMemory::OnDemandReadbackEnabled() && LazyPublishEnabled() &&
+      !shared_memory_->IsVramHot(start)) {
+    shared_memory_->MarkVramNewer(start, length, CurrentEncodingSubmission(),
+                                  /*eager=*/false);
+    ++discrete_deferred_ranges_;
+    return;
+  }
+  discrete_produced_ranges_.emplace_back(start, length);
+}
+
+void MetalCommandProcessor::EncodeDiscreteMirrorReadback(void* command_buffer,
+                                                         uint64_t submission) {
+  if (discrete_produced_ranges_.empty()) {
+    return;
+  }
+  id<MTLBuffer> cpu = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
+  id<MTLBuffer> gpu = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  if (!cpu || !gpu || cpu == gpu) {
+    discrete_produced_ranges_.clear();
+    return;
+  }
+  // Merge overlapping and touching ranges (resolves to one target repeat).
+  auto& ranges = discrete_produced_ranges_;
+  std::sort(ranges.begin(), ranges.end());
+  std::vector<std::pair<uint32_t, uint32_t>> merged;
+  merged.reserve(ranges.size());
+  for (const auto& r : ranges) {
+    uint64_t start = r.first, end = uint64_t(r.first) + r.second;
+    if (!merged.empty() &&
+        start <= uint64_t(merged.back().first) + merged.back().second) {
+      uint64_t back_end = uint64_t(merged.back().first) + merged.back().second;
+      merged.back().second = uint32_t(std::max(back_end, end) - merged.back().first);
+    } else {
+      merged.emplace_back(uint32_t(start), uint32_t(end - start));
+    }
+  }
+  ranges.clear();
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+  if (!blit) {
+    return;
+  }
+  blit.label = @"shared memory readback";
+  for (auto r : merged) {
+    uint32_t offset = r.first, length = r.second;
+    AlignBlitRange(offset, length, gpu.length);
+    if (!length) {
+      continue;
+    }
+    [blit copyFromBuffer:gpu
+            sourceOffset:offset
+                toBuffer:cpu
+       destinationOffset:offset
+                    size:length];
+    // An upload over these bytes while the readback is in flight must not
+    // memcpy into the CPU mirror the blit is about to overwrite: as a
+    // consumed range of this submission it takes the staged-blit path.
+    shared_memory_->NoteGpuWriteInFlight(offset, length, submission);
+    // An on-demand fetch overlapping it waits for this submission first.
+    shared_memory_->MarkVramNewer(offset, length, submission, /*eager=*/true);
+    ++discrete_readback_blits_;
+    discrete_readback_bytes_ += length;
+  }
+  [blit endEncoding];
+}
+
 void* MetalCommandProcessor::PrepareTransferCommandBuffer(uint32_t site) {
   // A transfer is a pass boundary: close the open render encoder; ensure the
   // frame command buffer exists so the blits order before the next pass.
@@ -2018,6 +2186,7 @@ void MetalCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
     const uint32_t slot = (index - kFetchBase) / 6u;
     fetch_constant_dirty_mask_ |= 1u << slot;
     fetch_plain_known_mask_ &= ~(1u << slot);
+    bind_memo_fetch_written_ |= 1u << slot;
   }
   CommandProcessor::WriteRegister(index, value);
 }
@@ -2037,10 +2206,19 @@ void MetalCommandProcessor::OnRegistersRestoredRaw(uint32_t first_register,
        slot <= (end - 1u - kFetchBase) / 6u; ++slot) {
     fetch_constant_dirty_mask_ |= 1u << slot;
     fetch_plain_known_mask_ &= ~(1u << slot);
+    bind_memo_fetch_written_ |= 1u << slot;
   }
 }
 
 void* MetalCommandProcessor::PrepareSideTransferCommandBuffer() {
+  // The caller encodes its own pass on the side buffer: an open discrete
+  // mirror upload blit must end first (encode order is execution order, so
+  // the load still sees the bytes uploaded before it).
+  EndDiscreteUploadBlit();
+  return EnsureSideCommandBuffer();
+}
+
+void* MetalCommandProcessor::EnsureSideCommandBuffer() {
   // No pass boundary: the side buffer is committed ahead of the frame one
   // (CommitSideCommandBuffer), so a load encoded here executes before every
   // draw of this submission. Only valid while a frame command buffer exists,
@@ -2068,6 +2246,7 @@ void* MetalCommandProcessor::PrepareSideTransferCommandBuffer() {
 
 void MetalCommandProcessor::CommitSideCommandBuffer(uint64_t submission,
                                                     uint64_t submit_epoch) {
+  EndDiscreteUploadBlit();
   if (!side_command_buffer_) {
     return;
   }
@@ -2360,6 +2539,9 @@ bool MetalCommandProcessor::SetupContext() {
     XELOGE("MetalCommandProcessor: shared memory init failed");
     return false;
   }
+  // Not validated under frame-trace capture/playback (they restore and
+  // record the CPU mirror directly); a live-play setting.
+  discrete_mirror_ = shared_memory_->is_discrete_mirror();
   // Intra-frame rewrite hazard: commit + wait the open frame so already-
   // encoded draws consume the pre-rewrite bytes (also resets the consumed-
   // range set). Runs from inside RequestConsumedRange, which is only called
@@ -2378,6 +2560,16 @@ bool MetalCommandProcessor::SetupContext() {
   shared_memory_->SetStagedUploadCallback(
       [this](uint32_t offset, uint32_t length) {
         return StageHazardUpload(offset, length);
+      });
+  shared_memory_->SetCpuWriteCallback(
+      [this](uint32_t offset, uint32_t length) {
+        EncodeDiscreteMirrorUpload(offset, length);
+      });
+  shared_memory_->SetVramFetchHooks(
+      [this]() { return CurrentEncodingSubmission(); },
+      [this]() { return completed_submission_.load(std::memory_order_acquire); },
+      [this](uint64_t submission) {
+        return WaitForSubmission(submission, 4000, nullptr);
       });
   shared_memory_->SetCompletedSubmissionProvider([this]() {
     return completed_submission_.load(std::memory_order_acquire);
@@ -2470,7 +2662,7 @@ bool MetalCommandProcessor::SetupContext() {
             std::getenv("XE_METAL_LAZY_ORDER_CENSUS") != nullptr;
         if (s_skip_census && !out->empty() && lazy_read_callback_handle_) {
           id<MTLBuffer> buffer =
-              (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+              (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
           const uint8_t* contents =
               buffer ? static_cast<const uint8_t*>(buffer.contents) : nullptr;
           static uint64_t s_unowned_spans = 0, s_realized = 0;
@@ -2545,6 +2737,26 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
   // the geometry-emulation output can be compared against no-geometry.
   if (std::getenv("XE_METAL_DISABLE_GEO")) {
     mesh_shader_supported_ = false;
+  }
+  // Rectangle lists in the vertex shader on non-Apple GPUs: the Radeon Pro
+  // 580X's shader compiler (Polaris) crashes building every MSC geometry
+  // emulation pipeline (MTLCompilerService segfault in register allocation,
+  // XPC_ERROR_CONNECTION_INTERRUPTED), so all rectangle lists were dropped
+  // there. Pre-Metal 3 GPUs only: on the RX 6900 XT geometry emulation
+  // compiles and the per-draw index tables cost Mafia II ~9% (80.6 vs 72.3
+  // fps). XE_METAL_RECT_VS=0/1 overrides.
+  bool metal3 = false;
+  if (@available(macOS 13.0, *)) {
+    metal3 = [device supportsFamily:MTLGPUFamilyMetal3];
+  }
+  rect_vs_expansion_ =
+      ![device supportsFamily:MTLGPUFamilyApple7] && !metal3;
+  if (const char* v = std::getenv("XE_METAL_RECT_VS")) {
+    rect_vs_expansion_ = v[0] == '1';
+  }
+  if (rect_vs_expansion_) {
+    XELOGI("MetalCommandProcessor: rectangle lists expand in the vertex "
+           "shader");
   }
 
 
@@ -2662,6 +2874,18 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       device_ptr, memory_, shared_memory_.get(), view_bindless_heap_,
       kViewBindlessHeapSlots);
   texture_cache_->SetTraceWriter(&trace_writer_);
+  if (render_target_cache_) {
+    render_target_cache_->SetDeferredReleaseGuard([this](void* texture) {
+      return texture_cache_ &&
+             texture_cache_->RetireResolvedTargetsNaming(texture);
+    });
+  }
+  texture_cache_->EnableTextureHeaps();
+  if (render_target_cache_ && texture_cache_->texture_heaps_enabled()) {
+    render_target_cache_->SetSnapshotTextureAllocator([this](void* desc) {
+      return texture_cache_ ? texture_cache_->NewHeapTexture(desc) : nullptr;
+    });
+  }
   texture_cache_->SetDrawResolutionScale(draw_resolution_scale_x_,
                                          draw_resolution_scale_y_);
   {
@@ -2696,6 +2920,66 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
              destinationSlice:0
              destinationLevel:0
             destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        return true;
+      });
+  // Heap-allocated fitted snapshot views (discrete GPUs) start zeroed: blit
+  // row strips from one 4 MiB GPU-zeroed buffer, ordered before the fit blit.
+  // Depth/stencil formats take the CPU-zeroed Shared fallback.
+  texture_cache_->SetSnapshotZeroer(
+      [this](void* texture, uint32_t width, uint32_t height) {
+        id<MTLTexture> dst = (__bridge id<MTLTexture>)texture;
+        if (!dst || !width || !height) {
+          return false;
+        }
+        switch (dst.pixelFormat) {
+          case MTLPixelFormatDepth16Unorm:
+          case MTLPixelFormatDepth32Float:
+          case MTLPixelFormatDepth32Float_Stencil8:
+          case MTLPixelFormatStencil8:
+            return false;
+          default:
+            break;
+        }
+        constexpr NSUInteger kZeroBytes = NSUInteger(4) << 20;
+        const NSUInteger row_bytes =
+            NSUInteger(width) * AttachmentBytesPerPixel(dst.pixelFormat);
+        if (row_bytes > kZeroBytes) {
+          return false;
+        }
+        id<MTLCommandBuffer> cb =
+            (__bridge id<MTLCommandBuffer>)PrepareTransferCommandBuffer(
+                uint32_t(metal::MetalTransferSite::kSnapshotFit));
+        if (!cb) {
+          return false;
+        }
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        blit.label = @"texcache:snapshot-zero";
+        if (!snapshot_zero_buffer_) {
+          id<MTLBuffer> zero =
+              [dst.device newBufferWithLength:kZeroBytes
+                                      options:MTLResourceStorageModePrivate];
+          if (!zero) {
+            [blit endEncoding];
+            return false;
+          }
+          [blit fillBuffer:zero range:NSMakeRange(0, kZeroBytes) value:0];
+          snapshot_zero_buffer_ = (__bridge_retained void*)zero;
+        }
+        id<MTLBuffer> zero = (__bridge id<MTLBuffer>)snapshot_zero_buffer_;
+        const uint32_t strip = uint32_t(kZeroBytes / row_bytes);
+        for (uint32_t y = 0; y < height; y += strip) {
+          const uint32_t rows = std::min(strip, height - y);
+          [blit copyFromBuffer:zero
+                     sourceOffset:0
+                sourceBytesPerRow:row_bytes
+              sourceBytesPerImage:row_bytes * rows
+                       sourceSize:MTLSizeMake(width, rows, 1)
+                        toTexture:dst
+                 destinationSlice:0
+                 destinationLevel:0
+                destinationOrigin:MTLOriginMake(0, y, 0)];
+        }
         [blit endEncoding];
         return true;
       });
@@ -2785,6 +3069,7 @@ void MetalCommandProcessor::ShutdownDrawResources() {
   release(null_buffer_);
   release(null_texture_);
   release(null_sampler_);
+  release(snapshot_zero_buffer_);
   for (auto& pair : depth_stencil_states_) {
     release(pair.second);
   }
@@ -3382,15 +3667,23 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     }
     // Pool unavailable: keep the encoder rather than rebuilding it forever.
   }
+  // A render-to-render pass end below skips its Drain; any return before the
+  // next pass is recorded must still wait for it.
+  struct UndrainedPassEndGuard {
+    MetalCommandProcessor* cp;
+    ~UndrainedPassEndGuard() { cp->DrainUndrainedPassEnd(); }
+  } undrained_pass_end_guard{this};
   if (frame_open_) {
     if (reuse_encoder) {
       return frame_render_encoder_;
     }
+    ending_for_next_pass_ = true;
     EndRenderEncoder(
         zpd_rebuild ? metal::MetalPassEndReason::kZpdRebuild
         : (encoder_attachment_key_ == want_key && !attachments_covered)
             ? metal::MetalPassEndReason::kAttachmentNeeded
             : metal::MetalPassEndReason::kAttachmentKey);
+    ending_for_next_pass_ = false;
   }
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
@@ -3475,6 +3768,11 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
     }
     const bool depth_both_planes =
         depth != nullptr && bind_depth_plane && bind_stencil_plane;
+    if (pass_end_undrained_ &&
+        render_target_cache_->HasPendingClearLoadsOutside(bound_color_mask,
+                                                          depth_both_planes)) {
+      DrainUndrainedPassEnd();
+    }
     if (!render_target_cache_->FlushPendingClearLoads(
             (__bridge const void*)command_buffer, bound_color_mask,
             depth_both_planes)) {
@@ -3748,8 +4046,16 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
         draw_count_,
         [this] { return render_target_cache_->DescribeCurrentAttachments(); });
   }
+  const bool deferred_pass = DeferredPassLifecycle();
+  MTLRenderPassDescriptor* final_pass =
+      metal::MetalApplyXenosSamplePositions(pass);
+  // Deferred: the encoder thread creates (and later ends) the encoder; the
+  // command processor records into the stream only.
   id<MTLRenderCommandEncoder> encoder =
-      [command_buffer renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
+      deferred_pass
+          ? nil
+          : [command_buffer renderCommandEncoderWithDescriptor:final_pass];
+  NSString* encoder_label = nil;
   // Fault attribution: names this encoder in per-encoder execution status.
   // Formatting an NSString per pass was ~2% of RDR's command-processor
   // thread (CFString formatting, ~100 passes a frame); the label is only
@@ -3761,12 +4067,18 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
            std::getenv("MTL_CAPTURE_ENABLED") != nullptr;
   }();
   if (s_encoder_labels) {
-    encoder.label = [NSString
+    encoder_label = [NSString
         stringWithFormat:@"draws@%u rt=%016llX msaa=%u", draw_count_,
                          (unsigned long long)want_key,
                          memexport_pass_
                              ? 1u
                              : render_target_cache_->current_msaa_samples()];
+    encoder.label = encoder_label;
+  }
+  if (deferred_pass) {
+    encode_stream_->BeginRenderPass(command_buffer, final_pass, encoder_label);
+    // The previous pass's end and this begin are ordered in the stream.
+    pass_end_undrained_ = false;
   }
   // The label's rt= value is a one-way rolling hash of the accumulated
   // attachment set (current_attachment_key), so a recurring hash in fault
@@ -3781,7 +4093,11 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
              render_target_cache_->DescribeCurrentAttachments());
     }
   }
-  [encoder setCullMode:MTLCullModeNone];
+  if (deferred_pass) {
+    encode_stream_->SetCullMode(MTLCullModeNone);
+  } else {
+    [encoder setCullMode:MTLCullModeNone];
+  }
   // Residency sweep: make EVERY texture any live bindless slot can reach
   // resident on this encoder in one batched call. The per-draw useResource
   // loop covers only that draw's own fetches; a shader indexing any OTHER
@@ -3797,7 +4113,8 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
       residency_set_dirty_ = false;
       ++residency_commits_;
     }
-  } else if (texture_cache_ && ResidentSweepEnabled(encoder.device)) {
+  } else if (!deferred_pass && texture_cache_ &&
+             ResidentSweepEnabled(encoder.device)) {
     resident_sweep_scratch_.clear();
     texture_cache_->AppendAllTextures(resident_sweep_scratch_);
     if (shared_texture_cache_) {
@@ -3817,9 +4134,16 @@ void* MetalCommandProcessor::BeginFrameEncoder() {
                      stages:sweep_stages];
     }
   }
-  frame_render_encoder_ = (__bridge_retained void*)encoder;
+  if (deferred_pass) {
+    // A non-null token: callers only test the returned encoder for null.
+    static char s_deferred_encoder_token;
+    frame_render_encoder_ = &s_deferred_encoder_token;
+  } else {
+    frame_render_encoder_ = (__bridge_retained void*)encoder;
+    encode_stream_->SetEncoder(encoder);
+  }
+  frame_encoder_deferred_ = deferred_pass;
   frame_open_ = true;
-  encode_stream_->SetEncoder(encoder);
   encoder_attachment_key_ = want_key;
   {
     // The Load + Store set this pass binds (scratch DontCare attachments of
@@ -4020,11 +4344,22 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   if (!shared_memory_ || !memory_) {
     return;
   }
-  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+  id<MTLBuffer> buffer = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
   const uint8_t* contents =
       buffer ? static_cast<const uint8_t*>(buffer.contents) : nullptr;
   if (!contents) {
     return;
+  }
+  // Discrete mirror: bring the faulting pages' VRAM-only bytes into the CPU
+  // mirror first (OnAccess copies owner coverage from it, page by page).
+  if (discrete_mirror_) {
+    const uint32_t page_mask = metal::MetalLazyPublication::kPageSize - 1;
+    const uint32_t page_start = physical_address_start & ~page_mask;
+    const uint64_t page_end =
+        (uint64_t(physical_address_start) + length + page_mask) &
+        ~uint64_t(page_mask);
+    shared_memory_->EnsureCpuCurrent(page_start,
+                                     uint32_t(page_end - page_start));
   }
   // A record still inside the open command buffer cannot be waited for from
   // the faulting thread (committing is the GPU thread's job); the read then
@@ -4217,6 +4552,7 @@ void MetalCommandProcessor::RegisterGpuResidentResolve(uint32_t base,
     playback_gpu_written_.emplace_back(base, extent_bytes);
   }
   pending_writebacks_.back().gpu_current = 1u;
+  NoteDiscreteProducedResolve(base, extent_bytes);
   // Mark the destination GPU-written so the shared-memory
   // validity model does not upload guest RAM over the freshly
   // scattered bytes. LEAN marking (validity bits only), NOT the
@@ -5847,6 +6183,8 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
                                              uint32_t detail,
                                              bool resolve_touches_pass) {
   if (!frame_open_) {
+    // Whoever ends a pass is about to use the frame command buffer.
+    DrainUndrainedPassEnd();
     return;
   }
   if (PassCensusEnabled()) {
@@ -5862,6 +6200,23 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
   if (RcCensusEnabled()) {
     ++RcCensus().pass_ends;
   }
+  if (frame_encoder_deferred_) {
+    encode_stream_->EndRenderPass();
+    frame_render_encoder_ = nullptr;
+    frame_encoder_deferred_ = false;
+    frame_open_ = false;
+    encoder_has_zpd_visibility_ = false;
+    // BeginFrameEncoder ending the pass for the next one: that pass's begin
+    // is recorded behind this end, so no wait (its guard drains if it is not).
+    // Every other end hands the command buffer to the command processor.
+    if (ending_for_next_pass_) {
+      encode_stream_->Commit();
+      pass_end_undrained_ = true;
+    } else {
+      encode_stream_->Drain();
+    }
+    return;
+  }
   if (encode_stream_) {
     // Every recorded op of this encoder is replayed before it ends.
     encode_stream_->SetEncoder(nil);
@@ -5876,6 +6231,35 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
   frame_open_ = false;
   encoder_has_zpd_visibility_ = false;
   [encoder endEncoding];
+}
+
+bool MetalCommandProcessor::DeferredPassLifecycle() const {
+  // XE_METAL_ENCODE_PASSES=0 keeps render pass begin/end on the command
+  // processor. Needs the encoder thread, and no per-encoder residency sweep
+  // (it runs on the encoder object at creation): Apple GPUs use the residency
+  // set instead, AMD (no residency set) never sweeps.
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_ENCODE_PASSES");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (!s_enabled || !encode_stream_ || !encode_stream_->deferred()) {
+    return false;
+  }
+  if (residency_set_) {
+    return true;
+  }
+  auto* provider =
+      static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
+  return provider && !ResidentSweepEnabled(
+                         (__bridge id<MTLDevice>)provider->device());
+}
+
+void MetalCommandProcessor::DrainUndrainedPassEnd() {
+  if (!pass_end_undrained_) {
+    return;
+  }
+  pass_end_undrained_ = false;
+  encode_stream_->Drain();
 }
 
 bool MetalCommandProcessor::SeamTimingEnabled() {
@@ -6062,6 +6446,9 @@ void MetalCommandProcessor::EndFrameEncoder(metal::SeamBoundaryReason reason) {
   if (upload_arena_) {
     upload_arena_->MarkSubmission(submission);
   }
+  // Discrete mirror: GPU-produced ranges back to the CPU mirror, last in
+  // this submission (every producer encoder has ended).
+  EncodeDiscreteMirrorReadback((__bridge void*)command_buffer, submission);
   // Side loads first: the queue runs command buffers in commit order, and
   // the frame's draws read what they loaded.
   CommitSideCommandBuffer(submission, submit_epoch);
@@ -7312,7 +7699,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   const bool point_strip_route =
       prim_type == xenos::PrimitiveType::kPointList &&
       PointSpriteVsExpansionEnabled();
-  if (prim_type == xenos::PrimitiveType::kRectangleList) {
+  // Rectangle lists the same way (rect_vs_expansion_): 4 host vertices per
+  // guest rectangle, the vertex shader running the guest program for its 3
+  // vertices. Cleared below for draws that only export memory.
+  bool rect_strip_route =
+      prim_type == xenos::PrimitiveType::kRectangleList && rect_vs_expansion_;
+  if (prim_type == xenos::PrimitiveType::kRectangleList && !rect_strip_route) {
     geometry_type = PipelineGeometryShader::kRectangleList;
   } else if (prim_type == xenos::PrimitiveType::kPointList &&
              !point_strip_route) {
@@ -7568,7 +7960,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // topology (task 4.4).
   if (!use_tessellation_emulation && !use_geometry_emulation &&
       !auto_line_loop_route && !auto_quad_route && !dma_quad_route &&
-      !dma_line_loop_route && !converted_class_route &&
+      !dma_line_loop_route && !converted_class_route && !rect_strip_route &&
       !MapPrimitiveType(prim_type, &mtl_prim)) {
     ++prim_census_[uint32_t(prim_type) & 31][6];
     RecordDrawSkip(MetalDrawSkipReason::kUnsupportedCapability,
@@ -8380,6 +8772,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     memexport_draw = true;
     pixel_shader = nullptr;
     use_geometry_emulation = false;
+    rect_strip_route = false;
     if (!MapPrimitiveType(prim_type, &mtl_prim)) {
       if (s_memexport_log) {
         XELOGW("MetalMemexportSkip draw={} unmappable prim {} for export",
@@ -8573,7 +8966,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             memory_->TranslatePhysical<const uint32_t*>(fetch_base);
         const uint32_t* buf = nullptr;
         if (shared_memory_) {
-          __unsafe_unretained id<MTLBuffer> b = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+          __unsafe_unretained id<MTLBuffer> b = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
           if (b && b.storageMode != MTLStorageModePrivate && b.contents) {
             buf = reinterpret_cast<const uint32_t*>(
                 static_cast<const uint8_t*>(b.contents) + fetch_base);
@@ -9309,6 +9702,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           use_tessellation_emulation ? tess_pp.host_vertex_shader_type
           : point_strip_route
               ? Shader::HostVertexShaderType::kPointListAsTriangleStrip
+          : rect_strip_route
+              ? Shader::HostVertexShaderType::kRectangleListAsTriangleStrip
               : Shader::HostVertexShaderType::kVertex));
   vs_mod_decoded.vertex.interpolator_mask = interpolator_mask;
   vs_mod_decoded.vertex.fill_unwritten_interpolators =
@@ -9706,9 +10101,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
       pending_pass_signature_ = signature;
       if (!s_hysteresis_only) {
-        uint32_t& learned = pass_learned_use_[signature];
-        learned |= used;
-        used = learned & pass_present;
+        uint32_t* learned = pass_learned_use_.Find(signature);
+        if (learned) {
+          *learned |= used;
+          used = *learned & pass_present;
+        } else {
+          pass_learned_use_.Insert(signature, used, false);
+        }
       }
       // A draw that touches nothing present keeps the legacy set (a pass needs
       // an attachment; the census counts how often this happens).
@@ -9905,8 +10304,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         memo.writebacks != pending_writebacks_.size() ||
         memo.memexports != pending_memexports_.size() ||
         memo.trace_open != trace_open) {
-      if (!memo.entries.empty()) {
-        memo.entries.clear();
+      if (!memo.Empty()) {
+        memo.Clear();
         ++memo.clears;
       }
       memo.sequence = memory_authority_sequence_;
@@ -9948,8 +10347,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       hash = (hash ^ v) * 0x100000001b3ull;
     }
     tex_dep_memo_hash = hash;
-    auto it = memo.entries.find(hash);
-    tex_dep_memo_hit = it != memo.entries.end() && it->second == key;
+    tex_dep_memo_hit = memo.Contains(hash, key);
     if (tex_dep_memo_hit) {
       ++memo.hits;
     } else {
@@ -10550,7 +10948,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               authority_decision.selected.size());
         }
       } else if (no_dependency) {
-        memo.entries[tex_dep_memo_hash] = memo.key_scratch;
+        memo.Insert(tex_dep_memo_hash, memo.key_scratch);
         ++memo.inserts;
       }
     }
@@ -10825,6 +11223,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   PrimitiveProcessor::ProcessingResult pp_result{};
   draw_trace_milestone("before-primitive-processor");
   if (primitive_processor_ && !use_geometry_emulation && !point_strip_route &&
+      !rect_strip_route &&
       (IsPp1Routable(regs, prim_type) || auto_fan_route ||
        auto_quad_route || auto_line_loop_route || fixed_reset_strip_route ||
        converted_class_route) &&
@@ -12128,6 +12527,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // sampler bindings share one bindless index space (disjoint indices).
   texture_cache_->ResetActive();
   texture_cache_->lineage_draw_ = trace_draw_index_;  // lineage-probe clock
+  uint32_t marshal_bytes = 0;
+  uint32_t marshal_stage = 0;
   auto marshal_desc_indices = [&](MetalShader* shader,
                                   MetalUploadAllocation* out) -> bool {
     // The cbuffer must cover every FLAT INDEX the translated shader reads:
@@ -12173,10 +12574,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
     const uint32_t count = plan.count;
+    marshal_bytes = count * uint32_t(sizeof(uint32_t));
     if (!ArenaAllocate(count * sizeof(uint32_t), 256, out)) {
       return false;
     }
-    auto* indices = static_cast<uint32_t*>(out->cpu_ptr);
+    // Built in cached memory and copied out once: the arena is
+    // write-combined, so reading it back (the binding memo stores these) is
+    // uncached -- that readback alone was 11% of GTA IV's command processor.
+    std::vector<uint32_t>& scratch = bind_index_scratch_[marshal_stage];
+    scratch.resize(count);
+    uint32_t* indices = scratch.data();
     if (!InitializeMetalDescriptorIndices(plan, indices, count * sizeof(uint32_t))) {
       return false;
     }
@@ -12592,15 +12999,144 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         indices[sb.bindless_descriptor_index] = sampler_slot;
       }
     }
+    if (count) {
+      std::memcpy(out->cpu_ptr, indices, count * sizeof(uint32_t));
+    }
     return true;
   };
   MetalUploadAllocation desc_idx_vertex_alloc{};
   MetalUploadAllocation desc_idx_pixel_alloc{};
   draw_trace_milestone("before-marshal");
-  if (!marshal_desc_indices(vertex_shader, &desc_idx_vertex_alloc) ||
-      !marshal_desc_indices(pixel_shader, &desc_idx_pixel_alloc)) {
-    RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "desc-index-alloc");
-    return true;
+  // Binding memo: a draw whose texture inputs repeat the previous draw's, with
+  // nothing in either texture cache or the producer state changed since,
+  // resolves every binding to the same slots, so the previous index arrays
+  // and residency list are reused (~70% of Burnout's draws: command
+  // processor 29-31 -> 27-28 ms/frame on the Mac Pro; Mafia II, GTA IV and
+  // Apple neutral). The key holds the inputs and the state AFTER the
+  // previous draw's own resolution. Verify mode found 0 mismatches in 16
+  // titles (quick tier + Mafia II).
+  // XE_METAL_BIND_MEMO=0 off, 2 = verify (resolve anyway and compare).
+  static const uint32_t s_bind_memo = [] {
+    const char* v = std::getenv("XE_METAL_BIND_MEMO");
+    if (v) {
+      return uint32_t(std::strtoul(v, nullptr, 10));
+    }
+    // The memo skips the per-binding diagnostics.
+    if (std::getenv("XE_METAL_TEX_PROBE") || std::getenv("XE_GPU_DELTA_CENSUS")) {
+      return 0u;
+    }
+    return 1u;
+  }();
+  const bool bind_memo_on = s_bind_memo && !xe_lineage_base();
+  // The key: fixed state compared as one block, plus "no fetch constant the
+  // shaders read was written since the memo was stored" (WriteRegister marks
+  // written slots in bind_memo_fetch_written_; storing clears it).
+  auto build_bind_memo_key = [&](BindMemo::Key& key) {
+    std::memset(&key, 0, sizeof(key));
+    key.vertex_shader = vertex_shader;
+    key.pixel_shader = pixel_shader;
+    key.route_mask = draw_shared_route_mask_;
+    key.flags = uint32_t(draw_gpu_ordering_active_) |
+                (uint32_t(trace_writer_.is_open()) << 1);
+    key.scale = draw_resolution_scale_x_ | (draw_resolution_scale_y_ << 16);
+    key.pending_writebacks = uint32_t(pending_writebacks_.size());
+    key.pending_memexports = uint32_t(pending_memexports_.size());
+    key.submission = CurrentEncodingSubmission();
+    key.binding_generation = texture_cache_->binding_generation();
+    key.registry_epoch = texture_cache_->registry_epoch();
+    key.serve_generation =
+        shared_texture_cache_ ? shared_texture_cache_->serve_generation() : 0;
+    key.authority_sequence = memory_authority_sequence_;
+  };
+  auto bind_memo_fetch_mask = [&]() {
+    uint32_t mask = 0;
+    for (MetalShader* shader : {vertex_shader, pixel_shader}) {
+      if (!shader) {
+        continue;
+      }
+      for (const auto& b : shader->GetTextureBindingsAfterTranslation()) {
+        mask |= 1u << (b.fetch_constant & 31);
+      }
+      for (const auto& b : shader->GetSamplerBindingsAfterTranslation()) {
+        mask |= 1u << (b.fetch_constant & 31);
+      }
+    }
+    return mask;
+  };
+  BindMemo& memo = bind_memo_;
+  bool memo_hit = false;
+  if (bind_memo_on && memo.valid &&
+      !(bind_memo_fetch_written_ & memo.fetch_mask) &&
+      !texture_cache_->HasPendingInvalidations()) {
+    BindMemo::Key key;
+    build_bind_memo_key(key);
+    memo_hit = !std::memcmp(&key, &memo.key, sizeof(key));
+  }
+  if (memo_hit && s_bind_memo == 1) {
+    ++memo.hits;
+    for (uint32_t i = 0; i < 2; ++i) {
+      MetalUploadAllocation* out = i ? &desc_idx_pixel_alloc : &desc_idx_vertex_alloc;
+      const std::vector<uint32_t>& indices = memo.indices[i];
+      if (!ArenaAllocate(uint32_t(indices.size() * sizeof(uint32_t)), 256, out)) {
+        RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "desc-index-alloc");
+        return true;
+      }
+      std::memcpy(out->cpu_ptr, indices.data(), indices.size() * sizeof(uint32_t));
+    }
+    for (void* texture : memo.active) {
+      texture_cache_->AddActiveTexture(texture);
+    }
+  } else {
+    uint32_t desc_idx_bytes[2] = {};
+    marshal_stage = 0;
+    bool resolved = marshal_desc_indices(vertex_shader, &desc_idx_vertex_alloc);
+    desc_idx_bytes[0] = marshal_bytes;
+    marshal_stage = 1;
+    resolved = resolved &&
+               marshal_desc_indices(pixel_shader, &desc_idx_pixel_alloc);
+    if (!resolved) {
+      memo.valid = false;
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "desc-index-alloc");
+      return true;
+    }
+    desc_idx_bytes[1] = marshal_bytes;
+    if (bind_memo_on) {
+      const auto& active = texture_cache_->active_textures();
+      if (memo_hit) {
+        // Verify mode: the memo would have served this draw.
+        bool same = memo.active == active;
+        for (uint32_t i = 0; i < 2 && same; ++i) {
+          same = memo.indices[i].size() * sizeof(uint32_t) == desc_idx_bytes[i] &&
+                 (!desc_idx_bytes[i] ||
+                  !std::memcmp(memo.indices[i].data(),
+                               bind_index_scratch_[i].data(), desc_idx_bytes[i]));
+        }
+        ++memo.verified;
+        if (!same && memo.mismatches++ < 20) {
+          XELOGW("MetalBindMemo MISMATCH swap#{} draw={} vs={:016X} ps={:016X}",
+                 swap_count_, trace_draw_index_,
+                 vertex_shader ? vertex_shader->ucode_data_hash() : 0,
+                 pixel_shader ? pixel_shader->ucode_data_hash() : 0);
+        }
+      } else {
+        ++memo.misses;
+      }
+      for (uint32_t i = 0; i < 2; ++i) {
+        const uint32_t* p = bind_index_scratch_[i].data();
+        memo.indices[i].assign(p, p + desc_idx_bytes[i] / sizeof(uint32_t));
+      }
+      memo.active.assign(active.begin(), active.end());
+      // The state as this draw's resolution left it.
+      build_bind_memo_key(memo.key);
+      if (memo.key.vertex_shader != memo.mask_vertex_shader ||
+          memo.key.pixel_shader != memo.mask_pixel_shader) {
+        memo.mask_vertex_shader = vertex_shader;
+        memo.mask_pixel_shader = pixel_shader;
+        memo.fetch_mask = bind_memo_fetch_mask();
+      }
+      bind_memo_fetch_written_ = 0;
+      memo.valid = true;
+    }
   }
 
   // --- Build the top-level argument buffer from the root-layout authority. ---
@@ -12840,6 +13376,100 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
+  // Rectangle VS expansion: the rectangles' guest vertex indices in host
+  // order, 3 dwords per rectangle (auto-indexed: 3r..3r+2), exposed to the
+  // vertex shader as entry 1 of a per-draw SRV space-0 table like the host
+  // tessellation records; host indices 4r..4r+3 and a strip restart.
+  MetalUploadAllocation rect_index_table_alloc{};
+  MetalUploadAllocation rect_host_indices_alloc{};
+  MetalUploadAllocation rect_srv_table_alloc{};
+  uint32_t rect_host_index_count = 0;
+  if (rect_strip_route) {
+    const uint32_t rects = index_count / 3;
+    if (!rects) {
+      RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
+                     "rect-degenerate");
+      return true;
+    }
+    rect_host_index_count = rects * 5;
+    if (!ArenaAllocate(rects * 3 * sizeof(uint32_t), 16,
+                       &rect_index_table_alloc) ||
+        !ArenaAllocate(rect_host_index_count * sizeof(uint32_t), 16,
+                       &rect_host_indices_alloc) ||
+        !ArenaAllocate(2 * sizeof(IRDescriptorTableEntry), 256,
+                       &rect_srv_table_alloc)) {
+      RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
+                     "rect-index-alloc");
+      return true;
+    }
+    // The arena is write-combined: write only, swap in cached stack chunks.
+    uint32_t* table = static_cast<uint32_t*>(rect_index_table_alloc.cpu_ptr);
+    const uint32_t table_count = rects * 3;
+    if (index_buffer_info && index_buffer_info->guest_base) {
+      const void* guest_indices =
+          memory_->TranslatePhysical(index_buffer_info->guest_base);
+      if (!guest_indices) {
+        RecordDrawSkip(MetalDrawSkipReason::kInvalidGuestState,
+                       "rect-index-guest-null");
+        return true;
+      }
+      auto widen = [&](auto* src) {
+        using T = std::remove_const_t<std::remove_pointer_t<decltype(src)>>;
+        constexpr uint32_t kChunk = 256;
+        T chunk[kChunk];
+        uint32_t widened[kChunk];
+        for (uint32_t i0 = 0; i0 < table_count; i0 += kChunk) {
+          const uint32_t n = std::min(kChunk, table_count - i0);
+          SwapIndicesInto(chunk, src + i0, n, index_buffer_info->format,
+                          index_buffer_info->endianness);
+          for (uint32_t i = 0; i < n; ++i) {
+            widened[i] = uint32_t(chunk[i]);
+          }
+          std::memcpy(table + i0, widened, n * sizeof(uint32_t));
+        }
+      };
+      if (index_buffer_info->format == xenos::IndexFormat::kInt32) {
+        widen(static_cast<const uint32_t*>(guest_indices));
+      } else {
+        widen(static_cast<const uint16_t*>(guest_indices));
+      }
+    } else {
+      for (uint32_t i = 0; i < table_count; ++i) {
+        table[i] = i;
+      }
+    }
+    uint32_t* host_indices =
+        static_cast<uint32_t*>(rect_host_indices_alloc.cpu_ptr);
+    for (uint32_t r = 0; r < rects; ++r) {
+      uint32_t* o = host_indices + size_t(r) * 5;
+      o[0] = r * 4u;
+      o[1] = r * 4u + 1;
+      o[2] = r * 4u + 2;
+      o[3] = r * 4u + 3;
+      o[4] = UINT32_MAX;
+    }
+    auto* rect_table_entries =
+        static_cast<IRDescriptorTableEntry*>(rect_srv_table_alloc.cpu_ptr);
+    std::memset(rect_table_entries, 0, 2 * sizeof(IRDescriptorTableEntry));
+    __unsafe_unretained id<MTLBuffer> rect_shared_buffer =
+        (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+    IRDescriptorTableSetBuffer(&rect_table_entries[0],
+                               [rect_shared_buffer gpuAddress],
+                               shared_memory_->gpu_visible_length());
+    IRDescriptorTableSetBuffer(&rect_table_entries[1],
+                               rect_index_table_alloc.gpu_address,
+                               table_count * sizeof(uint32_t));
+    static bool s_rect_engaged_logged = false;
+    if (!s_rect_engaged_logged) {
+      s_rect_engaged_logged = true;
+      XELOGI("MetalCommandProcessor: rectangle VS expansion engaged, first "
+             "draw={} rectangles={} {}",
+             trace_draw_index_, rects,
+             index_buffer_info && index_buffer_info->guest_base ? "indexed"
+                                                                : "auto");
+    }
+  }
+
   MetalBindingAddresses binding_addresses;
   binding_addresses.null_buffer = null_gpu;
   binding_addresses.view_heap = view_heap_gpu;
@@ -12847,6 +13477,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   binding_addresses.shared_memory_srv =
       tess_host_table_alloc.buffer
           ? tess_host_table_alloc.gpu_address
+      : rect_srv_table_alloc.buffer
+          ? rect_srv_table_alloc.gpu_address
           : system_view_gpu +
                 kSystemViewSharedMemorySRV * sizeof(IRDescriptorTableEntry);
   binding_addresses.null_uav =
@@ -13057,7 +13689,53 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   use_resource(system_view, MTLResourceUsageRead);
   use_resource(null_buffer, MTLResourceUsageRead);
   use_resource(null_texture, MTLResourceUsageRead);
+  // Texture heaps (discrete AMD): every heap is resident for the stages
+  // declared so far on this encoder; a new heap, or a draw needing more
+  // stages, re-declares. Textures allocated from a heap then skip the
+  // per-texture declaration (tagged in the dedupe table on first sight).
+  const bool heaps_active = encoder_dedupe && texture_cache_->texture_heaps_enabled();
+  if (heaps_active) {
+    const uint32_t heap_count = texture_cache_->texture_heap_count();
+    const uint32_t stage_bits = uint32_t(stages);
+    const bool new_stages = (stage_bits & ~encoder_heap_stages_) != 0;
+    if (heap_count && (new_stages || heap_count > encoder_heaps_declared_)) {
+      const uint32_t first = new_stages ? 0 : encoder_heaps_declared_;
+      encoder_heap_stages_ |= stage_bits;
+      __unsafe_unretained id<MTLHeap> heaps[64];
+      uint32_t n = 0;
+      for (uint32_t h = first; h < heap_count && n < 64; ++h) {
+        heaps[n++] = (__bridge id<MTLHeap>)texture_cache_->texture_heap(h);
+      }
+      es.UseHeaps(heaps, n, MTLRenderStages(encoder_heap_stages_));
+      encoder_heaps_declared_ = heap_count;
+      ++heap_declarations_;
+    }
+  }
+  constexpr uint32_t kHeapBackedBit = 0x80000000u;
   for (void* tex : texture_cache_->active_textures()) {
+    if (heaps_active) {
+      if (uint32_t* declared = encoder_declared_resources_.Find(tex)) {
+        if (!*declared) {
+          __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tex;
+          // A view's memory is its root texture's.
+          for (uint32_t depth = 0; t && depth < 4; ++depth) {
+            if (t.heap) {
+              *declared = kHeapBackedBit;
+              break;
+            }
+            t = t.parentTexture;
+          }
+          if (!*declared) {
+            LogHeapMissTexture(tex);
+          }
+        }
+        if (*declared & kHeapBackedBit) {
+          ++heap_skipped_declarations_;
+          continue;
+        }
+      }
+      ++texture_declarations_;
+    }
     use_resource((__bridge id<MTLTexture>)tex, MTLResourceUsageRead, true);
   }
 
@@ -13199,6 +13877,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               pending_memexports_.push_back(PendingMemexport{
                   owned.range.start(), owned.range.length(), owned.submission,
                   ++memory_authority_sequence_});
+              NoteDiscreteProducedRange(owned.range.start(),
+                                        owned.range.length());
               if (trace_playback_context()) {
                 playback_gpu_written_.emplace_back(owned.range.start(),
                                                    owned.range.length());
@@ -13418,6 +14098,31 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     frame_has_render_ = true;
     ++draw_count_;
+    return true;
+  }
+  if (rect_strip_route) {
+    // Rectangle VS expansion (table and indices built before the bindings).
+    __unsafe_unretained id<MTLBuffer> rect_table_buffer =
+        (__bridge id<MTLBuffer>)rect_index_table_alloc.buffer;
+    __unsafe_unretained id<MTLBuffer> rect_indices_buffer =
+        (__bridge id<MTLBuffer>)rect_host_indices_alloc.buffer;
+    __unsafe_unretained id<MTLBuffer> rect_srv_table_buffer =
+        (__bridge id<MTLBuffer>)rect_srv_table_alloc.buffer;
+    use_resource(rect_table_buffer, MTLResourceUsageRead);
+    use_resource(rect_indices_buffer, MTLResourceUsageRead);
+    use_resource(rect_srv_table_buffer, MTLResourceUsageRead);
+    ir_draw_indexed(MTLPrimitiveTypeTriangleStrip, rect_host_index_count,
+                    MTLIndexTypeUInt32, rect_indices_buffer,
+                    rect_host_indices_alloc.offset, /*instanceCount=*/1,
+                    /*baseVertex=*/0, /*baseInstance=*/0);
+    mark_raster_targets_written();
+    // Returns before the common tail, like the fan path.
+    if (memexport_draw || memexport_raster_routed) {
+      publish_memexport_ranges();
+    }
+    frame_has_render_ = true;
+    ++draw_count_;
+    ++draws_since_commit_;
     return true;
   }
   if (pp_routed) {
@@ -16071,8 +16776,10 @@ bool MetalCommandProcessor::IssueCopy() {
     if (FILE* f = fopen(path.c_str(), "wb")) {
       // The shared buffer, not guest RAM: GPU-resident publication leaves
       // resolved bytes only in the buffer.
+      shared_memory_->EnsureCpuCurrent(resolve_info.copy_dest_extent_start,
+                                       resolve_info.copy_dest_extent_length);
       id<MTLBuffer> shared_buffer =
-          (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+          (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
       fwrite(static_cast<const uint8_t*>([shared_buffer contents]) +
                  resolve_info.copy_dest_extent_start,
              1, resolve_info.copy_dest_extent_length, f);
@@ -16948,6 +17655,8 @@ bool MetalCommandProcessor::StateDedupeEnabled() {
 void MetalCommandProcessor::ResetEncoderDedupe() {
   encoder_fixed_state_ = EncoderFixedState{};
   encoder_declared_resources_.Clear();
+  encoder_heaps_declared_ = 0;
+  encoder_heap_stages_ = 0;
   for (auto& stage : encoder_buffer_binds_) {
     for (EncoderBufferBind& bind : stage) {
       bind = EncoderBufferBind{};
@@ -17527,7 +18236,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     bool retire_exact_export = false;
     id<MTLBuffer> me_shared_buffer = shared_memory_
                                          ? (__bridge id<MTLBuffer>)
-                                               shared_memory_->GetBuffer()
+                                               shared_memory_->GetCpuBuffer()
                                          : nil;
     const uint8_t* me_contents =
         static_cast<const uint8_t*>(me_shared_buffer.contents);
@@ -17556,6 +18265,9 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
           still_pending_exports.push_back(me);
         }
         continue;
+      }
+      if (shared_memory_) {
+        shared_memory_->EnsureCpuCurrent(me.base_address, me.size_bytes);
       }
       bool me_log = false;
       uint32_t old_hash = 0, new_hash = 0;
@@ -17857,8 +18569,11 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       // wrote. Copying exactly the written offsets is the only publication
       // that is correct without first uploading the destination from RAM.
       id<MTLBuffer> shared_buffer =
-          shared_memory_ ? (__bridge id<MTLBuffer>)shared_memory_->GetBuffer()
+          shared_memory_ ? (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer()
                          : nil;
+      if (shared_memory_) {
+        shared_memory_->EnsureCpuCurrent(wb.guest_addr, wb.range_bytes());
+      }
       const uint8_t* shared_contents =
           static_cast<const uint8_t*>(shared_buffer.contents);
       if (!dest || !shared_contents) {
@@ -18546,7 +19261,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
     uint8_t* reassert_buffer_contents = nullptr;
     if (!shared_memory_->is_zero_copy()) {
       id<MTLBuffer> reassert_buffer =
-          (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+          (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
       reassert_buffer_contents = static_cast<uint8_t*>(reassert_buffer.contents);
     }
     const uint32_t page_size = 1u << shared_memory_->validity_page_size_log2();
@@ -18585,6 +19300,7 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
         const uint8_t* ram =
             memory_->TranslatePhysical<const uint8_t*>(g0);
         if (ram) {
+          shared_memory_->NoteCpuWrite(g0, g1 - g0);
           std::memcpy(reassert_buffer_contents + g0, ram, g1 - g0);
         }
       };
@@ -19591,7 +20307,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
       const char* comma = strchr(s_bufdump.c_str(), ',');
       uint32_t len = comma ? uint32_t(strtoul(comma + 1, nullptr, 16)) : 0x1000;
       EndFrameEncoderAndWait(metal::SeamBoundaryReason::kDebugProbe);
-      id<MTLBuffer> b = (__bridge id<MTLBuffer>)shared_memory_->GetBuffer();
+      id<MTLBuffer> b = (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
       const uint8_t* bc = b ? static_cast<const uint8_t*>(b.contents) : nullptr;
       const uint8_t* rc = memory_->TranslatePhysical<const uint8_t*>(base);
       if (bc && rc) {
@@ -19877,7 +20593,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           1e-6;
       s_pacing.ring_idle_ms_sum += ring_idle_ms;
       static uint32_t s_slow_logs = 0;
-      if (active_ms > 32.0 && count >= 12000 && s_slow_logs < 400) {
+      // XE_FRAME_PACING_SLOW_AFTER=<swap>: first swap that may log (default
+      // 12000, past boot); a frame also logs when its wall time passes
+      // XE_FRAME_PACING_SLOW_WALL_MS (default 0 = off), to catch hitches
+      // whose time is not command-processor work.
+      static const uint32_t s_slow_after = [] {
+        const char* v = std::getenv("XE_FRAME_PACING_SLOW_AFTER");
+        return v ? uint32_t(std::strtoul(v, nullptr, 10)) : 12000u;
+      }();
+      static const double s_slow_wall_ms = [] {
+        const char* v = std::getenv("XE_FRAME_PACING_SLOW_WALL_MS");
+        return v ? std::strtod(v, nullptr) : 0.0;
+      }();
+      if ((active_ms > 32.0 || (s_slow_wall_ms > 0.0 && wall_ms > s_slow_wall_ms)) &&
+          count >= s_slow_after && s_slow_logs < 400) {
         ++s_slow_logs;
         XELOGI("FramePacingSlow swap#{}: cp active {:.2f} ms (ring idle {:.2f}, gpu wait {:.2f}: "
                "cap {:.2f} sync {:.2f} drain {:.2f}/{:.2f} ring {:.2f} seam "
@@ -20004,17 +20733,59 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
           texture_cache_ ? texture_cache_->slots_free() : 0,
           texture_cache_ ? texture_cache_->slots_stale() : 0, gpu_alloc_mb,
           cb_error_count_);
+      if (discrete_mirror_) {
+        XELOGI(
+            "MetalDiscreteMirror swap#{}: uploads {:.1f}/frame {:.1f} KB/frame, "
+            "readbacks {:.1f}/frame {:.1f} KB/frame",
+            count, double(discrete_upload_blits_) / 128.0,
+            double(discrete_upload_bytes_) / 128.0 / 1024.0,
+            double(discrete_readback_blits_) / 128.0,
+            double(discrete_readback_bytes_) / 128.0 / 1024.0);
+        discrete_upload_blits_ = discrete_upload_bytes_ = 0;
+        discrete_readback_blits_ = discrete_readback_bytes_ = 0;
+        if (MetalSharedMemory::OnDemandReadbackEnabled()) {
+          MetalSharedMemory::VramFetchStats fs =
+              shared_memory_->ConsumeVramFetchStats();
+          XELOGI("MetalDiscreteFetch swap#{}: deferred {:.1f}/frame, fetches "
+                 "{} ({:.1f} KB, {:.2f} ms), vram-newer {} ranges, hot {}",
+                 count, double(discrete_deferred_ranges_) / 128.0, fs.fetches,
+                 double(fs.bytes) / 1024.0, double(fs.ns) / 1e6, fs.entries,
+                 fs.hot);
+          discrete_deferred_ranges_ = 0;
+        }
+        if (texture_cache_ && texture_cache_->texture_heaps_enabled()) {
+          XELOGI("MetalTextureHeaps swap#{}: {} heaps {} MiB, {} textures; "
+                 "per frame: useHeaps {:.1f}, skipped {:.1f}, declared {:.1f}",
+                 count, texture_cache_->texture_heap_count(),
+                 texture_cache_->heap_bytes() >> 20,
+                 texture_cache_->heap_texture_count(),
+                 double(heap_declarations_) / 128.0,
+                 double(heap_skipped_declarations_) / 128.0,
+                 double(texture_declarations_) / 128.0);
+          heap_declarations_ = heap_skipped_declarations_ = 0;
+          texture_declarations_ = 0;
+        }
+      }
       if (encode_stream_ && encode_stream_->deferred()) {
         MetalEncodeStream::Stats es = encode_stream_->TakeStats();
         XELOGI(
             "MetalEncodeStream swap#{}: {:.0f} commits/frame, {:.1f} KB/frame, "
             "{:.1f} drains/frame ({:.1f} waited, {:.3f} ms/frame), "
-            "{} ring-full waits, {} encoder sleeps",
+            "{} ring-full waits, {} encoder sleeps, {:.1f} passes/frame on "
+            "the encoder thread",
             count, double(es.commits) / 128.0,
             double(es.bytes) / 1024.0 / 128.0, double(es.drains) / 128.0,
             double(es.drain_waits) / 128.0,
             double(es.drain_wait_ns) / 1.0e6 / 128.0, es.full_waits,
-            es.consumer_sleeps);
+            es.consumer_sleeps, double(es.passes) / 128.0);
+      }
+      if (bind_memo_.hits + bind_memo_.misses + bind_memo_.verified) {
+        auto& m = bind_memo_;
+        XELOGI("MetalBindMemo swap#{}: {:.1f} hits/frame, {:.1f} misses/frame, "
+               "{} verified, {} mismatches",
+               count, double(m.hits) / 128.0, double(m.misses) / 128.0,
+               m.verified, m.mismatches);
+        m.hits = m.misses = m.verified = 0;
       }
       if (PassTimingEnabled()) {
         XELOGI("{}", PassTimingReport(128, count));

@@ -17,6 +17,7 @@
 #include <initializer_list>
 
 #include "xenia/base/logging.h"
+#include "xenia/ui/metal/metal_provider.h"
 
 namespace xe {
 namespace gpu {
@@ -84,7 +85,8 @@ inline MTLRenderPassDescriptor* MetalApplyXenosSamplePositions(
     return pass;
   }
   static const bool supported = [] {
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    id<MTLDevice> device =
+        (__bridge id<MTLDevice>)xe::ui::metal::MetalProvider::SelectedDevice();
     bool result = device && device.areProgrammableSamplePositionsSupported;
     if (!result) {
       XELOGW(

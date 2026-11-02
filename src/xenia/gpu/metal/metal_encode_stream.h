@@ -73,6 +73,18 @@ class MetalEncodeStream {
   // The encoder subsequent ops go to (nil detaches). Unretained.
   void SetEncoder(id<MTLRenderCommandEncoder> encoder);
 
+  // Render pass lifecycle on the replaying thread (deferred modes only): the
+  // replay creates the encoder from `command_buffer` with `descriptor` (and
+  // `label`, may be nil), and later ends it. The command processor then holds
+  // no encoder object, and a render pass that follows another ends and begins
+  // without a Drain. Metal allows one active encoder per command buffer, so
+  // the command processor must Drain() after EndRenderPass() before it uses
+  // `command_buffer` itself (another encoder, a commit, an event).
+  void BeginRenderPass(__unsafe_unretained id<MTLCommandBuffer> command_buffer,
+                       __unsafe_unretained MTLRenderPassDescriptor* descriptor,
+                       __unsafe_unretained NSString* label);
+  void EndRenderPass();
+
   void SetViewport(const MTLViewport& viewport);
   void SetDepthClipMode(MTLDepthClipMode mode);
   void SetCullMode(MTLCullMode mode);
@@ -80,7 +92,7 @@ class MetalEncodeStream {
   void SetTriangleFillMode(MTLTriangleFillMode mode);
   void SetDepthBias(float constant, float slope, float clamp);
   void SetScissorRect(const MTLScissorRect& rect);
-  void SetRenderPipelineState(id<MTLRenderPipelineState> state);
+  void SetRenderPipelineState(__unsafe_unretained id<MTLRenderPipelineState> state);
   // A pipeline another thread is still creating (deferred modes only): the
   // replay calls resolve(context), which blocks until the state exists and
   // returns it retained, or null if creation failed, in which case draws are
@@ -90,25 +102,29 @@ class MetalEncodeStream {
   void SetRenderPipelineStateDeferred(PipelineResolver resolve, void* context,
                                       std::shared_ptr<void> owner);
   void SetBlendColor(float r, float g, float b, float a);
-  void SetDepthStencilState(id<MTLDepthStencilState> state);
+  void SetDepthStencilState(__unsafe_unretained id<MTLDepthStencilState> state);
   void SetStencilReferenceValues(uint32_t front, uint32_t back);
   void SetVisibilityResultMode(MTLVisibilityResultMode mode, NSUInteger offset);
   // Buffer-scope memory barrier inside the render encoder: buffer writes made
   // by the `after` stages of earlier draws become visible to the `before`
   // stages of later ones (hazard tracking only orders whole encoders).
   void BufferBarrier(MTLRenderStages after, MTLRenderStages before);
-  void SetBuffer(uint32_t stage, id<MTLBuffer> buffer, NSUInteger offset,
+  void SetBuffer(uint32_t stage, __unsafe_unretained id<MTLBuffer> buffer, NSUInteger offset,
                  NSUInteger index);
   void SetBufferOffset(uint32_t stage, NSUInteger offset, NSUInteger index);
   void SetBytes(uint32_t stage, const void* bytes, NSUInteger length,
                 NSUInteger index);
-  void UseResource(id<MTLResource> resource, MTLResourceUsage usage,
+  void UseResource(__unsafe_unretained id<MTLResource> resource, MTLResourceUsage usage,
                    MTLRenderStages stages, bool retain);
+  // Texture heaps (discrete AMD), at most kMaxUseHeaps per call.
+  static constexpr uint32_t kMaxUseHeaps = 64;
+  void UseHeaps(__unsafe_unretained const id<MTLHeap>* heaps, uint32_t count,
+                MTLRenderStages stages);
   void DrawPrimitives(MTLPrimitiveType type, uint64_t vertex_start,
                       uint64_t vertex_count);
   void DrawIndexedPrimitives(MTLPrimitiveType type, uint64_t index_count,
                              MTLIndexType index_type,
-                             id<MTLBuffer> index_buffer, uint64_t index_offset,
+                             __unsafe_unretained id<MTLBuffer> index_buffer, uint64_t index_offset,
                              uint64_t instance_count, int64_t base_vertex,
                              uint64_t base_instance);
   // IRRuntime draw helpers (they bind draw parameters, then draw).
@@ -116,12 +132,12 @@ class MetalEncodeStream {
                         uint64_t vertex_count);
   void IRDrawIndexedPrimitives(MTLPrimitiveType type, uint64_t index_count,
                                MTLIndexType index_type,
-                               id<MTLBuffer> index_buffer,
+                               __unsafe_unretained id<MTLBuffer> index_buffer,
                                uint64_t index_offset, uint64_t instance_count,
                                int64_t base_vertex, uint64_t base_instance);
   void IRDrawIndexedGeometryEmulation(
       IRRuntimePrimitiveType type, MTLIndexType index_type,
-      id<MTLBuffer> index_buffer, const IRRuntimeGeometryPipelineConfig& config,
+      __unsafe_unretained id<MTLBuffer> index_buffer, const IRRuntimeGeometryPipelineConfig& config,
       uint32_t instance_count, uint32_t index_count, uint32_t start_index,
       int base_vertex, uint32_t base_instance);
   void IRDrawGeometryEmulation(IRRuntimePrimitiveType type,
@@ -142,6 +158,7 @@ class MetalEncodeStream {
     uint64_t full_waits = 0;       // ring full
     uint64_t bytes = 0;
     uint64_t consumer_sleeps = 0;
+    uint64_t passes = 0;           // render passes begun on the replay thread
   };
   Stats TakeStats();
 
@@ -172,6 +189,8 @@ class MetalEncodeStream {
   // replaying thread then).
   __unsafe_unretained id<MTLRenderCommandEncoder> direct_encoder_ = nil;
   __unsafe_unretained id<MTLRenderCommandEncoder> replay_encoder_ = nil;
+  // The encoder BeginRenderPass created; replaying thread only.
+  id<MTLRenderCommandEncoder> owned_encoder_ = nil;
 
   static constexpr uint64_t kCapacity = uint64_t(8) << 20;
   uint8_t* ring_ = nullptr;

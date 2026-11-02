@@ -845,6 +845,25 @@ class DxbcShaderTranslator : public ShaderTranslator {
            GetDxbcShaderModification().vertex.host_vertex_shader_type ==
                Shader::HostVertexShaderType::kPointListAsTriangleStrip;
   }
+  // Rectangle list drawn as two-triangle strips expanded in the vertex shader
+  // (4 host vertices per guest rectangle; SV_VertexID >> 2 is the rectangle,
+  // the low 2 bits the corner). The guest program runs once per rectangle
+  // vertex inside an outer loop, its outputs are captured, and the corner is
+  // then selected or synthesized like the geometry shader's kRectangleList
+  // expansion. The rectangle's 3 guest vertex indices come from the raw SRV
+  // in the xe_tessellation_vertices register, 3 dwords per rectangle,
+  // host-order. Hosts without working geometry emulation (Metal on AMD).
+  bool IsDxbcRectangleStripVertexShader() const {
+    return is_vertex_shader() &&
+           GetDxbcShaderModification().vertex.host_vertex_shader_type ==
+               Shader::HostVertexShaderType::kRectangleListAsTriangleStrip;
+  }
+  // Indexable temp of the rectangle expansion's captured outputs:
+  // x1[guest_vertex * (1 + interpolators) + 0] = position, + 1 + i =
+  // interpolator i.
+  static constexpr uint32_t kRectangleCaptureIndexableTemp = 1;
+  void CaptureRectangleVertex();
+  void CompleteRectangleVertex();
   bool IsDxbcVertexShader() const {
     return is_vertex_shader() &&
            (!Shader::IsHostVertexShaderTypeDomain(
@@ -1298,6 +1317,12 @@ class DxbcShaderTranslator : public ShaderTranslator {
   uint32_t system_temp_position_;
   // Special exports in vertex shaders.
   uint32_t system_temp_point_size_edge_flag_kill_vertex_;
+  // Rectangle VS expansion: X = the guest vertex (0..2) the outer loop is on,
+  // Y = whether any vertex wrote a kill, Z = whether all of them did.
+  uint32_t system_temp_rect_loop_;
+  // Rectangle VS expansion: the interpolators of the current guest vertex
+  // (one temp each), written instead of the outputs.
+  uint32_t system_temp_rect_interpolators_;
   // ROV only - 4 persistent VGPRs when writing to color targets, 2 VGPRs when
   // not:
   // X - Bit masks:

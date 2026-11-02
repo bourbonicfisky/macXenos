@@ -15,9 +15,12 @@
 #include <deque>
 #include <unordered_map>
 #include <functional>
+#include <mutex>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "xenia/gpu/metal/metal_flat_index_map.h"
 #include "xenia/gpu/metal/metal_zero_copy_contract.h"
 #include "xenia/gpu/metal/metal_zero_copy_overlap.h"
 #include "xenia/gpu/shared_memory.h"
@@ -82,8 +85,69 @@ class MetalSharedMemory : public SharedMemory {
   // GPU-written ranges straight from guest RAM (CPU-authoritative here).
   void WriteTraceInitialState(TraceWriter& trace_writer);
 
-  // id<MTLBuffer> (shared storage), not owned by the caller.
-  void* GetBuffer() const { return buffer_; }
+  // id<MTLBuffer> the GPU binds, not owned by the caller: the shared-storage
+  // mirror, or the Private (VRAM) copy under the discrete mirror below.
+  void* GetBuffer() const { return gpu_buffer_ ? gpu_buffer_ : buffer_; }
+  // id<MTLBuffer> whose contents the CPU reads and writes (the shared-storage
+  // mirror). The same buffer as GetBuffer() unless the discrete mirror is on.
+  void* GetCpuBuffer() const { return buffer_; }
+
+  // Discrete-GPU mirror (metal_discrete_vram_mirror, devices without
+  // unified memory): the GPU binds a Private copy in VRAM instead of reading
+  // the shared-storage mirror in system RAM across PCIe (Mac Pro RX 6900 XT
+  // 2026-10-19: RDR 22.6 -> 28, Gears 3 23.3 -> 30, USF4 45 -> 51). Default
+  // on; Apple GPUs never take it. Every CPU write into the CPU
+  // mirror goes through NoteCpuWrite, whose callback encodes the CPU->VRAM
+  // blit ahead of the consumers; the command processor blits GPU-produced
+  // ranges back into the CPU mirror at commit and marks them consumed by
+  // their submission (NoteGpuWriteInFlight), so an upload over them while the
+  // readback is in flight takes the staged-blit hazard path.
+  static bool DiscreteMirrorEnabled();
+  bool is_discrete_mirror() const { return gpu_buffer_ != nullptr; }
+  void SetCpuWriteCallback(
+      std::function<void(uint32_t offset, uint32_t length)> callback) {
+    cpu_write_callback_ = std::move(callback);
+  }
+  // Call BEFORE the memcpy into the CPU mirror: it also drops the range from
+  // the VRAM-newer table, under the lock an on-demand fetch copies under, so
+  // a fetch can never land older VRAM bytes over the CPU's newer ones.
+  void NoteCpuWrite(uint32_t offset, uint32_t length);
+
+  // On-demand readback (discrete mirror). GPU-produced ranges the CPU rarely
+  // reads (lazily published resolves) are not blitted back every frame; they
+  // are recorded here as "VRAM newer than the CPU mirror" with their
+  // producing submission. A CPU reader of the mirror calls EnsureCpuCurrent
+  // first: it waits for the newest committed producer overlapping the range,
+  // blits just those bytes to a staging buffer on a separate queue (so it
+  // does not wait behind the frames queued on the main one), and copies the
+  // still-VRAM-newer bytes into the mirror. A range fetched once is "hot":
+  // the command processor reads its later productions back with the frame.
+  // `eager` entries are frame readbacks, kept only so a fetch also waits for
+  // them; they leave when their submission completes. Any thread.
+  static bool OnDemandReadbackEnabled();
+  void SetVramFetchHooks(std::function<uint64_t()> encoding_submission,
+                         std::function<uint64_t()> completed_submission,
+                         std::function<bool(uint64_t)> wait_for_submission) {
+    vram_encoding_submission_ = std::move(encoding_submission);
+    vram_completed_submission_ = std::move(completed_submission);
+    vram_wait_ = std::move(wait_for_submission);
+  }
+  void MarkVramNewer(uint32_t start, uint32_t length, uint64_t submission,
+                     bool eager);
+  bool IsVramHot(uint32_t origin) const;
+  // False only when a producer could not be waited for or the fetch failed;
+  // the mirror then still holds what it held.
+  bool EnsureCpuCurrent(uint32_t start, uint32_t length);
+  struct VramFetchStats {
+    uint64_t fetches = 0;
+    uint64_t bytes = 0;
+    uint64_t ns = 0;
+    size_t entries = 0;
+    size_t hot = 0;
+  };
+  VramFetchStats ConsumeVramFetchStats();
+  void NoteGpuWriteInFlight(uint32_t start, uint32_t length,
+                            uint64_t submission);
 
   // Whether the installed buffer aliases guest RAM rather than mirroring it.
   // Decided once in Initialize and never transitioned afterwards: consumers
@@ -319,7 +383,7 @@ class MetalSharedMemory : public SharedMemory {
   // been committed and waited on).
   void ResetFrameRanges() {  // sync-mode/shutdown
     consumed_ranges_.clear();
-    consumed_index_.clear();
+    consumed_index_.Clear();
     ClearConsumedPages();
   }
   // Post-clear evidence: submission-tagged hazard records still held. At a
@@ -375,6 +439,29 @@ class MetalSharedMemory : public SharedMemory {
   TraceWriter* trace_writer_ = nullptr;
   void* device_;                        // id<MTLDevice>, not owned.
   void* buffer_ = nullptr;              // id<MTLBuffer>, retained.
+  void* gpu_buffer_ = nullptr;  // id<MTLBuffer> Private, retained (discrete).
+  std::function<void(uint32_t, uint32_t)> cpu_write_callback_;
+  struct VramNewer {
+    uint32_t start;
+    uint32_t end;
+    uint64_t submission;
+    uint32_t origin;  // start of the produced range (the hot key)
+    bool eager;
+  };
+  // Removes [start, end) from every entry `pred` accepts. vram_mutex_ held.
+  template <typename Pred>
+  void SubtractVramNewerLocked(uint32_t start, uint64_t end, Pred pred);
+  void PruneVramNewerLocked();
+  mutable std::mutex vram_mutex_;
+  std::vector<VramNewer> vram_newer_;
+  size_t vram_prune_at_ = 64;
+  bool vram_overflowed_ = false;
+  std::unordered_set<uint32_t> vram_hot_;
+  void* fetch_queue_ = nullptr;  // id<MTLCommandQueue>, retained (discrete).
+  std::function<uint64_t()> vram_encoding_submission_;
+  std::function<uint64_t()> vram_completed_submission_;
+  std::function<bool(uint64_t)> vram_wait_;
+  VramFetchStats vram_stats_;
   uint8_t* buffer_contents_ = nullptr;  // CPU-visible pointer into buffer_.
   bool is_zero_copy_ = false;
   ZeroCopyObservation zero_copy_observation_;
@@ -402,7 +489,7 @@ class MetalSharedMemory : public SharedMemory {
   // containment scan over ~1,000 live ranges per vertex fetch was 5% of
   // Red Dead's command-processor thread (2026-10-05). Rebuilt whenever the
   // vector is compacted.
-  std::unordered_map<uint64_t, uint32_t> consumed_index_;
+  MetalFlatIndexMap consumed_index_;
   // 64 KiB page -> indices (ascending) of the consumed ranges covering it
   // (XE_METAL_CONSUMED_PAGE_INDEX=0 restores the scans). A range containing
   // [start, end) covers start's page, and a range overlapping an upload

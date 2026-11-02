@@ -16,6 +16,7 @@
 #import <Metal/Metal.h>
 
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 
 #include "xenia/base/cvar.h"
@@ -25,6 +26,13 @@
 
 DECLARE_bool(gpu_allow_invalid_upload_range);
 DECLARE_bool(protect_on_release);
+DEFINE_bool(
+    metal_discrete_vram_mirror, true,
+    "On Macs with a discrete GPU (AMD), keep the GPU's copy of guest memory "
+    "in video memory instead of reading it from system memory across PCIe. "
+    "Has no effect on Apple Silicon. XE_METAL_DISCRETE_MIRROR=0/1 overrides "
+    "this setting.",
+    "GPU");
 
 namespace xe {
 namespace gpu {
@@ -174,14 +182,37 @@ bool MetalSharedMemory::Initialize() {
     // is fine because nothing reads it from the CPU.
     const uint32_t mirror_length =
         kBufferSize + (VfetchRenameEnabled() ? kRenameArenaBytes : 0u);
+    // Discrete mirror: the CPU mirror is read back on the CPU (publication),
+    // so it keeps the default cached mode; the GPU copy lives in VRAM.
+    const bool discrete =
+        DiscreteMirrorEnabled() && ![device hasUnifiedMemory];
     buffer = [device newBufferWithLength:mirror_length
-                                 options:MTLResourceStorageModeShared |
-                                         MTLResourceCPUCacheModeWriteCombined];
+                                 options:discrete
+                                             ? MTLResourceStorageModeShared
+                                             : (MTLResourceStorageModeShared |
+                                                MTLResourceCPUCacheModeWriteCombined)];
     gpu_visible_length_ = mirror_length;
     if (!buffer) {
       XELOGE("MetalSharedMemory: failed to allocate {} MiB shared buffer",
              kBufferSize / (1024 * 1024));
       return false;
+    }
+    if (discrete) {
+      id<MTLBuffer> gpu = [device newBufferWithLength:mirror_length
+                                              options:MTLResourceStorageModePrivate];
+      if (gpu) {
+        gpu.label = @"shared memory (VRAM)";
+        gpu_buffer_ = (__bridge_retained void*)gpu;
+        if (OnDemandReadbackEnabled()) {
+          id<MTLCommandQueue> queue = [device newCommandQueue];
+          queue.label = @"shared memory fetch";
+          fetch_queue_ = queue ? (__bridge_retained void*)queue : nullptr;
+        }
+        XELOGI("MetalSharedMemory: discrete mirror, {} MiB in VRAM",
+               mirror_length / (1024 * 1024));
+      } else {
+        XELOGW("MetalSharedMemory: no VRAM copy; GPU reads system RAM");
+      }
     }
   }
   buffer_ = (__bridge_retained void*)buffer;
@@ -233,8 +264,24 @@ void MetalSharedMemory::Shutdown() {
   // destroyed (MetalCommandProcessor::ShutdownContext does).
   zero_copy_overlap_.Shutdown();
   consumed_ranges_.clear();
-  consumed_index_.clear();
+  consumed_index_.Clear();
   ClearConsumedPages();
+  if (fetch_queue_) {
+    id<MTLCommandQueue> released_queue =
+        (__bridge_transfer id<MTLCommandQueue>)fetch_queue_;
+    (void)released_queue;
+    fetch_queue_ = nullptr;
+  }
+  {
+    std::lock_guard<std::mutex> lock(vram_mutex_);
+    vram_newer_.clear();
+    vram_hot_.clear();
+  }
+  if (gpu_buffer_) {
+    id<MTLBuffer> released_gpu = (__bridge_transfer id<MTLBuffer>)gpu_buffer_;
+    (void)released_gpu;
+    gpu_buffer_ = nullptr;
+  }
   if (buffer_) {
     id<MTLBuffer> released = (__bridge_transfer id<MTLBuffer>)buffer_;
     (void)released;
@@ -338,18 +385,295 @@ void MetalSharedMemory::ClearConsumedPages() {
 
 void MetalSharedMemory::AppendConsumedRange(uint32_t start, uint32_t end, uint64_t submission) {
   const uint32_t index = uint32_t(consumed_ranges_.size());
-  consumed_index_[(uint64_t(start) << 32) | end] = index;
+  consumed_index_.Insert((uint64_t(start) << 32) | end, index, true);
   consumed_ranges_.push_back(ConsumedRange{start, end, submission});
   IndexConsumedRange(index);
 }
 
+void MetalSharedMemory::NoteGpuWriteInFlight(uint32_t start, uint32_t length,
+                                             uint64_t submission) {
+  if (!length || !submission) {
+    return;
+  }
+  const uint32_t end = start + length;
+  if (const uint32_t* it =
+          consumed_index_.Find((uint64_t(start) << 32) | end)) {
+    ConsumedRange& range = consumed_ranges_[*it];
+    range.submission = std::max(range.submission, submission);
+    return;
+  }
+  AppendConsumedRange(start, end, submission);
+}
+
+bool MetalSharedMemory::OnDemandReadbackEnabled() {
+  // XE_METAL_DISCRETE_READBACK=eager: every GPU-produced range is read back
+  // with its frame (the first discrete-mirror form).
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_DISCRETE_READBACK");
+    return !(v && std::strcmp(v, "eager") == 0);
+  }();
+  return s_enabled;
+}
+
+void MetalSharedMemory::NoteCpuWrite(uint32_t offset, uint32_t length) {
+  if (!gpu_buffer_ || !length) {
+    return;
+  }
+  {
+    // The CPU's bytes are newer than VRAM's, except under a producer in the
+    // open submission: the upload's side command buffer runs ahead of it, so
+    // that producer's output lands over them in VRAM afterwards.
+    std::lock_guard<std::mutex> lock(vram_mutex_);
+    if (!vram_newer_.empty()) {
+      const uint64_t open =
+          vram_encoding_submission_ ? vram_encoding_submission_() : UINT64_MAX;
+      SubtractVramNewerLocked(offset, uint64_t(offset) + length,
+                              [open](const VramNewer& e) {
+                                return !e.eager && e.submission < open;
+                              });
+    }
+  }
+  if (cpu_write_callback_) {
+    cpu_write_callback_(offset, length);
+  }
+}
+
+template <typename Pred>
+void MetalSharedMemory::SubtractVramNewerLocked(uint32_t start, uint64_t end,
+                                                Pred pred) {
+  std::vector<VramNewer> tails;
+  for (size_t i = 0; i < vram_newer_.size();) {
+    VramNewer& e = vram_newer_[i];
+    if (e.end <= start || e.start >= end || !pred(e)) {
+      ++i;
+      continue;
+    }
+    const bool keep_head = e.start < start;
+    const bool keep_tail = e.end > end;
+    if (keep_head && keep_tail) {
+      VramNewer tail = e;
+      tail.start = uint32_t(end);
+      tails.push_back(tail);
+      e.end = start;
+    } else if (keep_head) {
+      e.end = start;
+    } else if (keep_tail) {
+      e.start = uint32_t(end);
+    } else {
+      vram_newer_[i] = vram_newer_.back();
+      vram_newer_.pop_back();
+      continue;
+    }
+    ++i;
+  }
+  vram_newer_.insert(vram_newer_.end(), tails.begin(), tails.end());
+}
+
+void MetalSharedMemory::PruneVramNewerLocked() {
+  // Completed frame readbacks have landed in the mirror. An entry covered by
+  // a newer COMMITTED one is superseded: a fetch of those bytes returns the
+  // newer producer's output either way, which is what publishing the owners
+  // in order leaves in RAM.
+  const uint64_t completed =
+      vram_completed_submission_ ? vram_completed_submission_() : 0;
+  const uint64_t open =
+      vram_encoding_submission_ ? vram_encoding_submission_() : UINT64_MAX;
+  std::vector<VramNewer> kept;
+  kept.reserve(vram_newer_.size());
+  for (const VramNewer& e : vram_newer_) {
+    if (e.eager && e.submission <= completed) {
+      continue;
+    }
+    bool superseded = false;
+    if (!e.eager) {
+      for (const VramNewer& f : vram_newer_) {
+        if (!f.eager && f.submission > e.submission && f.submission < open &&
+            f.start <= e.start && f.end >= e.end) {
+          superseded = true;
+          break;
+        }
+      }
+    }
+    if (!superseded) {
+      kept.push_back(e);
+    }
+  }
+  vram_newer_.swap(kept);
+  vram_prune_at_ = std::max<size_t>(64, vram_newer_.size() * 2);
+}
+
+void MetalSharedMemory::MarkVramNewer(uint32_t start, uint32_t length,
+                                      uint64_t submission, bool eager) {
+  if (!gpu_buffer_ || !length) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(vram_mutex_);
+  // Same submission, same bytes: one producer execution supersedes the other.
+  const uint64_t end = uint64_t(start) + length;
+  SubtractVramNewerLocked(start, end, [&](const VramNewer& e) {
+    return e.eager == eager && e.submission == submission;
+  });
+  vram_newer_.push_back(
+      VramNewer{start, uint32_t(end), submission, start, eager});
+  if (vram_newer_.size() >= vram_prune_at_) {
+    PruneVramNewerLocked();
+    if (vram_newer_.size() > 8192 && !vram_overflowed_) {
+      // Unbounded distinct producers: the command processor falls back to
+      // frame readbacks (IsVramHot reports everything hot).
+      vram_overflowed_ = true;
+      XELOGW("MetalSharedMemory: {} VRAM-newer ranges; on-demand readback "
+             "falls back to frame readbacks",
+             vram_newer_.size());
+    }
+  }
+}
+
+bool MetalSharedMemory::IsVramHot(uint32_t origin) const {
+  std::lock_guard<std::mutex> lock(vram_mutex_);
+  return vram_overflowed_ || vram_hot_.count(origin) != 0;
+}
+
+bool MetalSharedMemory::EnsureCpuCurrent(uint32_t start, uint32_t length) {
+  if (!gpu_buffer_ || !fetch_queue_ || !length) {
+    return true;
+  }
+  struct Piece {
+    uint32_t start, end;
+    uint64_t submission;
+    uint32_t origin;
+    size_t span;
+  };
+  std::vector<Piece> pieces;
+  uint64_t wait_submission = 0;
+  const uint64_t request_end = uint64_t(start) + length;
+  {
+    std::lock_guard<std::mutex> lock(vram_mutex_);
+    if (vram_newer_.empty()) {
+      return true;
+    }
+    const uint64_t open =
+        vram_encoding_submission_ ? vram_encoding_submission_() : UINT64_MAX;
+    for (const VramNewer& e : vram_newer_) {
+      // A producer in the open submission has not run; the mirror already
+      // holds what a read before it would see.
+      if (e.end <= start || e.start >= request_end || e.submission >= open) {
+        continue;
+      }
+      wait_submission = std::max(wait_submission, e.submission);
+      if (!e.eager) {
+        pieces.push_back(Piece{std::max(e.start, start),
+                               uint32_t(std::min<uint64_t>(e.end, request_end)),
+                               e.submission, e.origin, 0});
+      }
+    }
+  }
+  if (pieces.empty()) {
+    return true;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  if (vram_wait_ && !vram_wait_(wait_submission)) {
+    return false;
+  }
+  // Word-aligned spans covering the pieces, packed into one staging buffer.
+  std::sort(pieces.begin(), pieces.end(),
+            [](const Piece& a, const Piece& b) { return a.start < b.start; });
+  struct Span {
+    uint32_t start, end, staging;
+  };
+  std::vector<Span> spans;
+  const uint64_t limit = gpu_visible_length_;
+  for (Piece& p : pieces) {
+    uint32_t s = p.start & ~3u;
+    uint32_t e = uint32_t(std::min<uint64_t>((uint64_t(p.end) + 3) & ~3ull,
+                                             limit));
+    if (!spans.empty() && s <= spans.back().end) {
+      spans.back().end = std::max(spans.back().end, e);
+    } else {
+      spans.push_back(Span{s, e, 0});
+    }
+    p.span = spans.size() - 1;
+  }
+  uint32_t total = 0;
+  for (Span& s : spans) {
+    s.staging = total;
+    total += s.end - s.start;
+  }
+  @autoreleasepool {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+    id<MTLBuffer> staging =
+        [device newBufferWithLength:total options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)fetch_queue_;
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    if (!staging || !blit) {
+      return false;
+    }
+    blit.label = @"shared memory fetch";
+    id<MTLBuffer> gpu = (__bridge id<MTLBuffer>)gpu_buffer_;
+    for (const Span& s : spans) {
+      [blit copyFromBuffer:gpu
+              sourceOffset:s.start
+                  toBuffer:staging
+         destinationOffset:s.staging
+                      size:s.end - s.start];
+    }
+    [blit endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.status != MTLCommandBufferStatusCompleted) {
+      XELOGW("MetalSharedMemory: VRAM fetch failed (status {})",
+             int(cb.status));
+      return false;
+    }
+    const uint8_t* fetched = static_cast<const uint8_t*>(staging.contents);
+    std::lock_guard<std::mutex> lock(vram_mutex_);
+    uint64_t copied = 0;
+    for (const Piece& p : pieces) {
+      const Span& span = spans[p.span];
+      // Copy only what is still recorded for this producer: bytes the CPU
+      // rewrote meanwhile were subtracted by NoteCpuWrite.
+      for (const VramNewer& e : vram_newer_) {
+        if (e.eager || e.submission != p.submission || e.origin != p.origin ||
+            e.end <= p.start || e.start >= p.end) {
+          continue;
+        }
+        uint32_t c0 = std::max(e.start, p.start);
+        uint32_t c1 = std::min(e.end, p.end);
+        std::memcpy(buffer_contents_ + c0,
+                    fetched + span.staging + (c0 - span.start), c1 - c0);
+        copied += c1 - c0;
+      }
+      SubtractVramNewerLocked(p.start, p.end, [&](const VramNewer& e) {
+        return !e.eager && e.submission == p.submission &&
+               e.origin == p.origin;
+      });
+      vram_hot_.insert(p.origin);
+    }
+    ++vram_stats_.fetches;
+    vram_stats_.bytes += copied;
+    vram_stats_.ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - t0)
+                                   .count());
+  }
+  return true;
+}
+
+MetalSharedMemory::VramFetchStats MetalSharedMemory::ConsumeVramFetchStats() {
+  std::lock_guard<std::mutex> lock(vram_mutex_);
+  VramFetchStats stats = vram_stats_;
+  stats.entries = vram_newer_.size();
+  stats.hot = vram_hot_.size();
+  vram_stats_ = VramFetchStats{};
+  return stats;
+}
+
 void MetalSharedMemory::RebuildConsumedIndex() {
-  consumed_index_.clear();
-  consumed_index_.reserve(consumed_ranges_.size() * 2);
+  consumed_index_.Clear();
+  consumed_index_.Reserve(consumed_ranges_.size());
   ClearConsumedPages();
   for (uint32_t i = 0; i < consumed_ranges_.size(); ++i) {
     const ConsumedRange& r = consumed_ranges_[i];
-    consumed_index_.emplace((uint64_t(r.first) << 32) | r.second, i);
+    consumed_index_.Insert((uint64_t(r.first) << 32) | r.second, i, false);
     IndexConsumedRange(i);
   }
 }
@@ -359,9 +683,10 @@ bool MetalSharedMemory::NoteConsumed(uint32_t start, uint32_t length,
   uint32_t end = start + length;
   uint64_t submission = submission_provider_ ? submission_provider_() : 0;
   {
-    auto hit = consumed_index_.find((uint64_t(start) << 32) | end);
-    if (hit != consumed_index_.end() && hit->second < consumed_ranges_.size()) {
-      ConsumedRange& range = consumed_ranges_[hit->second];
+    const uint32_t* hit =
+        consumed_index_.Find((uint64_t(start) << 32) | end);
+    if (hit && *hit < consumed_ranges_.size()) {
+      ConsumedRange& range = consumed_ranges_[*hit];
       if (range.first == start && range.second == end) {
         range.submission = std::max(range.submission, submission);
         return result;
@@ -392,6 +717,16 @@ bool MetalSharedMemory::NoteConsumed(uint32_t start, uint32_t length,
   }
   AppendConsumedRange(start, end, submission);
   return result;
+}
+
+bool MetalSharedMemory::DiscreteMirrorEnabled() {
+  static const bool s_enabled = [] {
+    if (const char* v = std::getenv("XE_METAL_DISCRETE_MIRROR")) {
+      return v[0] == '1';
+    }
+    return cvars::metal_discrete_vram_mirror;
+  }();
+  return s_enabled;
 }
 
 bool MetalSharedMemory::VfetchRenameEnabled() {
@@ -504,22 +839,22 @@ void MetalSharedMemory::ReleaseConsumedRanges(uint64_t completed_submission) {
   uint32_t kept = first_removed;
   for (uint32_t i = first_removed; i < count; ++i) {
     const ConsumedRange range = consumed_ranges_[i];
-    auto hit = consumed_index_.find((uint64_t(range.first) << 32) | range.second);
-    const bool owns_key = hit != consumed_index_.end() && hit->second == i;
     if (range.submission <= completed_submission) {
       consumed_remap_[i] = kRemoved;
-      if (owns_key) {
-        consumed_index_.erase(hit);
-      }
       continue;
-    }
-    if (owns_key) {
-      hit->second = kept;
     }
     consumed_ranges_[kept] = range;
     consumed_remap_[i] = kept++;
   }
   consumed_ranges_.resize(kept);
+  // The flat map has no erase; refilling it keeps its storage (no allocation)
+  // and, like AppendConsumedRange, lets the newest range own a duplicate key.
+  consumed_index_.Clear();
+  for (uint32_t i = 0; i < kept; ++i) {
+    const ConsumedRange& range = consumed_ranges_[i];
+    consumed_index_.Insert((uint64_t(range.first) << 32) | range.second, i,
+                           true);
+  }
   if (ConsumedPageIndexEnabled()) {
     size_t pages_kept = 0;
     for (uint32_t page : consumed_pages_touched_) {
@@ -620,6 +955,7 @@ SharedBufferConvergenceOutcome MetalSharedMemory::ConvergeRangeToRam(
     return outcome;
   }
   const uint8_t* source = buffer_contents_ + base;
+  EnsureCpuCurrent(base, length);
   if (is_zero_copy_) {
     // A claimed alias is not evidence. Skipping the copy is licensed only by
     // the destination BEING the source at this exact range; if the two
@@ -775,6 +1111,7 @@ bool MetalSharedMemory::UploadRanges(
           AllocateRename(rename_request_length_, &arena_offset)) {
         std::memcpy(buffer_contents_ + kBufferSize + arena_offset, source,
                     rename_request_length_);
+        NoteCpuWrite(kBufferSize + arena_offset, rename_request_length_);
         rename_result_ = {rename_request_start_, rename_request_length_,
                           kBufferSize + arena_offset};
         rename_happened_ = true;
@@ -980,6 +1317,7 @@ bool MetalSharedMemory::UploadRanges(
           }
         }
         if (copied_direct) {
+          NoteCpuWrite(piece_start, piece_length);
           std::memcpy(buffer_contents_ + piece_start,
                       memory().TranslatePhysical(piece_start), piece_length);
         }

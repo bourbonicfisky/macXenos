@@ -139,6 +139,13 @@ class MetalTextureCache {
           blitter) {
     snapshot_fit_blit_ = std::move(blitter);
   }
+  // Zeroes a whole Private texture on the GPU (ordered before the fit blit
+  // that follows it); used for heap-allocated fitted views.
+  void SetSnapshotZeroer(
+      std::function<bool(void* texture, uint32_t width, uint32_t height)>
+          zeroer) {
+    snapshot_zero_ = std::move(zeroer);
+  }
   void PrepareSnapshotFit(const xenos::xe_gpu_texture_fetch_t& fetch,
                           bool is_signed);
 
@@ -157,6 +164,14 @@ class MetalTextureCache {
   // tip views, coverage, RAM-backed marking, retirement, invalidation). The
   // per-draw texture-dependency memo keys on it.
   uint64_t registry_epoch() const { return registry_epoch_; }
+  // Bumped whenever a fetch could resolve to a different slot or texture:
+  // a descriptor written, a slot retired, a cache entry erased. With
+  // registry_epoch() and no pending invalidations, the same fetch constant
+  // resolves to the same slot (the command processor's binding memo).
+  uint64_t binding_generation() const { return binding_generation_; }
+  bool HasPendingInvalidations() const {
+    return pending_invalidations_nonempty_.load(std::memory_order_acquire);
+  }
   void ResetActive() {
     active_textures_.clear();
     binding_allocation_failed_ = false;
@@ -302,6 +317,12 @@ class MetalTextureCache {
   // boundary (MetalCommandProcessor::ResetDerivedReplayState), followed by
   // ClearCache() to drain what this retires.
   void RetireAllResolvedTargets();
+  // Retires every bridge (resolved target or scaled assembly) still naming
+  // `texture`, a snapshot its owner is about to free. A replaced snapshot
+  // whose replacing resolve never re-registered the base would otherwise
+  // leave the bridge (and its bindless slot) naming freed memory. Returns
+  // whether any bridge named it.
+  bool RetireResolvedTargetsNaming(void* texture);
   // Post-clear consistency evidence (a clear must return these toward their
   // post-initialization baseline, and leave nothing queued).
   uint32_t cached_texture_count() const { return uint32_t(cache_.size()); }
@@ -383,7 +404,7 @@ class MetalTextureCache {
   // Points `slot` at a retained id<MTLTexture> the caller keeps alive.
   void BindExternalSlot(uint32_t slot, void* texture_bridge);
   void RetireExternalSlot(uint32_t slot) {
-    stale_slots_.emplace_back(RetireSubmission(), slot);
+    RetireSlot(RetireSubmission(), slot);
   }
   // Takes ownership of a retained id<MTLTexture> (+1); released once the
   // submissions that may reference it complete (same pool as evictions).
@@ -395,7 +416,36 @@ class MetalTextureCache {
     active_textures_.push_back(texture_bridge);
   }
 
+  // Texture heaps (discrete AMD GPUs, which have no MTLResidencySet): Private
+  // textures are placed in a few large tracked MTLHeaps so a render encoder
+  // makes them all resident with one useHeaps call instead of one
+  // useResource per texture per pass (amdMtl_HwCmdBufAddIndirectRsrc was
+  // 2.6-4.7% of the command-processor thread). Every release of a heap
+  // texture must wait for the submissions that reference it (the retire pool
+  // and the snapshot deferred list both do), because useHeaps keeps the heap
+  // resident, not the texture alive. XE_METAL_TEXTURE_HEAPS=0/1 overrides.
+  void EnableTextureHeaps();
+  bool texture_heaps_enabled() const { return heaps_enabled_; }
+  // A retained (+1) id<MTLTexture> from a heap, or nullptr when the
+  // descriptor is not Private or the heap budget is spent (the caller then
+  // allocates from the device as before).
+  void* NewHeapTexture(void* descriptor);
+  uint32_t texture_heap_count() const {
+    return heap_count_.load(std::memory_order_acquire);
+  }
+  void* texture_heap(uint32_t i) const { return heaps_[i]; }
+  uint64_t heap_texture_count() const { return heap_textures_; }
+  uint64_t heap_bytes() const { return heap_bytes_; }
+
  private:
+  static constexpr uint32_t kMaxTextureHeaps = 64;
+  bool heaps_enabled_ = false;
+  void* heaps_[kMaxTextureHeaps] = {};
+  std::atomic<uint32_t> heap_count_{0};
+  std::mutex heap_mutex_;
+  uint64_t heap_budget_ = 0;
+  uint64_t heap_bytes_ = 0;
+  uint64_t heap_textures_ = 0;
   static void SharedMemoryGlobalWatchCallback(
       const global_unique_lock_type& global_lock, void* context,
       uint32_t address_first, uint32_t address_last, bool invalidated_by_gpu);
@@ -688,6 +738,11 @@ class MetalTextureCache {
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
   uint64_t registry_epoch_ = 0;
+  uint64_t binding_generation_ = 0;
+  void RetireSlot(uint64_t submission, uint32_t slot) {
+    ++binding_generation_;
+    stale_slots_.emplace_back(submission, slot);
+  }
   static void CacheSnapshotProperties(ResolvedTarget& rt);
   void SnapshotObjectDims(const ResolvedTarget& rt, uint32_t* width_out,
                           uint32_t* height_out) const;
@@ -700,6 +755,7 @@ class MetalTextureCache {
                                bool identity);
   void RetireFittedView(ResolvedTarget::FittedView& fitted);
   std::function<bool(void*, void*, uint32_t, uint32_t)> snapshot_fit_blit_;
+  std::function<bool(void*, uint32_t, uint32_t)> snapshot_zero_;
   // Draw resolution scaling: column assemblies (see RegisterScaledAssembly),
   // keyed by the destination's x = 0 base. The texture is owned by the
   // render-target cache; the slot and swizzle views are ours.

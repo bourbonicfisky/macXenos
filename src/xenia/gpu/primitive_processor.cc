@@ -134,9 +134,11 @@ bool PrimitiveProcessor::InitializeCommon(
     bool point_sprites_supported_without_vs_expansion,
     bool rectangle_lists_supported_without_vs_expansion,
     bool host_primitive_reset_always_enabled,
-    bool convert_triangle_fans_first_provoking) {
+    bool convert_triangle_fans_first_provoking,
+    bool host_primitive_reset_strips_only) {
   full_32bit_vertex_indices_used_ = full_32bit_vertex_indices_supported;
   host_primitive_reset_always_enabled_ = host_primitive_reset_always_enabled;
+  host_primitive_reset_strips_only_ = host_primitive_reset_strips_only;
   convert_triangle_fans_first_provoking_ = convert_triangle_fans_first_provoking;
   convert_triangle_fans_to_lists_ =
       !triangle_fans_supported || cvars::force_convert_triangle_fans_to_lists;
@@ -299,13 +301,17 @@ void PrimitiveProcessor::ClearPerFrameCache() {
   static const bool s_widen_census =
       std::getenv("XE_WIDEN_SCAN_VERIFY") != nullptr;
   if (++widen_census_frames_ >= 600) {
-    if (s_widen_census && (widen_census_scans_ || widen_census_memo_hits_)) {
-      XELOGI("WidenScanCensus 600 frames: scans {} positive {} memo hits {}",
+    if (s_widen_census && (widen_census_scans_ || widen_census_memo_hits_ ||
+                           widen_census_list_skips_)) {
+      XELOGI("WidenScanCensus 600 frames: scans {} positive {} memo hits {} "
+             "list skips {} (with 0xFFFF {})",
              widen_census_scans_, widen_census_positive_,
-             widen_census_memo_hits_);
+             widen_census_memo_hits_, widen_census_list_skips_,
+             widen_census_list_ffff_);
     }
     widen_census_frames_ = widen_census_scans_ = widen_census_positive_ =
-        widen_census_memo_hits_ = 0;
+        widen_census_memo_hits_ = widen_census_list_skips_ =
+            widen_census_list_ffff_ = 0;
   }
   if (!memory_invalidation_callback_handle_) {
     // Only do clearing if cache has ever been used.
@@ -1061,6 +1067,22 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
             }
             cache_transaction.SetNewResult(cacheable);
           }
+        }
+      } else if (host_primitive_reset_always_enabled_ &&
+                 cvars::convert_16bit_list_indices_to_32bit_on_metal &&
+                 guest_index_format == xenos::IndexFormat::kInt16 &&
+                 host_primitive_reset_strips_only_ &&
+                 HostListDrawIgnoresRestart(host_primitive_type)) {
+        // A plain list: the host does not restart it, the guest buffer is
+        // drawn as is (kGuestDMA).
+        ++widen_census_list_skips_;
+        static const bool s_verify_skips =
+            std::getenv("XE_WIDEN_SCAN_VERIFY") != nullptr;
+        if (s_verify_skips &&
+            IsResetUsed(memory_.TranslatePhysical<const uint16_t*>(
+                            guest_index_base),
+                        guest_draw_vertex_count, UINT16_MAX)) {
+          ++widen_census_list_ffff_;
         }
       } else if (host_primitive_reset_always_enabled_ &&
                  cvars::convert_16bit_list_indices_to_32bit_on_metal &&
@@ -1835,6 +1857,20 @@ PrimitiveProcessor::CacheTransaction::~CacheTransaction() {
 
     processor_.cache_map_.emplace(key_, new_entry_index);
   }
+}
+
+bool PrimitiveProcessor::HostListDrawIgnoresRestart(
+    xenos::PrimitiveType host_primitive_type) {
+  // Plain lists only: point, rectangle and quad lists may be drawn through
+  // geometry emulation, whose index reads are not covered by the probe.
+  // XE_PP_RESTART_STRIPS_ONLY=0 scans every type again.
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_PP_RESTART_STRIPS_ONLY");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled &&
+         (host_primitive_type == xenos::PrimitiveType::kTriangleList ||
+          host_primitive_type == xenos::PrimitiveType::kLineList);
 }
 
 bool PrimitiveProcessor::WidenScanMemoEnabled() const {

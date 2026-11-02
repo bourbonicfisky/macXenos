@@ -45,12 +45,15 @@ enum class MetalEncodeStream::Op : uint16_t {
   kBufferOffset,
   kBytes,
   kUseResource,
+  kUseHeaps,
   kDraw,
   kDrawIndexed,
   kIRDraw,
   kIRDrawIndexed,
   kIRDrawIndexedGeometry,
   kIRDrawGeometry,
+  kBeginPass,
+  kEndPass,
   kBufferBarrier,
   kPipelineDeferred,
 };
@@ -106,6 +109,12 @@ constexpr uint32_t kParkTimeoutUs = 1000;
 struct PtrOp {
   void* object;
 };
+// Retained references (CFBridgingRetain); the replay releases them.
+struct BeginPassOp {
+  void* command_buffer;
+  void* descriptor;
+  void* label;  // may be null
+};
 struct U32Op {
   uint32_t value;
   uint32_t pad;
@@ -153,6 +162,12 @@ struct BytesOp {
   uint32_t stage;
   uint32_t pad;
   // Followed by `length` bytes.
+};
+struct UseHeapsOp {
+  uint32_t count;
+  uint32_t pad;
+  uint64_t stages;
+  // Followed by `count` id<MTLHeap> pointers.
 };
 struct UseResourceOp {
   void* resource;
@@ -454,6 +469,32 @@ void MetalEncodeStream::ReplayRange(uint64_t begin, uint64_t end) {
         enc = (__bridge id<MTLRenderCommandEncoder>)(
             static_cast<const PtrOp*>(payload)->object);
         break;
+      case Op::kBeginPass: {
+        const auto* p = static_cast<const BeginPassOp*>(payload);
+        id<MTLCommandBuffer> command_buffer =
+            (__bridge_transfer id<MTLCommandBuffer>)p->command_buffer;
+        MTLRenderPassDescriptor* descriptor =
+            (__bridge_transfer MTLRenderPassDescriptor*)p->descriptor;
+        NSString* label = (__bridge_transfer NSString*)p->label;
+        owned_encoder_ =
+            [command_buffer renderCommandEncoderWithDescriptor:descriptor];
+        if (!owned_encoder_) {
+          static bool s_logged = false;
+          if (!s_logged) {
+            s_logged = true;
+            XELOGE("MetalEncodeStream: render encoder creation failed; the "
+                   "pass's draws are dropped");
+          }
+        } else if (label) {
+          owned_encoder_.label = label;
+        }
+        enc = owned_encoder_;
+      } break;
+      case Op::kEndPass:
+        [enc endEncoding];
+        owned_encoder_ = nil;
+        enc = nil;
+        break;
       case Op::kViewport:
         [enc setViewport:static_cast<const ViewportOp*>(payload)->viewport];
         break;
@@ -583,6 +624,15 @@ void MetalEncodeStream::ReplayRange(uint64_t begin, uint64_t end) {
           CFRelease(p->resource);
         }
       } break;
+      case Op::kUseHeaps: {
+        const auto* p = static_cast<const UseHeapsOp*>(payload);
+        const auto* raw = reinterpret_cast<void* const*>(p + 1);
+        __unsafe_unretained id<MTLHeap> heaps[kMaxUseHeaps];
+        for (uint32_t i = 0; i < p->count; ++i) {
+          heaps[i] = (__bridge id<MTLHeap>)raw[i];
+        }
+        [enc useHeaps:heaps count:p->count stages:MTLRenderStages(p->stages)];
+      } break;
       case Op::kDraw: {
         if (replay_skip_draws_) {
           break;
@@ -659,6 +709,23 @@ void MetalEncodeStream::SetEncoder(id<MTLRenderCommandEncoder> encoder) {
   Emit<PtrOp>(Op::kSetEncoder)->object = (__bridge void*)encoder;
 }
 
+void MetalEncodeStream::BeginRenderPass(
+    __unsafe_unretained id<MTLCommandBuffer> command_buffer,
+    __unsafe_unretained MTLRenderPassDescriptor* descriptor,
+    __unsafe_unretained NSString* label) {
+  assert_true(mode_ != Mode::kDirect);
+  ++stats_.passes;
+  auto* op = Emit<BeginPassOp>(Op::kBeginPass);
+  op->command_buffer = (__bridge_retained void*)command_buffer;
+  op->descriptor = (__bridge_retained void*)descriptor;
+  op->label = label ? (__bridge_retained void*)label : nullptr;
+}
+
+void MetalEncodeStream::EndRenderPass() {
+  assert_true(mode_ != Mode::kDirect);
+  Emit<U32Op>(Op::kEndPass);
+}
+
 void MetalEncodeStream::SetViewport(const MTLViewport& viewport) {
   if (mode_ == Mode::kDirect) {
     [direct_encoder_ setViewport:viewport];
@@ -719,7 +786,7 @@ void MetalEncodeStream::SetScissorRect(const MTLScissorRect& rect) {
 }
 
 void MetalEncodeStream::SetRenderPipelineState(
-    id<MTLRenderPipelineState> state) {
+    __unsafe_unretained id<MTLRenderPipelineState> state) {
   if (mode_ == Mode::kDirect) {
     [direct_encoder_ setRenderPipelineState:state];
     return;
@@ -757,7 +824,7 @@ void MetalEncodeStream::SetBlendColor(float r, float g, float b, float a) {
   c[3] = a;
 }
 
-void MetalEncodeStream::SetDepthStencilState(id<MTLDepthStencilState> state) {
+void MetalEncodeStream::SetDepthStencilState(__unsafe_unretained id<MTLDepthStencilState> state) {
   if (mode_ == Mode::kDirect) {
     [direct_encoder_ setDepthStencilState:state];
     return;
@@ -801,7 +868,7 @@ void MetalEncodeStream::SetVisibilityResultMode(MTLVisibilityResultMode mode,
   p->offset = uint64_t(offset);
 }
 
-void MetalEncodeStream::SetBuffer(uint32_t stage, id<MTLBuffer> buffer,
+void MetalEncodeStream::SetBuffer(uint32_t stage, __unsafe_unretained id<MTLBuffer> buffer,
                                   NSUInteger offset, NSUInteger index) {
   if (mode_ == Mode::kDirect) {
     switch (stage) {
@@ -879,7 +946,7 @@ void MetalEncodeStream::SetBytes(uint32_t stage, const void* bytes,
   std::memcpy(p + 1, bytes, length);
 }
 
-void MetalEncodeStream::UseResource(id<MTLResource> resource,
+void MetalEncodeStream::UseResource(__unsafe_unretained id<MTLResource> resource,
                                     MTLResourceUsage usage,
                                     MTLRenderStages stages, bool retain) {
   if (mode_ == Mode::kDirect) {
@@ -893,6 +960,25 @@ void MetalEncodeStream::UseResource(id<MTLResource> resource,
   p->retained = retain ? 1 : 0;
   if (retain) {
     CFRetain((__bridge CFTypeRef)resource);
+  }
+}
+
+void MetalEncodeStream::UseHeaps(__unsafe_unretained const id<MTLHeap>* heaps,
+                                 uint32_t count, MTLRenderStages stages) {
+  count = std::min(count, kMaxUseHeaps);
+  if (mode_ == Mode::kDirect) {
+    [direct_encoder_ useHeaps:heaps count:count stages:stages];
+    return;
+  }
+  // Heaps live as long as the texture cache, so the replay needs no retain.
+  auto* p = static_cast<UseHeapsOp*>(Reserve(
+      Op::kUseHeaps, uint32_t(sizeof(UseHeapsOp) + count * sizeof(void*))));
+  p->count = count;
+  p->pad = 0;
+  p->stages = uint64_t(stages);
+  auto* raw = reinterpret_cast<void**>(p + 1);
+  for (uint32_t i = 0; i < count; ++i) {
+    raw[i] = (__bridge void*)heaps[i];
   }
 }
 
@@ -913,7 +999,7 @@ void MetalEncodeStream::DrawPrimitives(MTLPrimitiveType type,
 
 void MetalEncodeStream::DrawIndexedPrimitives(
     MTLPrimitiveType type, uint64_t index_count, MTLIndexType index_type,
-    id<MTLBuffer> index_buffer, uint64_t index_offset, uint64_t instance_count,
+    __unsafe_unretained id<MTLBuffer> index_buffer, uint64_t index_offset, uint64_t instance_count,
     int64_t base_vertex, uint64_t base_instance) {
   if (mode_ == Mode::kDirect) {
     [direct_encoder_ drawIndexedPrimitives:type
@@ -952,7 +1038,7 @@ void MetalEncodeStream::IRDrawPrimitives(MTLPrimitiveType type,
 
 void MetalEncodeStream::IRDrawIndexedPrimitives(
     MTLPrimitiveType type, uint64_t index_count, MTLIndexType index_type,
-    id<MTLBuffer> index_buffer, uint64_t index_offset, uint64_t instance_count,
+    __unsafe_unretained id<MTLBuffer> index_buffer, uint64_t index_offset, uint64_t instance_count,
     int64_t base_vertex, uint64_t base_instance) {
   if (mode_ == Mode::kDirect) {
     IRRuntimeDrawIndexedPrimitives(direct_encoder_, type, index_count,
@@ -973,7 +1059,7 @@ void MetalEncodeStream::IRDrawIndexedPrimitives(
 
 void MetalEncodeStream::IRDrawIndexedGeometryEmulation(
     IRRuntimePrimitiveType type, MTLIndexType index_type,
-    id<MTLBuffer> index_buffer, const IRRuntimeGeometryPipelineConfig& config,
+    __unsafe_unretained id<MTLBuffer> index_buffer, const IRRuntimeGeometryPipelineConfig& config,
     uint32_t instance_count, uint32_t index_count, uint32_t start_index,
     int base_vertex, uint32_t base_instance) {
   if (mode_ == Mode::kDirect) {

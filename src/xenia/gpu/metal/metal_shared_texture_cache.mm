@@ -45,6 +45,7 @@ static_assert(MTLPixelFormatRGBA16Float == xe::gpu::metal::kMtlPixelFormatRGBA16
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
@@ -55,6 +56,9 @@ static_assert(MTLPixelFormatRGBA16Float == xe::gpu::metal::kMtlPixelFormatRGBA16
 #include "xenia/gpu/trace_writer.h"
 #include "xenia/memory.h"
 #include "third_party/xxhash/xxhash.h"
+
+DECLARE_uint32(texture_cache_memory_limit_soft);
+DECLARE_uint32(texture_cache_memory_limit_hard);
 
 namespace xe {
 namespace gpu {
@@ -318,6 +322,7 @@ bool MetalSharedTextureCache::Initialize() {
   SharedTextureBcSupported().store(
       [(__bridge id<MTLDevice>)device_ supportsBCTextureCompression],
       std::memory_order_relaxed);
+  SizeHostMemoryLimitsForDevice();
   direct_pipeline_ = MetalLoadShaderPipelines::CreateDirectRgba8Pipeline(device_);
   if (!direct_pipeline_) {
     return false;
@@ -330,6 +335,42 @@ bool MetalSharedTextureCache::Initialize() {
     }
   }
   return true;
+}
+
+void MetalSharedTextureCache::SizeHostMemoryLimitsForDevice() {
+  // The texture_cache_memory_limit_* defaults (384 / 768 MB) are sized for
+  // the smallest GPUs the D3D12 and Vulkan backends run on. Dedicated-VRAM
+  // Macs have at least 4 GB (the floor is an RX 580 class card), so there
+  // the limits follow the device's working set: an eighth soft and a
+  // quarter hard, never below the defaults, at most 2 / 4 GB. 4 GB card:
+  // 512 / 1024 MB; 8 GB (RX 580, Radeon Pro 580X): 1 / 2 GB; 16 GB (RX 6900
+  // XT): 2 / 4 GB. Settings changed from the defaults are kept, and Apple
+  // GPUs, which share system memory, keep the defaults.
+  // XE_METAL_TEXTURE_LIMITS_DEFAULT=1 keeps the defaults on any GPU.
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!device || device.hasUnifiedMemory ||
+      [device supportsFamily:MTLGPUFamilyApple7] ||
+      std::getenv("XE_METAL_TEXTURE_LIMITS_DEFAULT")) {
+    return;
+  }
+  constexpr uint32_t kDefaultSoftMB = 384, kDefaultHardMB = 768;
+  const uint64_t working_set_mb =
+      uint64_t(device.recommendedMaxWorkingSetSize) >> 20;
+  const uint32_t soft_mb = uint32_t(std::clamp<uint64_t>(
+      working_set_mb / 8, kDefaultSoftMB, 2048));
+  const uint32_t hard_mb = uint32_t(std::clamp<uint64_t>(
+      working_set_mb / 4, kDefaultHardMB, 4096));
+  const bool soft_default =
+      cvars::texture_cache_memory_limit_soft == kDefaultSoftMB;
+  const bool hard_default =
+      cvars::texture_cache_memory_limit_hard == kDefaultHardMB;
+  SetHostMemoryLimitsMB(soft_default ? soft_mb : 0,
+                        hard_default ? hard_mb : 0);
+  XELOGI("MetalSharedTextureCache: dedicated VRAM ({} MiB working set), "
+         "texture memory limits {} / {} MB",
+         working_set_mb,
+         soft_default ? soft_mb : cvars::texture_cache_memory_limit_soft,
+         hard_default ? hard_mb : cvars::texture_cache_memory_limit_hard);
 }
 
 bool MetalSharedTextureCache::PlanLevels(const Texture& texture, bool load_base,
@@ -484,7 +525,17 @@ std::unique_ptr<TextureCache::Texture> MetalSharedTextureCache::CreateTexture(
     // establishes that this usage bit is part of that contract.
     desc.usage |= MTLTextureUsagePixelFormatView;
   }
-  id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+  // Discrete AMD GPUs: from the legacy cache's texture heaps (one useHeaps
+  // per pass instead of a per-draw declaration). Release is through the
+  // legacy retire pool (~MetalTexture), which waits for the submissions.
+  id<MTLTexture> texture = nil;
+  if (legacy_ && legacy_->texture_heaps_enabled()) {
+    texture = (__bridge_transfer id<MTLTexture>)legacy_->NewHeapTexture(
+        (__bridge void*)desc);
+  }
+  if (!texture) {
+    texture = [device newTextureWithDescriptor:desc];
+  }
   if (!texture) {
     return nullptr;
   }
@@ -514,6 +565,7 @@ void NoteDecline(const char* reason, const Key& key) {
 
 bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
     Texture& texture, bool load_base, bool load_mips) {
+  ++serve_generation_;
   MetalTexture& metal_texture = static_cast<MetalTexture&>(texture);
   TextureKey key = texture.key();
   bool mipped = key.mip_max_level != 0;
@@ -1079,6 +1131,7 @@ bool MetalSharedTextureCache::RevalidateRegions(
 
 void MetalSharedTextureCache::CompletedSubmissionUpdated(
     uint64_t completed_submission_index) {
+  ++serve_generation_;
   TextureCache::CompletedSubmissionUpdated(completed_submission_index);
   if (!legacy_) {
     return;
@@ -1586,6 +1639,7 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
 
 void MetalSharedTextureCache::UpdateTextureBindingsImpl(
     uint32_t fetch_constant_mask) {
+  ++serve_generation_;
   uint32_t bits = fetch_constant_mask;
   uint32_t index;
   while (xe::bit_scan_forward(bits, &index)) {
@@ -1627,6 +1681,7 @@ bool MetalSharedTextureCache::AcquireView(MetalTexture& texture,
                                           uint32_t host_swizzle,
                                           bool is_signed, void** view_out,
                                           uint32_t* slot_out) {
+  ++serve_generation_;
   const bool cached = RouteViewCacheEnabled();
   if (cached) {
     for (const MetalTexture::CachedView& view : texture.views) {
@@ -1693,6 +1748,7 @@ bool MetalSharedTextureCache::AcquireView(MetalTexture& texture,
 }
 
 void MetalSharedTextureCache::ForgetTextureBindings(const Texture* texture) {
+  ++serve_generation_;
   for (BindingSlot& binding_slot : binding_slots_) {
     if (binding_slot.texture == texture) {
       ReleaseBindingSlot(binding_slot);
@@ -1701,6 +1757,7 @@ void MetalSharedTextureCache::ForgetTextureBindings(const Texture* texture) {
 }
 
 void MetalSharedTextureCache::ClearCache() {
+  ++serve_generation_;
   // Release the descriptor state FIRST, while the textures it names are still
   // alive. The base clear below resets the bindings, and this cache's
   // UpdateTextureBindingsImpl deliberately parks a texture-less binding
@@ -1716,6 +1773,7 @@ void MetalSharedTextureCache::ClearCache() {
 }
 
 void MetalSharedTextureCache::ReleaseBindingSlot(BindingSlot& binding_slot) {
+  ++serve_generation_;
   if (!binding_slot.slot && !binding_slot.sampled_view) {
     binding_slot = BindingSlot{};
     return;
@@ -1768,6 +1826,7 @@ void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask,
   }
   uint64_t submission = submission_provider_ ? submission_provider_() : 0;
   if (submission > last_begun_submission_) {
+    ++serve_generation_;
     last_begun_submission_ = submission;
     BeginSubmission(submission);
   }
@@ -1775,6 +1834,9 @@ void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask,
   // command processor's WriteRegister keeps the dirty mask); an unchanged
   // binding keeps its texture, as in the D3D12 cache.
   uint32_t bits = eligible_mask & dirty_mask;
+  if (bits) {
+    ++serve_generation_;
+  }
   uint32_t index;
   while (xe::bit_scan_forward(bits, &index)) {
     bits = xe::clear_lowest_bit(bits);
@@ -1789,9 +1851,14 @@ void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask,
     bits = xe::clear_lowest_bit(bits);
     const TextureBinding* binding = GetValidTextureBinding(index);
     const Texture* texture = binding ? binding->texture : nullptr;
-    binding_slots_[index].prep_current =
-        texture && !texture->base_outdated_lockless() &&
-        !texture->mips_outdated_lockless();
+    const bool prep_current = texture && !texture->base_outdated_lockless() &&
+                              !texture->mips_outdated_lockless();
+    binding_slots_[index].prep_current = prep_current;
+    if (!prep_current) {
+      // An outdated binding's serve depends on later state (the stale-serve
+      // rule), so no draw after this prep may reuse an earlier serve.
+      ++serve_generation_;
+    }
   }
 }
 
@@ -2080,6 +2147,7 @@ void MetalSharedTextureCache::CompleteResolveForward(
 
 void MetalSharedTextureCache::OnSubmissionsFaulted(
     const std::vector<uint64_t>& submissions) {
+  ++serve_generation_;
   if (submissions.empty()) {
     return;
   }

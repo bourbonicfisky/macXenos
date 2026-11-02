@@ -395,6 +395,89 @@ MetalTextureCache::MetalTextureCache(void* device, Memory* memory,
                              : "unavailable (5:6:5 expanded on the CPU)");
 }
 
+void MetalTextureCache::EnableTextureHeaps() {
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!device) {
+    return;
+  }
+  // Default: dedicated GPUs only (no unified memory, not an Apple GPU).
+  bool enabled = !device.hasUnifiedMemory &&
+                 ![device supportsFamily:MTLGPUFamilyApple7];
+  if (const char* v = std::getenv("XE_METAL_TEXTURE_HEAPS")) {
+    enabled = v[0] == '1';
+  }
+  if (!enabled) {
+    return;
+  }
+  // Half the working set, at most 8 GiB; past it textures come from the
+  // device and are declared per draw as before.
+  heap_budget_ = std::min<uint64_t>(device.recommendedMaxWorkingSetSize / 2,
+                                    uint64_t(8) << 30);
+  heaps_enabled_ = true;
+  XELOGI("MetalTextureHeaps: enabled, budget {} MiB", heap_budget_ >> 20);
+}
+
+void* MetalTextureCache::NewHeapTexture(void* descriptor) {
+  if (!heaps_enabled_ || !descriptor) {
+    return nullptr;
+  }
+  MTLTextureDescriptor* desc = (__bridge MTLTextureDescriptor*)descriptor;
+  if (desc.storageMode != MTLStorageModePrivate) {
+    return nullptr;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  std::lock_guard<std::mutex> lock(heap_mutex_);
+  const MTLSizeAndAlign size_align =
+      [device heapTextureSizeAndAlignWithDescriptor:desc];
+  const uint32_t count = heap_count_.load(std::memory_order_relaxed);
+  // Newest heap first: older heaps are mostly full.
+  for (uint32_t i = count; i-- > 0;) {
+    id<MTLHeap> heap = (__bridge id<MTLHeap>)heaps_[i];
+    if ([heap maxAvailableSizeWithAlignment:size_align.align] <
+        size_align.size) {
+      continue;
+    }
+    id<MTLTexture> texture = [heap newTextureWithDescriptor:desc];
+    if (texture) {
+      ++heap_textures_;
+      return (__bridge_retained void*)texture;
+    }
+  }
+  if (count >= kMaxTextureHeaps) {
+    return nullptr;
+  }
+  constexpr uint64_t kHeapBytes = uint64_t(256) << 20;
+  constexpr uint64_t kMiB = uint64_t(1) << 20;
+  const uint64_t heap_size = std::max<uint64_t>(
+      kHeapBytes, (uint64_t(size_align.size) + kMiB - 1) & ~(kMiB - 1));
+  if (heap_bytes_ + heap_size > heap_budget_) {
+    return nullptr;
+  }
+  MTLHeapDescriptor* heap_desc = [[MTLHeapDescriptor alloc] init];
+  heap_desc.type = MTLHeapTypeAutomatic;
+  heap_desc.storageMode = MTLStorageModePrivate;
+  heap_desc.hazardTrackingMode = MTLHazardTrackingModeTracked;
+  heap_desc.size = heap_size;
+  id<MTLHeap> heap = [device newHeapWithDescriptor:heap_desc];
+  if (!heap) {
+    XELOGW("MetalTextureHeaps: heap of {} MiB failed; device allocation",
+           heap_size >> 20);
+    return nullptr;
+  }
+  heap.label = [NSString stringWithFormat:@"xenia textures %u", count];
+  heaps_[count] = (__bridge_retained void*)heap;
+  heap_bytes_ += heap_size;
+  heap_count_.store(count + 1, std::memory_order_release);
+  XELOGI("MetalTextureHeaps: heap {} ({} MiB, {} MiB total)", count,
+         heap_size >> 20, heap_bytes_ >> 20);
+  id<MTLTexture> texture = [heap newTextureWithDescriptor:desc];
+  if (!texture) {
+    return nullptr;
+  }
+  ++heap_textures_;
+  return (__bridge_retained void*)texture;
+}
+
 MetalTextureCache::~MetalTextureCache() {
   if (shared_memory_watch_) {
     shared_memory_->UnregisterGlobalWatch(shared_memory_watch_);
@@ -407,6 +490,7 @@ MetalTextureCache::~MetalTextureCache() {
     }
   }
   cache_.clear();
+  ++binding_generation_;
   ClearEntryIndex();
   for (auto& pair : parked_) {
     id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
@@ -461,6 +545,13 @@ MetalTextureCache::~MetalTextureCache() {
     }
   }
   scaled_assemblies_.clear();
+  // Heap textures retain their heap; these are the cache's own references.
+  for (uint32_t h = 0; h < heap_count_.load(); ++h) {
+    id<MTLHeap> released = (__bridge_transfer id<MTLHeap>)heaps_[h];
+    (void)released;
+    heaps_[h] = nullptr;
+  }
+  heap_count_.store(0);
 }
 
 void MetalTextureCache::ReleaseDerivedResolveBridges(
@@ -516,6 +607,32 @@ void MetalTextureCache::RetireAllResolvedTargets() {
   scaled_assemblies_.clear();
 }
 
+bool MetalTextureCache::RetireResolvedTargetsNaming(void* texture) {
+  if (!texture) {
+    return false;
+  }
+  bool named = false;
+  for (auto it = resolved_targets_.begin(); it != resolved_targets_.end();) {
+    if (it->second.texture == texture) {
+      RetireResolvedTarget(it->second);
+      it = resolved_targets_.erase(it);
+      named = true;
+    } else {
+      ++it;
+    }
+  }
+  for (auto it = scaled_assemblies_.begin(); it != scaled_assemblies_.end();) {
+    if (it->second.texture == texture) {
+      RetireScaledAssembly(it->second);
+      it = scaled_assemblies_.erase(it);
+      named = true;
+    } else {
+      ++it;
+    }
+  }
+  return named;
+}
+
 void MetalTextureCache::ClearCache() {
   // Ordinary cached textures are pure derived content: every one of them is
   // reconstructible from guest RAM on the next fetch, which is what makes a
@@ -547,6 +664,7 @@ void MetalTextureCache::ClearCache() {
     }
   }
   cache_.clear();
+  ++binding_generation_;
   ClearEntryIndex();
   for (auto& pair : parked_) {
     id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)pair.second.texture;
@@ -1048,13 +1166,13 @@ bool MetalTextureCache::SnapshotFitApplies(const ResolvedTarget& rt,
 void MetalTextureCache::RetireFittedView(ResolvedTarget::FittedView& fitted) {
   uint64_t retire_submission = RetireSubmission();
   if (fitted.slot) {
-    stale_slots_.emplace_back(retire_submission, fitted.slot);
+    RetireSlot(retire_submission, fitted.slot);
   }
   if (fitted.texture) {
     retired_textures_.emplace_back(retire_submission, fitted.texture);
   }
   for (auto& sv : fitted.swizzle_views) {
-    stale_slots_.emplace_back(retire_submission, sv.second.slot);
+    RetireSlot(retire_submission, sv.second.slot);
     retired_textures_.emplace_back(retire_submission, sv.second.view);
   }
   fitted = ResolvedTarget::FittedView{};
@@ -1107,11 +1225,26 @@ bool MetalTextureCache::EnsureFittedSnapshot(ResolvedTarget& rt,
     desc.arrayLength = 1;
     desc.mipmapLevelCount = 1;
     desc.usage = MTLTextureUsageShaderRead;
-    // Shared so the texels the snapshot does not cover can be zeroed once at
-    // creation from the CPU (deterministic stand-in for guest RAM the game
-    // does not sample); the GPU blit below writes the covered rect.
-    desc.storageMode = MTLStorageModeShared;
-    id<MTLTexture> tex = [src.device newTextureWithDescriptor:desc];
+    // The texels the snapshot does not cover are zeroed once at creation
+    // (deterministic stand-in for guest RAM the game does not sample); the
+    // GPU blit below writes the covered rect. Discrete GPUs (texture heaps):
+    // a Private heap texture zeroed by a GPU blit -- the Shared texture's
+    // CPU zero fill was 2.5% of Red Dead's command-processor thread on the
+    // Mac Pro, and its texels lived in system memory. Otherwise Shared,
+    // zeroed from the CPU.
+    id<MTLTexture> tex = nil;
+    if (heaps_enabled_ && snapshot_zero_) {
+      desc.storageMode = MTLStorageModePrivate;
+      tex = (__bridge_transfer id<MTLTexture>)NewHeapTexture((__bridge void*)desc);
+      if (tex && !snapshot_zero_((__bridge void*)tex, fetch_w * sx, fetch_h * sy)) {
+        tex = nil;
+      }
+    }
+    const bool cpu_zero = !tex;
+    if (cpu_zero) {
+      desc.storageMode = MTLStorageModeShared;
+      tex = [src.device newTextureWithDescriptor:desc];
+    }
     if (!tex) {
       free_slots_.push_back(slot);
       if (carried.texture) {
@@ -1119,16 +1252,18 @@ bool MetalTextureCache::EnsureFittedSnapshot(ResolvedTarget& rt,
       }
       return false;
     }
-    // 16 bytes/texel covers every snapshot pixel format; replaceRegion reads
-    // width*bpp bytes from each 16*width-byte row.
-    const size_t row_bytes = size_t(fetch_w) * sx * 16;
-    std::vector<uint8_t> zeros(row_bytes * size_t(fetch_h) * sy, 0);
-    [tex replaceRegion:MTLRegionMake2D(0, 0, fetch_w * sx, fetch_h * sy)
-           mipmapLevel:0
-                 slice:0
-             withBytes:zeros.data()
-           bytesPerRow:row_bytes
-         bytesPerImage:0];
+    if (cpu_zero) {
+      // 16 bytes/texel covers every snapshot pixel format; replaceRegion reads
+      // width*bpp bytes from each 16*width-byte row.
+      const size_t row_bytes = size_t(fetch_w) * sx * 16;
+      std::vector<uint8_t> zeros(row_bytes * size_t(fetch_h) * sy, 0);
+      [tex replaceRegion:MTLRegionMake2D(0, 0, fetch_w * sx, fetch_h * sy)
+             mipmapLevel:0
+                   slice:0
+               withBytes:zeros.data()
+             bytesPerRow:row_bytes
+           bytesPerImage:0];
+    }
     WriteSlotDescriptor(slot, (__bridge void*)tex);
     fv.texture = (__bridge_retained void*)tex;
     fv.slot = slot;
@@ -2869,14 +3004,14 @@ void MetalTextureCache::RegisterResolvedTarget(uint32_t base, void* texture,
       // Every per-swizzle exact-cover view aliases the old snapshot texture.
       // Retire it through the same in-flight-safe pools as the base slot.
       for (auto& sv : it->second.swizzle_views) {
-        stale_slots_.emplace_back(RetireSubmission(), sv.second.slot);
+        RetireSlot(RetireSubmission(), sv.second.slot);
         retired_textures_.emplace_back(RetireSubmission(), sv.second.view);
       }
       it->second.swizzle_views.clear();
       if (!s_fault_inject) {
         // Never repoint a descriptor used by an in-flight draw. The new
         // generation gets a fresh slot while the old slot drains.
-        stale_slots_.emplace_back(RetireSubmission(), it->second.slot);
+        RetireSlot(RetireSubmission(), it->second.slot);
       }
       WriteSlotDescriptor(new_slot, texture);
       it->second.texture = texture;
@@ -2978,13 +3113,13 @@ void MetalTextureCache::RegisterResolvedTipView(uint32_t base, void* texture) {
   if (it->second.tip_slot) {
     // Same page-fault rule as RegisterResolvedTarget: in-flight draws hold the
     // old texture by gpuAddress — retire the slot, never repoint in place.
-    stale_slots_.emplace_back(RetireSubmission(), it->second.tip_slot);
+    RetireSlot(RetireSubmission(), it->second.tip_slot);
   }
   // Per-tip swizzled views alias the OLD tip texture — retire them (slot +
   // retained view) through the same in-flight-safe pool so in-flight draws keep
   // sampling them until their submissions drain.
   for (auto& sv : it->second.tip_swizzle_views) {
-    stale_slots_.emplace_back(RetireSubmission(), sv.second.slot);
+    RetireSlot(RetireSubmission(), sv.second.slot);
     retired_textures_.emplace_back(RetireSubmission(), sv.second.view);
   }
   it->second.tip_swizzle_views.clear();
@@ -3166,6 +3301,7 @@ uint32_t MetalTextureCache::AllocateSlot() {
 
 void MetalTextureCache::WriteSlotDescriptor(uint32_t slot,
                                             void* texture_bridge) {
+  ++binding_generation_;
   auto* entries = static_cast<IRDescriptorTableEntry*>(view_heap_contents_);
   if (!entries || !slot || slot >= view_heap_slots_) {
     return;
@@ -3219,10 +3355,10 @@ void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
 void MetalTextureCache::RetireScaledAssembly(ScaledAssembly& assembly) {
   uint64_t retire_submission = RetireSubmission();
   if (assembly.slot) {
-    stale_slots_.emplace_back(retire_submission, assembly.slot);
+    RetireSlot(retire_submission, assembly.slot);
   }
   for (auto& swizzle_view : assembly.swizzle_views) {
-    stale_slots_.emplace_back(retire_submission, swizzle_view.second.slot);
+    RetireSlot(retire_submission, swizzle_view.second.slot);
     retired_textures_.emplace_back(retire_submission,
                                    swizzle_view.second.view);
   }
@@ -3278,19 +3414,19 @@ void MetalTextureCache::RegisterScaledAssembly(
 void MetalTextureCache::RetireResolvedTarget(ResolvedTarget& target) {
   uint64_t retire_submission = RetireSubmission();
   if (target.slot) {
-    stale_slots_.emplace_back(retire_submission, target.slot);
+    RetireSlot(retire_submission, target.slot);
   }
   if (target.tip_slot) {
-    stale_slots_.emplace_back(retire_submission, target.tip_slot);
+    RetireSlot(retire_submission, target.tip_slot);
   }
   for (auto& swizzle_view : target.swizzle_views) {
-    stale_slots_.emplace_back(retire_submission, swizzle_view.second.slot);
+    RetireSlot(retire_submission, swizzle_view.second.slot);
     retired_textures_.emplace_back(retire_submission,
                                    swizzle_view.second.view);
   }
   target.swizzle_views.clear();
   for (auto& swizzle_view : target.tip_swizzle_views) {
-    stale_slots_.emplace_back(retire_submission, swizzle_view.second.slot);
+    RetireSlot(retire_submission, swizzle_view.second.slot);
     retired_textures_.emplace_back(retire_submission,
                                    swizzle_view.second.view);
   }
@@ -3332,9 +3468,10 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
     } else {
       retired_textures_.emplace_back(RetireSubmission(), e.texture);
     }
-    stale_slots_.emplace_back(RetireSubmission(), e.slot);
+    RetireSlot(RetireSubmission(), e.slot);
     UnindexEntry(it->first, e);
     ++evicted;
+    ++binding_generation_;
     return cache_.erase(it);
   };
   if (InvalidationIndexEnabled()) {
@@ -3556,9 +3693,10 @@ void MetalTextureCache::EnforceSlotHeadroom() {
     } else {
       retired_textures_.emplace_back(RetireSubmission(), e.texture);
     }
-    stale_slots_.emplace_back(RetireSubmission(), e.slot);
+    RetireSlot(RetireSubmission(), e.slot);
     UnindexEntry(it->first, e);
     cache_.erase(it);
+    ++binding_generation_;
     ++lru_evictions_;
   }
   static uint32_t s_lru_logs = 0;
