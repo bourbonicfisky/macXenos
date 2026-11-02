@@ -182,6 +182,15 @@ add_custom_target(xenia-app-game-configs ALL
   COMMENT "Copying built-in per-title configs")
 add_dependencies(xenia-app xenia-app-game-configs)
 
+# Built-in game patches (docs/game_patches/*.patch.toml), read by PatchDB from
+# game_patches/ beside the binary or Contents/Resources/game_patches/ ahead of
+# the storage root's patches/ folder.
+add_custom_target(xenia-app-game-patches ALL
+  COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_FILE_DIR:xenia-app>/game_patches"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/docs/game_patches" "$<TARGET_FILE_DIR:xenia-app>/game_patches"
+  COMMENT "Copying built-in game patches")
+add_dependencies(xenia-app xenia-app-game-patches)
+
 # The Preferences blades (blades_model.cc reads and writes JSON; the overlay
 # hosts the page in WebKit).
 target_include_directories(xenia-app PRIVATE

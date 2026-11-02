@@ -155,6 +155,7 @@ else
   log "warning: no built Preferences page at ${BLADES_SRC}; run npm run build in src/xenia/app/blades_ui"
 fi
 cp -R "${REPO_ROOT}/docs/game_configs" "${CONTENTS}/Resources/game_configs"
+cp -R "${REPO_ROOT}/docs/game_patches" "${CONTENTS}/Resources/game_patches"
 
 # Info.plist from template with version substitution.
 sed -e "s/@SHORT_VERSION@/${SHORT_VERSION}/g" \

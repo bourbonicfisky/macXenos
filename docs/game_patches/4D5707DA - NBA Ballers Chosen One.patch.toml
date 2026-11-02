@@ -1,0 +1,125 @@
+# macXenos built-in game patch: NBA Ballers: Chosen One (4D5707DA).
+# The title's I/O worker (8233C5EC, and 8233C7C4) clears a device's "ready"
+# flag unconditionally when it runs out of work. A submitter that queued a
+# read just before that saw the flag still set and did not signal, so the read
+# sits in the device queue forever and boot hangs on the first LOADING screen
+# (~30% of boots here, 4 in 14; 0 in 12 with this patch). The patch recomputes
+# the flag from the device's own has-work check (8233C920) under the device
+# lock. It is a race in the game itself; the emulator's lock hand-off may make
+# it far likelier than on the console (not investigated: if another title
+# shows the same lost-wakeup pattern, look for the emulator-side cause).
+# Evidence: xenia-mac-evidence/defects-20261101/nbaballers. A file with this
+# name in the storage root's patches/ folder replaces this one (set
+# is_enabled = false there to turn it off).
+title_name = "NBA Ballers: Chosen One"
+title_id = "4D5707DA"
+hash = "6C9A948B7511068F"
+
+[[patch]]
+    name = "Fix lost I/O wakeup (boot hang on LOADING)"
+    desc = "The I/O worker clears a device's ready flag unconditionally when it goes idle (8233C5EC, 8233C7C4), racing with a submitter that queued a request and saw ready already set. Recompute ready = HasWork() under the device lock instead."
+    author = "macXenos"
+    is_enabled = true
+
+    [[patch.be32]]
+        address = 0x8233C5C4
+        value = 0x83BF01A4
+    [[patch.be32]]
+        address = 0x8233C5C8
+        value = 0x39400000
+    [[patch.be32]]
+        address = 0x8233C5CC
+        value = 0x995D0048
+    [[patch.be32]]
+        address = 0x8233C5D0
+        value = 0x387D0008
+    [[patch.be32]]
+        address = 0x8233C5D4
+        value = 0x480069E5
+    [[patch.be32]]
+        address = 0x8233C5D8
+        value = 0x7FA3EB78
+    [[patch.be32]]
+        address = 0x8233C5DC
+        value = 0x48000345
+    [[patch.be32]]
+        address = 0x8233C5E0
+        value = 0x987D002C
+    [[patch.be32]]
+        address = 0x8233C5E4
+        value = 0x387D0008
+    [[patch.be32]]
+        address = 0x8233C5E8
+        value = 0x48006A49
+    [[patch.be32]]
+        address = 0x8233C5EC
+        value = 0x38600000
+    [[patch.be32]]
+        address = 0x8233C5F0
+        value = 0x480002CC
+    [[patch.be32]]
+        address = 0x8233C5F4
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x8233C5F8
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x8233C5FC
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x8233C600
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x8233C604
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x8233C79C
+        value = 0x83BF01A4
+    [[patch.be32]]
+        address = 0x8233C7A0
+        value = 0x39400000
+    [[patch.be32]]
+        address = 0x8233C7A4
+        value = 0x995D0048
+    [[patch.be32]]
+        address = 0x8233C7A8
+        value = 0x387D0008
+    [[patch.be32]]
+        address = 0x8233C7AC
+        value = 0x4800680D
+    [[patch.be32]]
+        address = 0x8233C7B0
+        value = 0x7FA3EB78
+    [[patch.be32]]
+        address = 0x8233C7B4
+        value = 0x4800016D
+    [[patch.be32]]
+        address = 0x8233C7B8
+        value = 0x987D002C
+    [[patch.be32]]
+        address = 0x8233C7BC
+        value = 0x387D0008
+    [[patch.be32]]
+        address = 0x8233C7C0
+        value = 0x48006871
+    [[patch.be32]]
+        address = 0x8233C7C4
+        value = 0x38600000
+    [[patch.be32]]
+        address = 0x8233C7C8
+        value = 0x480000F4
+    [[patch.be32]]
+        address = 0x8233C7CC
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x8233C7D0
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x8233C7D4
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x8233C7D8
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x8233C7DC
+        value = 0x60000000

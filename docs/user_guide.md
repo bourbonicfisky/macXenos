@@ -161,6 +161,16 @@ Inside it:
   make one. These override the main file for that game.
 - `xenia.log` is the log from the last run. Include it when you report a
   problem.
+- `patches/` holds game patches you add (`<title ID> - <name>.patch.toml`,
+  the Xenia patch format). Patches change a game's own code to work around a
+  bug in the game.
+
+macXenos also ships a few patches of its own for bugs in a game's code, for
+example the NBA Ballers: Chosen One loading hang. They are on by default. To
+turn one off, copy its file from
+`macXenos.app/Contents/Resources/game_patches/` into your `patches/` folder
+under the same name and set `is_enabled = false`; your copy replaces the
+built-in one. `--apply_patches=false` turns off every patch.
 
 To keep everything next to the app instead (for example on an external
 drive), put an empty file named `portable.txt` in
