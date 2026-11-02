@@ -306,8 +306,11 @@ class Emulator {
   bool SaveToFile(const std::filesystem::path& path);
   bool RestoreFromFile(const std::filesystem::path& path);
 
-  // The game can request another title to be loaded.
-  const std::filesystem::path GetNewDiscPath(std::string window_message = "");
+  // The game can request another title to be loaded. disc_number (1-based,
+  // 0 = unknown) lets a headless run pick the sibling image of the launched
+  // disc instead of the picker.
+  const std::filesystem::path GetNewDiscPath(std::string window_message = "",
+                                             uint32_t disc_number = 0);
 
   void WaitUntilExit();
 
@@ -354,6 +357,8 @@ class Emulator {
                           const std::string_view module_path);
 
   std::filesystem::path command_line_;
+  // The image or executable LaunchPath was given (sibling disc lookup).
+  std::filesystem::path launch_path_;
   std::filesystem::path storage_root_;
   std::filesystem::path content_root_;
   std::filesystem::path cache_root_;
