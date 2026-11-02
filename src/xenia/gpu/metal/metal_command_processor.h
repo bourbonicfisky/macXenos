@@ -528,6 +528,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // HostVertexShaderType::kRectangleListAsTriangleStrip) instead of MSC
   // geometry emulation: GPUs other than Apple's (metal_rect_vs_expansion).
   bool rect_vs_expansion_ = false;
+  // XE_METAL_RECT_VS=1: expand even for titles whose config sets
+  // metal_rect_vs_title_off.
+  bool rect_vs_env_forced_ = false;
   // Auto-indexed quad lists become triangle lists through the shared
   // primitive processor instead of MSC geometry emulation: the mesh-shader
   // quad expansion streaks Red Dead's foliage on AMD (RX 6900 XT, 2026-10-10).

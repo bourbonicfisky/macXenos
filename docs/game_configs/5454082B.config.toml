@@ -1,0 +1,16 @@
+# macXenos built-in per-title config: Red Dead Redemption (5454082B).
+# On the Radeon Pro 580X (no Metal 3) rectangle lists expand in the vertex
+# shader. RDR's GPU then wedges, most often about 55 s into gameplay: a command
+# buffer runs for ~26 s, times out, and every later submission is ignored.
+# With the expansion on, about 25 of 81 five-minute runs hung. With the
+# rectangles skipped, as the 580X did before the route existed, 1 of 14 did.
+# The RX 6900 XT never hangs, even with the route forced (0 of 6).
+# Ruled out on the 580X: the expansion shader (loop, indexable array, strip
+# restart, single shaders), the rectangles' vertex data, the rectangle draws
+# themselves (isolated in their own command buffers, the stuck one held none),
+# shader loops (none in the stuck buffers), and texture-slot residency
+# (XE_METAL_SLOT_AUDIT clean, and the full residency sweep still hangs).
+# Turning texture heaps off makes it far worse (7 of 8 runs). Root cause open.
+# Only GPUs that use the route read this. XE_METAL_RECT_VS=1 overrides it.
+[GPU]
+metal_rect_vs_title_off = true

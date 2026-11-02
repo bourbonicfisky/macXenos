@@ -248,6 +248,13 @@ DEFINE_transient_bool(
     "Per-title hint for metal_completion_wait = auto, set by the built-in "
     "config of titles that need it (Mass Effect).",
     "GPU");
+DEFINE_transient_bool(
+    metal_rect_vs_title_off, false,
+    "Per-title hint: skip rectangle lists instead of expanding them in the "
+    "vertex shader on GPUs without Metal 3 (Radeon Pro 580X), set by the "
+    "built-in config of titles that hang the GPU there (Red Dead Redemption). "
+    "XE_METAL_RECT_VS=1 overrides.",
+    "GPU");
 
 DEFINE_bool(
     metal_texture_integer_scale, true,
@@ -2731,6 +2738,7 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       ![device supportsFamily:MTLGPUFamilyApple7] && !metal3;
   if (const char* v = std::getenv("XE_METAL_RECT_VS")) {
     rect_vs_expansion_ = v[0] == '1';
+    rect_vs_env_forced_ = rect_vs_expansion_;
   }
   if (rect_vs_expansion_) {
     XELOGI("MetalCommandProcessor: rectangle lists expand in the vertex "
@@ -7647,7 +7655,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // guest rectangle, the vertex shader running the guest program for its 3
   // vertices. Cleared below for draws that only export memory.
   bool rect_strip_route =
-      prim_type == xenos::PrimitiveType::kRectangleList && rect_vs_expansion_;
+      prim_type == xenos::PrimitiveType::kRectangleList && rect_vs_expansion_ &&
+      (rect_vs_env_forced_ || !cvars::metal_rect_vs_title_off);
   {
     const uint64_t vs_hash = vertex_shader->ucode_data_hash();
     const uint64_t ps_hash = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
