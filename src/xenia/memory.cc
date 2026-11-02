@@ -2004,6 +2004,24 @@ bool InvalidateUnwatchedEnabled() {
   }();
   return enabled;
 }
+
+// PhysicalHeap::Protect invalidates every guest page the protection change
+// covers. BaseHeap::Protect applies the new protection to whole guest pages,
+// 64 KB in the A0000000 heap and 16 MB in C0000000, so making a sub-page range
+// writable also lifts the host write watch on the rest of its first and last
+// pages. Invalidating only the requested bytes left those pages valid in the
+// GPU caches while the guest rewrote them with no fault (Dragon Age: Origins
+// unprotects a few KB of a 64 KB page, streams textures and vertices across
+// it, then protects it again: stale vertices drew huge flat planes and
+// missing bodies, stale textures a band over every face).
+// XE_PROTECT_WHOLE_PAGES=0 invalidates only the requested range, as before.
+bool ProtectWholePagesEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_PROTECT_WHOLE_PAGES");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return enabled;
+}
 }  // namespace
 
 bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
@@ -2224,7 +2242,23 @@ bool PhysicalHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
   // write watch in this view (EnableAccessCallbacks skips them), so the range
   // is invalidated even unwatched (see InvalidateUnwatchedEnabled).
   if (protect & kMemoryProtectWrite) {
-    TriggerCallbacks(std::move(global_lock), address, size, true, true, false,
+    uint32_t invalidate_address = address;
+    uint32_t invalidate_size = size;
+    if (ProtectWholePagesEnabled() && size && address >= heap_base_) {
+      // The guest pages BaseHeap::Protect changes (see
+      // ProtectWholePagesEnabled).
+      const uint64_t page_mask = page_size_ - 1;
+      const uint64_t relative = address - heap_base_;
+      const uint64_t first = relative & ~page_mask;
+      const uint64_t end = std::min<uint64_t>(
+          ((relative + size - 1) | page_mask) + 1, heap_size_);
+      if (end > first) {
+        invalidate_address = heap_base_ + uint32_t(first);
+        invalidate_size = uint32_t(end - first);
+      }
+    }
+    TriggerCallbacks(std::move(global_lock), invalidate_address,
+                     invalidate_size, true, true, false,
                      InvalidateUnwatchedEnabled());
   }
 
