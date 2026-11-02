@@ -166,6 +166,7 @@ void DxbcShaderTranslator::Reset() {
   out_reg_vs_point_coordinates_ = UINT32_MAX;
   system_temp_rect_loop_ = UINT32_MAX;
   system_temp_rect_interpolators_ = UINT32_MAX;
+  system_temp_rect_capture_ = UINT32_MAX;
   in_reg_ps_interpolators_ = UINT32_MAX;
   in_reg_ps_point_coordinates_ = UINT32_MAX;
   in_reg_ps_position_ = UINT32_MAX;
@@ -1059,6 +1060,8 @@ void DxbcShaderTranslator::StartTranslation() {
         system_temp_rect_interpolators_ =
             PushSystemTemp(0, interpolator_register_count);
       }
+      system_temp_rect_capture_ =
+          PushSystemTemp(0, 3 * (1 + interpolator_register_count));
     }
   } else if (is_pixel_shader()) {
     if (edram_rov_used_) {
@@ -1149,17 +1152,13 @@ void DxbcShaderTranslator::StartTranslation() {
   }
 
   if (IsDxbcRectangleStripVertexShader()) {
-    // Outer loop over the rectangle's 3 guest vertices; everything the guest
-    // program starts from is reset for each (the pushes above zeroed it once).
-    a_.OpLoop();
-    uint32_t loop_test_temp = PushSystemTemp();
-    a_.OpUGE(dxbc::Dest::R(loop_test_temp, 0b0001),
-             dxbc::Src::R(system_temp_rect_loop_, dxbc::Src::kXXXX),
-             dxbc::Src::LU(3));
-    a_.OpIf(true, dxbc::Src::R(loop_test_temp, dxbc::Src::kXXXX));
-    a_.OpBreak();
-    a_.OpEndIf();
-    PopSystemTemp();
+    // The body for one of the rectangle's 3 guest vertices starts here; it is
+    // copied twice more in CompleteShaderCode rather than looped, so each
+    // copy's outputs are captured into fixed registers instead of a
+    // dynamically indexed array. Everything the guest program starts from is reset for each vertex (the
+    // pushes above zeroed it once).
+    rect_body_begin_dwords_ = shader_code_.size();
+    rect_body_statistics_begin_ = statistics_;
     a_.OpMov(dxbc::Dest::R(system_temp_position_), dxbc::Src::LF(0.0f));
     a_.OpMov(dxbc::Dest::R(system_temp_point_size_edge_flag_kill_vertex_,
                            0b0111),
@@ -1397,23 +1396,18 @@ void DxbcShaderTranslator::CompleteVertexOrDomainShader() {
   PopSystemTemp();
 }
 
-void DxbcShaderTranslator::CaptureRectangleVertex() {
-  // Inside the outer loop, after the guest program: store the guest position
-  // and interpolators of guest vertex system_temp_rect_loop_.x, accumulate its
-  // kill, and advance to the next vertex.
+void DxbcShaderTranslator::CaptureRectangleVertex(uint32_t vertex) {
+  // After this vertex's copy of the guest program: store the guest position
+  // and interpolators of guest vertex `vertex`, accumulate its kill, and
+  // advance system_temp_rect_loop_.x to the next vertex.
   uint32_t interpolator_count = xe::bit_count(GetModificationInterpolatorMask());
-  uint32_t temp = PushSystemTemp();
-  // X = the vertex's first element in the capture array.
-  a_.OpIMAd(dxbc::Dest::R(temp, 0b0001),
-            dxbc::Src::R(system_temp_rect_loop_, dxbc::Src::kXXXX),
-            dxbc::Src::LU(1 + interpolator_count), dxbc::Src::LU(0));
-  a_.OpMov(dxbc::Dest::X(kRectangleCaptureIndexableTemp, dxbc::Index(temp, 0)),
-           dxbc::Src::R(system_temp_position_));
+  uint32_t capture = system_temp_rect_capture_ + vertex * (1 + interpolator_count);
+  a_.OpMov(dxbc::Dest::R(capture), dxbc::Src::R(system_temp_position_));
   for (uint32_t i = 0; i < interpolator_count; ++i) {
-    a_.OpMov(dxbc::Dest::X(kRectangleCaptureIndexableTemp,
-                           dxbc::Index(temp, 0, 1 + i)),
+    a_.OpMov(dxbc::Dest::R(capture + 1 + i),
              dxbc::Src::R(system_temp_rect_interpolators_ + i));
   }
+  uint32_t temp = PushSystemTemp();
   if (current_shader().writes_point_size_edge_flag_kill_vertex() & 0b100) {
     // Y = whether this vertex is killed (bits 0:30 of the kill register).
     a_.OpAnd(dxbc::Dest::R(temp, 0b0010),
@@ -1454,12 +1448,10 @@ void DxbcShaderTranslator::CompleteRectangleVertex() {
   uint32_t corner_temp = PushSystemTemp();
   dxbc::Src a_src(dxbc::Src::R(a_temp)), b_src(dxbc::Src::R(b_temp)),
       c_src(dxbc::Src::R(c_temp));
-  a_.OpMov(dxbc::Dest::R(a_temp),
-           dxbc::Src::X(kRectangleCaptureIndexableTemp, 0));
-  a_.OpMov(dxbc::Dest::R(b_temp),
-           dxbc::Src::X(kRectangleCaptureIndexableTemp, stride));
-  a_.OpMov(dxbc::Dest::R(c_temp),
-           dxbc::Src::X(kRectangleCaptureIndexableTemp, 2 * stride));
+  uint32_t capture = system_temp_rect_capture_;
+  a_.OpMov(dxbc::Dest::R(a_temp), dxbc::Src::R(capture));
+  a_.OpMov(dxbc::Dest::R(b_temp), dxbc::Src::R(capture + stride));
+  a_.OpMov(dxbc::Dest::R(c_temp), dxbc::Src::R(capture + 2 * stride));
   // Squared XY edge lengths in rotation_temp.xyz: 1-2, 2-0, 0-1 (corner_temp
   // as scratch).
   a_.OpAdd(dxbc::Dest::R(corner_temp, 0b0011), b_src, -c_src);
@@ -1506,30 +1498,38 @@ void DxbcShaderTranslator::CompleteRectangleVertex() {
             dxbc::Src::R(corner_temp, dxbc::Src::kYYYY),
             dxbc::Src::R(rotation_temp, dxbc::Src::kXXXX),
             dxbc::Src::R(corner_temp, dxbc::Src::kZZZZ));
-  // Guest vertices -> their first elements in the capture array.
-  a_.OpIMAd(dxbc::Dest::R(rotation_temp, 0b0111), dxbc::Src::R(rotation_temp),
-            dxbc::Src::LU(stride), dxbc::Src::LU(0));
-  a_.OpIMAd(dxbc::Dest::R(corner_temp, 0b0100),
-            dxbc::Src::R(corner_temp, dxbc::Src::kZZZZ), dxbc::Src::LU(stride),
-            dxbc::Src::LU(0));
+  // Which guest vertex rotated corners 0, 1, 2 and this real corner are, as
+  // per-component masks (X, Y, Z = the rotation, W = this corner): the
+  // captured values are selected from registers rather than indexed.
+  uint32_t is_vertex_0_temp = PushSystemTemp();
+  uint32_t is_vertex_1_temp = PushSystemTemp();
+  for (uint32_t v = 0; v < 2; ++v) {
+    uint32_t is_vertex_temp = v ? is_vertex_1_temp : is_vertex_0_temp;
+    a_.OpIEq(dxbc::Dest::R(is_vertex_temp, 0b0111),
+             dxbc::Src::R(rotation_temp), dxbc::Src::LU(v));
+    a_.OpIEq(dxbc::Dest::R(is_vertex_temp, 0b1000),
+             dxbc::Src::R(corner_temp, dxbc::Src::kZZZZ), dxbc::Src::LU(v));
+  }
+  // dest = element i of the guest vertex in component `which` of the masks.
+  auto select_captured = [&](uint32_t dest, uint32_t which, uint32_t i) {
+    a_.OpMovC(dxbc::Dest::R(dest),
+              dxbc::Src::R(is_vertex_1_temp).Select(which),
+              dxbc::Src::R(capture + stride + i),
+              dxbc::Src::R(capture + 2 * stride + i));
+    a_.OpMovC(dxbc::Dest::R(dest),
+              dxbc::Src::R(is_vertex_0_temp).Select(which),
+              dxbc::Src::R(capture + i), dxbc::Src::R(dest));
+  };
   for (uint32_t i = 0; i < stride; ++i) {
     // a_temp = rotated vertex 0, b_temp = 1, c_temp = 2 of this element.
-    a_.OpMov(dxbc::Dest::R(a_temp),
-             dxbc::Src::X(kRectangleCaptureIndexableTemp,
-                          dxbc::Index(rotation_temp, 0, i)));
-    a_.OpMov(dxbc::Dest::R(b_temp),
-             dxbc::Src::X(kRectangleCaptureIndexableTemp,
-                          dxbc::Index(rotation_temp, 1, i)));
-    a_.OpMov(dxbc::Dest::R(c_temp),
-             dxbc::Src::X(kRectangleCaptureIndexableTemp,
-                          dxbc::Index(rotation_temp, 2, i)));
+    select_captured(a_temp, 0, i);
+    select_captured(b_temp, 1, i);
+    select_captured(c_temp, 2, i);
     // b_temp = the synthesized vertex, -0 + 1 + 2.
     a_.OpAdd(dxbc::Dest::R(b_temp), b_src, c_src);
     a_.OpAdd(dxbc::Dest::R(b_temp), b_src, -a_src);
     // c_temp = this real corner's value.
-    a_.OpMov(dxbc::Dest::R(c_temp),
-             dxbc::Src::X(kRectangleCaptureIndexableTemp,
-                          dxbc::Index(corner_temp, 2, i)));
+    select_captured(c_temp, 3, i);
     a_.OpMovC(i ? dxbc::Dest::O(out_reg_vs_interpolators_ + (i - 1))
                 : dxbc::Dest::R(system_temp_position_),
               dxbc::Src::R(corner_temp, dxbc::Src::kWWWW), b_src, c_src);
@@ -1545,8 +1545,9 @@ void DxbcShaderTranslator::CompleteRectangleVertex() {
                                : dxbc::Src::kYYYY),
               dxbc::Src::LU(1), dxbc::Src::LU(0));
   }
-  // corner_temp, rotation_temp, c_temp, b_temp, a_temp.
-  PopSystemTemp(5);
+  // is_vertex_1_temp, is_vertex_0_temp, corner_temp, rotation_temp, c_temp,
+  // b_temp, a_temp.
+  PopSystemTemp(7);
 }
 
 void DxbcShaderTranslator::CompleteShaderCode() {
@@ -1574,10 +1575,34 @@ void DxbcShaderTranslator::CompleteShaderCode() {
         current_shader().memexport_eM_potentially_written_before_end());
   }
   if (rectangle_strip) {
-    // Capture this guest vertex and continue the outer loop; the temps below
-    // stay allocated until it ends.
-    CaptureRectangleVertex();
-    a_.OpEndLoop();
+    // Repeat the body for the other two guest vertices, capturing each after
+    // its copy. DXBC flow control is structured, so the tokens are
+    // position-independent; the temps below stay allocated until the end.
+    std::vector<uint32_t> body(
+        shader_code_.begin() + ptrdiff_t(rect_body_begin_dwords_),
+        shader_code_.end());
+    // The copies' instructions count too (declarations come later, so only
+    // instruction counters differ).
+    dxbc::Statistics body_statistics = statistics_;
+    {
+      auto stat = reinterpret_cast<uint32_t*>(&body_statistics);
+      auto stat_begin =
+          reinterpret_cast<const uint32_t*>(&rect_body_statistics_begin_);
+      for (size_t i = 0; i < sizeof(body_statistics) / sizeof(uint32_t); ++i) {
+        stat[i] -= stat_begin[i];
+      }
+    }
+    for (uint32_t vertex = 0; vertex < 3; ++vertex) {
+      if (vertex) {
+        shader_code_.insert(shader_code_.end(), body.begin(), body.end());
+        auto stat = reinterpret_cast<uint32_t*>(&statistics_);
+        auto stat_body = reinterpret_cast<const uint32_t*>(&body_statistics);
+        for (size_t i = 0; i < sizeof(statistics_) / sizeof(uint32_t); ++i) {
+          stat[i] += stat_body[i];
+        }
+      }
+      CaptureRectangleVertex(vertex);
+    }
   }
 
   if (!is_depth_only_pixel_shader_) {
@@ -1613,7 +1638,9 @@ void DxbcShaderTranslator::CompleteShaderCode() {
 
   if (is_vertex_shader()) {
     if (rectangle_strip) {
-      // Release system_temp_rect_interpolators_ and system_temp_rect_loop_.
+      // Release system_temp_rect_capture_, system_temp_rect_interpolators_
+      // and system_temp_rect_loop_.
+      PopSystemTemp(3 * (1 + xe::bit_count(GetModificationInterpolatorMask())));
       if (system_temp_rect_interpolators_ != UINT32_MAX) {
         PopSystemTemp(xe::bit_count(GetModificationInterpolatorMask()));
       }
@@ -4283,11 +4310,6 @@ void DxbcShaderTranslator::WriteShaderCode() {
       current_shader().uses_register_dynamic_addressing()) {
     assert_not_zero(register_count());
     ao_.OpDclIndexableTemp(0, register_count(), 4);
-  }
-  if (IsDxbcRectangleStripVertexShader()) {
-    ao_.OpDclIndexableTemp(
-        kRectangleCaptureIndexableTemp,
-        3 * (1 + xe::bit_count(GetModificationInterpolatorMask())), 4);
   }
 
   // Write the translated shader code.
