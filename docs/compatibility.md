@@ -32,7 +32,7 @@ smoother.
 | Burnout Paradise | Driving in Paradise City | 60 | 60 | Its target is 60 |
 | Call of Duty 2 | First mission | 60 | 60 |  |
 | Crysis 2 | First mission | 31 | 31 |  |
-| Crysis 3 | First mission, inside the Liberty Dome | 31 | 31 | Measured October 25; a rare freeze was seen in earlier runs |
+| Crysis 3 | First mission, inside the Liberty Dome | 31 | 31 | Measured October 25; a rare gameplay freeze is fixed in its built-in settings (November 2) |
 | Dark Souls | Undead Asylum | 30 | 30 |  |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 |  |

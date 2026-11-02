@@ -24,6 +24,8 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/string.h"
+#include "xenia/base/string_util.h"
+#include "xenia/base/utf8.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/hir/label.h"
 #include "xenia/cpu/ppc/ppc_context.h"
@@ -36,6 +38,14 @@ DEFINE_bool(
     break_on_unimplemented_instructions, true,
     "Break to the host debugger (or crash if no debugger attached) if an "
     "unimplemented PowerPC instruction is encountered.",
+    "CPU");
+DEFINE_string(
+    jit_ordered_load_functions, "",
+    "Comma-separated guest function addresses (hex) whose loads are compiled "
+    "in program order (a barrier after each load). The Xbox 360 CPU never "
+    "performs a load before an earlier one; ARM hosts do, which breaks guest "
+    "code that checks a ready flag and then reads the data it guards without "
+    "a barrier (Crysis 3's job workers read a stale job and livelock).",
     "CPU");
 
 namespace xe {
@@ -93,6 +103,20 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
 
   function_ = function;
   start_address_ = function_->address();
+  ordered_loads_ = false;
+  if (!cvars::jit_ordered_load_functions.empty()) {
+    for (std::string_view entry :
+         xe::utf8::split(cvars::jit_ordered_load_functions, ", ")) {
+      if (!entry.empty() &&
+          xe::string_util::from_string<uint32_t>(entry, true) ==
+              start_address_) {
+        ordered_loads_ = true;
+        XELOGI("jit_ordered_load_functions: {:08X} compiled with ordered loads",
+               start_address_);
+        break;
+      }
+    }
+  }
   // chrispy: i've seen this one happen, not sure why but i think from trying to
   // precompile twice i've also seen ones with a start and end address that are
   // the same...

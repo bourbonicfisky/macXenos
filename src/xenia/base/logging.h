@@ -164,6 +164,11 @@ struct LoggerBatch {
 // Logs a fatal error and aborts the program.
 [[noreturn]] void FatalError(const std::string_view str);
 
+// Whether FatalError shows a message box when no console is attached. A
+// headless run turns it off: the modal box blocks the faulting thread, so an
+// unattended run hangs instead of exiting (Fable III's stackpoint overflow).
+void SetFatalErrorMessageBox(bool enabled);
+
 }  // namespace xe
 
 #if XE_OPTION_ENABLE_LOGGING

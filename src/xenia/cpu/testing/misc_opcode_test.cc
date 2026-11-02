@@ -13,6 +13,8 @@
 
 #include "xenia/cpu/testing/util.h"
 
+#include "xenia/base/cvar.h"
+
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -324,6 +326,74 @@ TEST_CASE("RSQRT_F64", "[arithmetic]") {
   test.Run([](PPCContext* ctx) { ctx->f[4] = -1.0; },
            [](PPCContext* ctx) { REQUIRE(std::isnan(ctx->f[3])); });
 }
+
+#if XE_ARCH_ARM64
+DECLARE_bool(a64_inline_vrsqrtefp);
+
+// The inline a64 vrsqrtefp must give exactly the helper's bits. Run every
+// input through a function compiled with the helper calls, then through one
+// compiled inline, and compare.
+TEST_CASE("RSQRT_V128_INLINE_MATCHES_HELPER", "[vector]") {
+  std::vector<uint32_t> inputs = {
+      0x00000000, 0x80000000, 0x00000001, 0x807FFFFF, 0x00800000,
+      0x3F800000, 0x40800000, 0x7F7FFFFF, 0x7F800000, 0xFF800000,
+      0x7FC00000, 0xFFC00001, 0x7F800001, 0xBF800000, 0x3EFFFFFF,
+      0x3F000000, 0x3F7FFFFF, 0x00FFFFFF, 0x01000000, 0x7E7FFFFF,
+  };
+  uint32_t seed = 0x2545F491u;
+  while (inputs.size() < 120000) {
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    inputs.push_back(seed);
+  }
+  // Every table entry, both ends of the interpolation range.
+  for (uint32_t index = 0; index < 32; ++index) {
+    for (uint32_t interp : {0u, 1u, 511u, 1022u, 1023u}) {
+      inputs.push_back(0x3F000000u + (index << 19) + (interp << 9));
+    }
+  }
+  while (inputs.size() % 4) {
+    inputs.push_back(0x3F800000);
+  }
+  auto run = [&](bool inline_sequence) {
+    cvars::a64_inline_vrsqrtefp = inline_sequence;
+    std::vector<uint32_t> out(inputs.size());
+    TestFunction test([](HIRBuilder& b) {
+      StoreVR(b, 3, b.RSqrt(LoadVR(b, 4)));
+      b.Return();
+    });
+    for (size_t k = 0; k < inputs.size(); k += 4) {
+      test.Run(
+          [&](PPCContext* ctx) {
+            ctx->v[4] = vec128i(inputs[k], inputs[k + 1], inputs[k + 2],
+                                inputs[k + 3]);
+          },
+          [&](PPCContext* ctx) {
+            for (int lane = 0; lane < 4; ++lane) {
+              out[k + lane] = ctx->v[3].u32[lane];
+            }
+          });
+    }
+    return out;
+  };
+  const std::vector<uint32_t> helper = run(false);
+  const std::vector<uint32_t> inlined = run(true);
+  cvars::a64_inline_vrsqrtefp = true;
+  size_t mismatches = 0;
+  for (size_t k = 0; k < inputs.size(); ++k) {
+    if (helper[k] != inlined[k]) {
+      if (!mismatches) {
+        UNSCOPED_INFO("first mismatch: input " << std::hex << inputs[k]
+                                               << " helper " << helper[k]
+                                               << " inline " << inlined[k]);
+      }
+      ++mismatches;
+    }
+  }
+  REQUIRE(mismatches == 0);
+}
+#endif  // XE_ARCH_ARM64
 
 // ============================================================================
 // RSQRT V128 — PPC vrsqrtefp (per-lane lookup table estimate)

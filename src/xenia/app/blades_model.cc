@@ -1386,10 +1386,12 @@ BladesModel::Result BladesModel::HandleMessage(const std::string& json) {
     EmulatorWindow* window = &window_;
     const bool open = op == "openGame";
     deferred_ = [window, open]() {
-      if (open) {
-        window->FileOpen();
-      } else {
-        window->InstallContent();
+      const bool picked = open ? window->FileOpen() : window->InstallContent();
+      // Preferences closed before the picker opened. Cancelling with no game
+      // running would leave the window on the black guest output, so come
+      // back here instead.
+      if (!picked && !window->emulator()->is_title_open()) {
+        window->ShowStartScreen();
       }
     };
     return Result::kCloseThen;

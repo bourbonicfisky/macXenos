@@ -538,10 +538,16 @@ void logging::AppendLogLine(LogLevel log_level, const char prefix_char,
                       str.data(), str.size());
 }
 
+static bool fatal_error_message_box_ = true;
+
+void SetFatalErrorMessageBox(bool enabled) {
+  fatal_error_message_box_ = enabled;
+}
+
 void FatalError(const std::string_view str) {
   logging::AppendLogLine(LogLevel::Error, 'x', str);
 
-  if (!xe::has_console_attached()) {
+  if (fatal_error_message_box_ && !xe::has_console_attached()) {
     ShowSimpleMessageBox(SimpleMessageBoxType::Error, str);
   }
 
@@ -551,7 +557,10 @@ void FatalError(const std::string_view str) {
   // Throw an error that can be reported to the developers via the store.
   std::abort();
 #else
-  std::exit(EXIT_FAILURE);
+  // Not exit(): it runs static destructors while guest and host threads are
+  // still running, and the next lock of a destroyed mutex aborts the process
+  // (Fable III's stackpoint overflow, 2026-11-02).
+  std::quick_exit(EXIT_FAILURE);
 #endif  // XE_PLATFORM_ANDROID
 }
 

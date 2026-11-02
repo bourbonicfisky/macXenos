@@ -410,6 +410,11 @@ void XmaDecoder::Pause() {
   }
   paused_ = true;
 
+  // With no context to decode the worker sleeps on work_event_ without a
+  // timeout and would never see paused_: wake it. Emulator::Pause after a
+  // guest crash otherwise blocks here forever, the GPU stays paused and the
+  // crash looks like a hang (Battlefield: Bad Company).
+  work_event_->Set();
   pause_fence_.Wait();
 }
 

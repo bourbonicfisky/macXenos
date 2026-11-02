@@ -14,6 +14,8 @@
 
 #include "xenia/patcher/patch_db.h"
 
+#include <set>
+
 DEFINE_bool(apply_patches, true, "Enables custom patching functionality",
             "General");
 
@@ -32,26 +34,57 @@ void PatchDB::LoadPatches() {
     return;
   }
 
+  // Built-in patches ship with the program (docs/game_patches: beside a bare
+  // binary as game_patches/, inside the app bundle as
+  // Contents/Resources/game_patches/). A file of the same name in the storage
+  // root's patches/ folder replaces the built-in one, so a user can disable or
+  // change a shipped patch.
   const std::filesystem::path patches_directory = patches_root_ / "patches";
-  const std::vector<xe::filesystem::FileInfo> patch_files =
+  const std::vector<xe::filesystem::FileInfo> user_files =
       filesystem::ListFiles(patches_directory);
+  std::set<std::string> user_names;
+  for (const xe::filesystem::FileInfo& patch_file : user_files) {
+    user_names.insert(path_to_utf8(patch_file.name));
+  }
 
-  for (const xe::filesystem::FileInfo& patch_file : patch_files) {
-    // Skip files that doesn't have only title_id as name and .patch as
-    // extension
-    if (!std::regex_match(path_to_utf8(patch_file.name),
-                          patch_filename_regex_)) {
-      XELOGE("PatchDB: Skipped loading file {} due to incorrect filename",
-             patch_file.name);
-      continue;
+  auto load_files = [&](const std::vector<xe::filesystem::FileInfo>& files,
+                        bool built_in) {
+    for (const xe::filesystem::FileInfo& patch_file : files) {
+      const std::string name = path_to_utf8(patch_file.name);
+      if (built_in && !name.ends_with(".toml")) {
+        continue;  // README.md and the like
+      }
+      // Skip files that doesn't have only title_id as name and .patch as
+      // extension
+      if (!std::regex_match(name, patch_filename_regex_)) {
+        XELOGE("PatchDB: Skipped loading file {} due to incorrect filename",
+               patch_file.name);
+        continue;
+      }
+      if (built_in && user_names.count(name)) {
+        XELOGI("PatchDB: {} from the patches folder replaces the built-in one",
+               name);
+        continue;
+      }
+
+      const PatchFileEntry loaded_title_patches =
+          ReadPatchFile(patch_file.path / patch_file.name);
+      if (loaded_title_patches.title_id != -1) {
+        loaded_patches_.push_back(loaded_title_patches);
+      }
     }
+  };
 
-    const PatchFileEntry loaded_title_patches =
-        ReadPatchFile(patch_file.path / patch_file.name);
-    if (loaded_title_patches.title_id != -1) {
-      loaded_patches_.push_back(loaded_title_patches);
+  const auto exe_folder = xe::filesystem::GetExecutableFolder();
+  for (const auto& folder :
+       {exe_folder / "game_patches",
+        exe_folder / ".." / "Resources" / "game_patches"}) {
+    if (std::filesystem::exists(folder)) {
+      load_files(filesystem::ListFiles(folder), true);
+      break;
     }
   }
+  load_files(user_files, false);
   XELOGI("PatchDB: Loaded patches for {} titles", loaded_patches_.size());
 }
 

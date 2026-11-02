@@ -26,5 +26,6 @@
 | `releases/` | Release notes, one file per build |
 | `dev/` | Engineering records and inherited Xenia documentation |
 | `game_configs/` | Built-in per-game settings, copied into the app by the build |
+| `game_patches/` | Built-in game patches (fixes for bugs in a game's own code), copied into the app by the build; see its README |
 | `acknowledgements/` | Third-party license notices shown in the app |
 | `AGENTS.md` | Rules for coding agents reading these docs |

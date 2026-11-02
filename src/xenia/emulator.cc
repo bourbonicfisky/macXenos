@@ -231,6 +231,10 @@ X_STATUS Emulator::Setup(
         input_driver_factory) {
   X_STATUS result = X_STATUS_UNSUCCESSFUL;
 
+  if (cvars::headless) {
+    xe::SetFatalErrorMessageBox(false);
+  }
+
   display_window_ = display_window;
   imgui_drawer_ = imgui_drawer;
 
@@ -567,6 +571,7 @@ Emulator::FileSignatureType Emulator::GetFileSignature(
 
 X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
   X_STATUS mount_result = X_STATUS_SUCCESS;
+  launch_path_ = path;
 
   switch (GetFileSignature(path)) {
     case FileSignatureType::XEX1:
@@ -1257,12 +1262,48 @@ bool Emulator::RestoreFromFile(const std::filesystem::path& path) {
   return true;
 }
 
+namespace {
+
+// Multi-disc dumps are named "<title> (Disc N)<suffix>.iso" side by side
+// (GTA V "(Disc 1) (Install)" beside "(Disc 2)"): the image in the launched
+// disc's folder with the same "<title> " prefix and "(Disc <disc_number>)".
+std::filesystem::path FindSiblingDisc(const std::filesystem::path& launched,
+                                      uint32_t disc_number) {
+  const std::string name = xe::path_to_utf8(launched.filename());
+  const size_t disc_pos = name.find("(Disc ");
+  if (!disc_number || disc_pos == std::string::npos) {
+    return {};
+  }
+  const std::string prefix = name.substr(0, disc_pos);
+  const std::string wanted = fmt::format("(Disc {})", disc_number);
+  std::error_code ec;
+  for (const auto& entry :
+       std::filesystem::directory_iterator(launched.parent_path(), ec)) {
+    const std::string candidate = xe::path_to_utf8(entry.path().filename());
+    if (candidate != name && candidate.size() > disc_pos &&
+        candidate.compare(0, disc_pos, prefix) == 0 &&
+        candidate.compare(disc_pos, wanted.size(), wanted) == 0) {
+      return entry.path();
+    }
+  }
+  return {};
+}
+
+}  // namespace
+
 const std::filesystem::path Emulator::GetNewDiscPath(
-    std::string window_message) {
+    std::string window_message, uint32_t disc_number) {
   std::filesystem::path path = "";
   if (cvars::headless) {
     // No UI: an unattended run must not block on a modal picker.
-    XELOGW("GetNewDiscPath: headless, no disc selected");
+    path = FindSiblingDisc(launch_path_, disc_number);
+    if (path.empty()) {
+      XELOGW("GetNewDiscPath: headless, no disc {} beside {}", disc_number,
+             xe::path_to_utf8(launch_path_));
+    } else {
+      XELOGI("GetNewDiscPath: headless, disc {} = {}", disc_number,
+             xe::path_to_utf8(path));
+    }
     return path;
   }
 
@@ -1489,8 +1530,8 @@ bool Emulator::ExceptionCallback(Exception* ex) {
 
   // Emit the crash dump BEFORE pausing: the dump only reads the crashed
   // (current) thread's own context, which does not require other threads to be
-  // suspended, and on macOS Pause() can block indefinitely (AudioSystem::Pause's
-  // worker never acks pause_fence_), which would otherwise swallow the crash
+  // suspended, and Pause() used to block indefinitely (XmaDecoder::Pause never
+  // woke its idle worker to ack pause_fence_), which would swallow the crash
   // dump and make the failure look like an idle stall. Pause (to freeze other
   // threads for the dialog) comes after.
 
@@ -1716,6 +1757,8 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   // Crash dump is out; now pause the emulator and eat the exception (freezes
   // other guest threads for the dialog below).
   Pause();
+  XELOGE("Emulator paused after the guest crash.");
+  xe::FlushLog();
 
   std::string crash_dlg = fmt::format(
       "The guest has crashed.\n\n"

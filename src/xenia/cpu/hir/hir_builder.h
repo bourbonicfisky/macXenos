@@ -321,6 +321,11 @@ class HIRBuilder {
  protected:
   Arena* arena_;
 
+  // Appends a full memory barrier after every Load, so later loads cannot be
+  // performed before it (the in-order Xenon never reorders loads; ARM does).
+  // Set per function by the frontend.
+  bool ordered_loads_ = false;
+
   uint32_t attributes_;
 
   uint32_t next_label_id_;

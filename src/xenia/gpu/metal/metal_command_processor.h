@@ -787,6 +787,11 @@ class MetalCommandProcessor : public CommandProcessor {
   // attachment-less pass (renderTargetWidth/Height = 1) instead of requiring
   // bound render targets.
   bool memexport_pass_ = false;
+  // Set while encoding a pixel-shader memexport draw that binds no render
+  // target: BeginFrameEncoder attaches only a scratch depth of
+  // pixel_export_extent_ (guest scissor, power-of-two bucketed).
+  bool pixel_export_pass_ = false;
+  uint32_t pixel_export_extent_[2] = {};
   std::unordered_map<uint64_t, void*> dummy_depth_textures_;
 
   // RAM-frontbuffer present fallback (the mainline/XeniOS RequestSwapTexture

@@ -300,7 +300,8 @@ class EmulatorWindow {
   void ToggleFullscreenOnDoubleClick();
   void FileDrop(const std::filesystem::path& filename);
   void OnMouseUp(const ui::MouseEvent& e);
-  void FileOpen();
+  // Both return false when the picker was cancelled.
+  bool FileOpen();
   void FileClose();
   // Persist config + host shader cache before a re-exec relaunch (macOS
   // lifecycle controls), mirroring the OnDestroy pre-quick_exit flush.
@@ -311,7 +312,7 @@ class EmulatorWindow {
   // warm (Reboot); when not warm, just persists config and relaunches
   // immediately (Full Reboot) - bulletproof but boots cold.
   void RelaunchLastTitle(bool warm);
-  void InstallContent();
+  bool InstallContent();
   void ExtractZarchive();
   void CreateZarchive();
   void ShowContentDirectory();
