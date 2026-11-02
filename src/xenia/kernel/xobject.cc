@@ -502,8 +502,15 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
                  ->LookupObject<XObject>(handle, true)
                  .release();
     // The stashed handle is only a number: if its object went away the slot
-    // can belong to anything now. Treat a missing or wrong-typed object as an
-    // uninitialized header instead of returning it as the requested type.
+    // can belong to anything now. Treat a missing object, or one that is not
+    // this header's, as an uninitialized header instead of returning it as the
+    // requested type. Objects the kernel created (CreateNative) know their
+    // guest address and are checked by it: their header's type byte is never
+    // written (NtCreateSemaphore leaves type 0, which reads as an event).
+    // Objects built from a guest header have no address and are checked by
+    // type.
+    const uint32_t guest_ptr =
+        kernel_state->memory()->HostToGuestVirtual(native_ptr);
     Type expected = Type::Undefined;
     switch (as_type) {
       case 0:
@@ -524,13 +531,16 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
         expected = Type::Timer;
         break;
     }
-    if (expected != Type::Undefined &&
-        (!result || result->type() != expected)) {
+    const bool stale =
+        !result || (result->guest_object()
+                        ? result->guest_object() != guest_ptr
+                        : expected != Type::Undefined &&
+                              result->type() != expected);
+    if (stale) {
       XELOGE(
           "GetNativeObject: header {:08X} (type {}) holds stale handle {:08X} "
           "({}); recreating",
-          kernel_state->memory()->HostToGuestVirtual(native_ptr), as_type,
-          handle,
+          guest_ptr, as_type, handle,
           result ? fmt::format("now type {}", uint32_t(result->type()))
                  : std::string("closed"));
       if (result) {
@@ -538,8 +548,9 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
         result = nullptr;
       }
       // Events, mutants and semaphores are rebuilt from the header below;
-      // threads and timers cannot be, and stay unresolved as before.
-      if (expected != Type::Thread && expected != Type::Timer) {
+      // other types cannot be, and stay unresolved as before.
+      if (expected == Type::Event || expected == Type::Mutant ||
+          expected == Type::Semaphore) {
         header->wait_list.flink_ptr = 0;
       }
     }
