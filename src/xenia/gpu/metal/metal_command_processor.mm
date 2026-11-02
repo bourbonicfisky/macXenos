@@ -14621,6 +14621,28 @@ bool MetalCommandProcessor::ConvertDepthToSnapshot(void* depth_texture,
   return true;
 }
 
+// IssueCopy's diagnostic log switches, read once: getenv on every resolve
+// showed in the CP-thread profile (GTA IV on the Mac Pro).
+static bool IssueCopyWbGateLog() {
+  static const bool s_enabled = std::getenv("XE_METAL_WB_GATE_LOG") != nullptr;
+  return s_enabled;
+}
+static bool IssueCopyGpuResolveLog() {
+  static const bool s_enabled =
+      std::getenv("XE_METAL_GPU_RESOLVE_LOG") != nullptr;
+  return s_enabled;
+}
+static bool IssueCopyResolveForwardLog() {
+  static const bool s_enabled =
+      std::getenv("XE_METAL_RESOLVE_FORWARD_LOG") != nullptr;
+  return s_enabled;
+}
+static bool IssueCopyCanonicalSyncLog() {
+  static const bool s_enabled =
+      std::getenv("XE_METAL_CANONICAL_SYNC_LOG") != nullptr;
+  return s_enabled;
+}
+
 bool MetalCommandProcessor::IssueCopy() {
   // First slice of the EDRAM->guest resolve (the gameplay gray-screen blocker):
   // decode the resolve with the reusable draw_util helper and record the guest
@@ -15345,7 +15367,7 @@ bool MetalCommandProcessor::IssueCopy() {
         // memory rather than correct output -- in which case the shared route
         // is not producing wrong pixels, it is producing pixels where the
         // incumbent produces none.
-        if (std::getenv("XE_METAL_WB_GATE_LOG")) {
+        if (IssueCopyWbGateLog()) {
           // Materialization coverage: what Metal PREPARED for this resolve
           // versus the source rect the shared shader will read. If the shader
           // reads tiles outside the prepared span, it reads whatever the
@@ -15362,7 +15384,7 @@ bool MetalCommandProcessor::IssueCopy() {
               uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) << 3,
               rw, rh);
         }
-        if (std::getenv("XE_METAL_WB_GATE_LOG")) {
+        if (IssueCopyWbGateLog()) {
           const uint64_t wb_bytes = uint64_t(rw) * rh * wb_bpp;
           XELOGW(
               "MetalWbGate dest={:08X} {}x{} bpp={} bytes={} cap={} "
@@ -15393,7 +15415,7 @@ bool MetalCommandProcessor::IssueCopy() {
           // uncommitted destination, pipelines unavailable) the existing paths
           // below run unchanged.
           bool shared_resolve_dispatched = false;
-          if (!canonical_packed && std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+          if (!canonical_packed && IssueCopyGpuResolveLog()) {
             // The legacy-blit writeback: never GPU-current, so every draw
             // sampling its range commits and waits (Tomb Raider: 32 a frame).
             XELOGW(
@@ -15536,7 +15558,7 @@ bool MetalCommandProcessor::IssueCopy() {
                 // 74-px route-only residual).
                 scatter_eligible = false;
               }
-              if (std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+              if (IssueCopyGpuResolveLog()) {
                 XELOGW(
                     "MetalGpuScatter draw={} base={:08X} {}x{} bpp={} "
                     "bpp_log2={} pitch_aligned={} off=({},{}) extent={} "
@@ -15720,7 +15742,7 @@ bool MetalCommandProcessor::IssueCopy() {
                   wb_bpp_log2, scatter_dest.dest_offset_x,
                   scatter_dest.dest_offset_y, rw, rh,
                   scatter_dest.dest_extent_bytes, &forward_target);
-          if (!forwarding && std::getenv("XE_METAL_RESOLVE_FORWARD_LOG")) {
+          if (!forwarding && IssueCopyResolveForwardLog()) {
             static uint32_t s_forward_logs = 0;
             if (s_forward_logs++ < 300 || (s_forward_logs & 31u) == 0) {
               XELOGI("MetalResolveForward path dest={:08X} {}x{} scatter={} "
@@ -15805,7 +15827,7 @@ bool MetalCommandProcessor::IssueCopy() {
                 !canonical_resolve &&
                 resolve_info.copy_dest_info.copy_dest_swap;
             if (writeback_encoded && !gpu_resident_resolve &&
-                std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+                IssueCopyGpuResolveLog()) {
               // A CPU-staged color writeback (never GPU-current): the draws
               // that sample its range commit and wait on it.
               XELOGW(
@@ -16232,7 +16254,7 @@ bool MetalCommandProcessor::IssueCopy() {
                 depth_scatter = false;
               }
             }
-            if (std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+            if (IssueCopyGpuResolveLog()) {
               // Same census as MetalGpuScatter for the depth path: which depth
               // resolves stay on the CPU writeback (their consumers then
               // commit and wait on the record instead of ordering after it).
@@ -16297,7 +16319,7 @@ bool MetalCommandProcessor::IssueCopy() {
                                   resolve_info.copy_dest_base +
                                   resolve_info.copy_dest_extent_length;
           if (writeback_encoded && !depth_scatter &&
-              std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+              IssueCopyGpuResolveLog()) {
             // CPU-staged depth writeback (never GPU-current).
             XELOGW(
                 "MetalCpuWriteback draw={} base={:08X} {}x{} depth fmt={} "
@@ -16501,7 +16523,7 @@ bool MetalCommandProcessor::IssueCopy() {
                          clear_source_x, clear_source_y, clear_width,
                          clear_height, color_clear_lo, color_clear_hi));
       if (!cleared) {
-        if (std::getenv("XE_METAL_CANONICAL_SYNC_LOG")) {
+        if (IssueCopyCanonicalSyncLog()) {
           XELOGW("MetalCanonicalSync colour-clear FALLBACK draw={} canonical={} "
                  "base={} pitch={} msaa={} 64bpp={} span=[{},+{}x{}] "
                  "rect=({},{} {}x{})",
