@@ -1,0 +1,9 @@
+# macXenos built-in per-title config: Assassin's Creed (555307D4).
+# Like Assassin's Creed II, the title decides what to draw from occlusion
+# query results. With the default fast queries (a guessed result until the
+# GPU's arrives) Altair and the Animus tutorial crowd fade in and out; strict
+# queries wait for the real result, still at the 30 fps cap.
+# (M1 Max 2x, 2 s shots of the "Gentle push" crowd: fast 2 of ~45 frames with
+# Altair faded, strict 0; both 30 fps)
+[GPU]
+occlusion_query = "strict"
