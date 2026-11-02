@@ -21,6 +21,7 @@ authoritative inputs. Agents must also follow
 | Exact foundation lineage and integration evidence | [Metal foundation integration manifest](metal_foundation_integration_manifest.md) | Frozen integration record |
 | Ordered D3D12 draw comparison | [D3D12 IssueDraw parity ledger](metal_d3d12_issue_draw_parity_ledger.md) | Dated parity audit |
 | How games are tested live, and which ones | [Live game tests](live_game_tests.md) | Scripted routes and the validation sweep |
+| Known problems in specific games | [Title issue log](title_issues.md) | One row per crash, hang or defect found in testing |
 | Debugging on the Mac | [macOS debugging tools](macos_debugging_tools.md) | Trace capture, fault attribution, diagnostic switches, profilers, scripts |
 | Current live observations | [Metal live compatibility matrix](metal_live_compatibility_matrix.md) | Observation record, not broad completion evidence |
 | Presentation and gamma | [Metal presentation/gamma status](metal_presentation_gamma_status.md) | Current delivered scopes and remaining boundaries |
