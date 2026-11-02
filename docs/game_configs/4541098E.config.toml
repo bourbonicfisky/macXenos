@@ -10,3 +10,16 @@
 # (xenia-mac-evidence crysis3-washout-20261024)
 [GPU]
 metal_memexport_raster = true
+
+# The job system's workers wait for a ring slot's ready word and then read the
+# job from the slot with no barrier between the two loads. The in-order Xenon
+# (and x86) never performs the second load first; ARM does, so a worker could
+# see the new ready word but the slot's previous job, and run an old queue
+# drain a second time: it replays the whole 128-slot queue, then spins forever
+# on the queue's consumer count (the freeze, ~1 in 5 soak runs on the M4 mini,
+# 4 of 20). Loads in the worker loop (82DE07A8) and the drain (82DE00B0) are
+# compiled in order.
+# (soak c3soak1101 r18 probe ring: two workers drained queue 4C6FFC90 at once;
+# with this setting 12 of 12 soak runs clean on the mini, c3soak1102)
+[CPU]
+jit_ordered_load_functions = "82DE07A8,82DE00B0"

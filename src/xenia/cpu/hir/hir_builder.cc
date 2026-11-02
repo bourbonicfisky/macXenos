@@ -70,6 +70,7 @@ HIRBuilder::~HIRBuilder() {
 
 void HIRBuilder::Reset() {
   attributes_ = 0;
+  ordered_loads_ = false;
   next_label_id_ = 0;
   next_value_ordinal_ = 0;
   locals_.clear();
@@ -1277,6 +1278,9 @@ Value* HIRBuilder::Load(Value* address, TypeName type, uint32_t load_flags) {
   Instr* i = AppendInstr(OPCODE_LOAD_info, load_flags, AllocValue(type));
   i->set_src1(address);
   i->src2.value = i->src3.value = NULL;
+  if (ordered_loads_) {
+    MemoryBarrier();
+  }
   return i->dest;
 }
 
