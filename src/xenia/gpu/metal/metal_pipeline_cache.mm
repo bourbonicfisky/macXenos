@@ -1303,6 +1303,52 @@ void* MetalPipelineCache::NewRenderPipelineDescriptor(
   if (lookup_list) {
     desc.binaryArchives = (__bridge NSArray*)lookup_list;
   }
+  // XE_METAL_VALIDATION_OFF (diagnostic, with MTL_SHADER_VALIDATION=1):
+  // leaves guest draw pipelines uninstrumented so a GPU hang that shader
+  // validation hides can be bisected to pipelines. "draws" = every draw
+  // pipeline; "rect"/"norect" = those whose vertex shader does / does not
+  // expand rectangle lists; "bit:K:V" = those whose bit K of (vs ^ ps ucode
+  // hash) is V;
+  // "vs:H1,H2" = those whose vertex shader ucode hash is in the list.
+  static const std::string s_validation_off = [] {
+    const char* v = std::getenv("XE_METAL_VALIDATION_OFF");
+    return std::string(v ? v : "");
+  }();
+  if (!s_validation_off.empty()) {
+    if (@available(macOS 15.0, *)) {
+      const uint64_t mixed = vs.ucode_hash ^ ps.ucode_hash;
+      bool off = false;
+      if (s_validation_off == "draws") {
+        off = true;
+      } else if (s_validation_off == "rect" || s_validation_off == "norect") {
+        const bool rect =
+            vertex && DxbcShaderTranslator::Modification(
+                          vertex->modification())
+                              .vertex.host_vertex_shader_type ==
+                          Shader::HostVertexShaderType::
+                              kRectangleListAsTriangleStrip;
+        off = rect == (s_validation_off == "rect");
+      } else if (s_validation_off.rfind("bit:", 0) == 0) {
+        unsigned bit = 0, value = 0;
+        if (std::sscanf(s_validation_off.c_str() + 4, "%u:%u", &bit,
+                        &value) == 2 &&
+            bit < 64) {
+          off = ((mixed >> bit) & 1) == value;
+        }
+      } else if (s_validation_off.rfind("vs:", 0) == 0) {
+        off = s_validation_off.find(fmt::format("{:016X}", vs.ucode_hash)) !=
+              std::string::npos;
+      }
+      if (off) {
+        desc.shaderValidation = MTLShaderValidationDisabled;
+      }
+      static std::atomic<uint32_t> s_logged{0};
+      if (s_logged.fetch_add(1, std::memory_order_relaxed) < 4096) {
+        XELOGI("MetalValidationOff: vs={:016X} ps={:016X} validation={}",
+               vs.ucode_hash, ps.ucode_hash, off ? "off" : "on");
+      }
+    }
+  }
   return (__bridge_retained void*)desc;
 }
 
