@@ -331,6 +331,8 @@ uint32_t GraphicsSystem::ReadRegister(uint32_t addr) {
       return 0x0000200E;
     case 0x0F2D:  // RB_HSIO_INTERFACE_ALIGNER_VALUE
       return 0x00BBBBBB;
+    case 0x194C:  // D1MODE_V_COUNTER
+      return ReadScanlineCounter();
     case 0x1951:  // interrupt status
       return 1;   // vblank
     case 0x1961:  // AVIVO_D1MODE_VIEWPORT_SIZE
@@ -404,8 +406,57 @@ void GraphicsSystem::PaceUncappedSwap() {
   last_swap_vblank_ = vblank_count();
 }
 
+uint32_t GraphicsSystem::ReadScanlineCounter() {
+  // The frame limiter adds the display height to the register once per
+  // iteration. Upstream's Windows limiter spins, so that walks the counter
+  // through effectively arbitrary lines; the deadline-paced macOS/Linux
+  // limiter adds it once per vblank, so a reader masking it to the 14-bit
+  // line field sees one fixed line per frame and an active-display line
+  // (below the 720 that D1MODE_VIEWPORT_SIZE reports) on only 45 of every
+  // 1024 vblanks. WALL-E's movie presenter (guest 82120520) waits for a
+  // vblank, the end of it, then the next one through its GetRasterStatus
+  // (guest 820C0110: InVBlank = line >= viewport height), so it advanced
+  // every ~23rd vblank: the videos played at 2.6 fps (60 * 45 / 1024).
+  // Report the line the 720p scanout (750 lines, 720 active) is on: the
+  // vblank region starts at the vblank interrupt, the active lines follow
+  // until the next one. XE_GPU_VCOUNTER_ACCUMULATE=1 restores the
+  // accumulated register value (exact rollback).
+  static const bool accumulate = [] {
+    const char* v = std::getenv("XE_GPU_VCOUNTER_ACCUMULATE");
+    return v && !(v[0] == '0' && !v[1]);
+  }();
+  const int64_t last = last_vblank_host_ns_.load(std::memory_order_acquire);
+  if (accumulate || !last) {
+    return register_file()->values[XE_GPU_REG_D1MODE_V_COUNTER];
+  }
+  // Matches the 720 lines the D1MODE_VIEWPORT_SIZE read reports.
+  constexpr int64_t kActiveLines = 720;
+  constexpr int64_t kTotalLines = 750;
+  constexpr int64_t kDefaultIntervalNs = 1000000000 / 60;
+  int64_t interval = vblank_interval_host_ns_.load(std::memory_order_relaxed);
+  if (interval < 1000000 || interval > 100000000) {
+    interval = kDefaultIntervalNs;
+  }
+  // A late vblank holds the last active line until it arrives, so every
+  // vblank still shows the guest a rising edge.
+  const int64_t elapsed =
+      std::clamp<int64_t>(FramePacingNowNs() - last, 0, interval - 1);
+  return uint32_t((kActiveLines + elapsed * kTotalLines / interval) %
+                  kTotalLines);
+}
+
 void GraphicsSystem::MarkVblank() {
   SCOPE_profile_cpu_f("gpu");
+
+  {
+    const int64_t now = FramePacingNowNs();
+    const int64_t previous =
+        last_vblank_host_ns_.exchange(now, std::memory_order_acq_rel);
+    if (previous) {
+      vblank_interval_host_ns_.store(now - previous,
+                                     std::memory_order_relaxed);
+    }
+  }
 
   // Increment vblank counter (so the game sees us making progress).
   command_processor_->increment_counter();
