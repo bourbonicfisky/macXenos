@@ -1391,6 +1391,15 @@ void* MetalPipelineCache::NewRenderPipelineState(
     // is not what either mechanism removes.
     MetalShaderBuildTimer timer(GetMetalShaderBuildCensus().pso);
     state = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+    if (!state && desc.binaryArchives.count) {
+      // Under MTL_SHADER_VALIDATION even the plain call fails on an archive
+      // miss ("Unable to find function ... in binary archives"), so every
+      // draw was skipped: build once more with no archives attached.
+      MTLRenderPipelineDescriptor* plain = [desc copy];
+      plain.binaryArchives = nil;
+      error = nil;
+      state = [device newRenderPipelineStateWithDescriptor:plain error:&error];
+    }
     if (!state) {
       timer.Dismiss();
       XELOGE("MetalPipelineCache: newRenderPipelineState failed: {}",
