@@ -798,14 +798,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     void* depth_state = nullptr;    // depth write + stencil REPLACE-to-0
     void* bit_states[8] = {};       // one stencil bit-plane REPLACE state each
     // 2x/4x depth pack without the X32_Stencil8 view (MsaaStencilExtract):
-    // clear_stencil zeroes the range's stencil bytes, one extract_sten draw
-    // per bit (extract_states[b]: EQUAL on that bit, no writes) ORs the bits
-    // in, and the _keep packs write depth around them.
+    // one extract_sten draw per stencil bit (extract_states[b]: EQUAL on
+    // that bit, no writes) rebuilds a target's per-pixel stencil cache, and
+    // the _cached packs read stencil from it.
     void* extract_sten = nullptr;  // id<MTLRenderPipelineState>
     void* extract_states[8] = {};
-    void* clear_stencil = nullptr;
-    void* pack_ms_range_keep = nullptr;
-    void* pack_ms_range_px_keep = nullptr;
+    void* pack_ms_range_cached = nullptr;
+    void* pack_ms_range_px_cached = nullptr;
     uint32_t sample_count = 0;
   };
   const ShadowDepthPipelines* EnsureShadowDepthPipelines(uint32_t sample_count);
@@ -832,6 +831,30 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // XE_METAL_MSAA_STENCIL_EXTRACT_VERIFY: id<MTLBuffer> of two counters.
   void* msaa_stencil_verify_buffer_ = nullptr;
   uint64_t msaa_stencil_verify_packs_ = 0;
+  // Per 2x/4x depth texture (id<MTLTexture>, unretained key): its stencil, a
+  // uint32 per pixel with byte n = sample n (buffer, retained), valid until
+  // the target is drawn to or materialized; fence = updated by the packs
+  // that read it, waited on before it is rewritten.
+  struct MsaaStencilCache {
+    void* buffer = nullptr;
+    void* fence = nullptr;
+    uint64_t bytes = 0;
+    // Valid texture rows [valid_start, valid_end).
+    uint32_t valid_start = 0, valid_end = 0;
+    bool valid = false;
+  };
+  std::unordered_map<void*, MsaaStencilCache> msaa_stencil_caches_;
+  void InvalidateMsaaStencilCaches();
+  uint64_t msaa_stencil_cache_packs_ = 0;
+  uint64_t msaa_stencil_cache_rebuilds_ = 0;
+  uint64_t msaa_stencil_cache_hits_ = 0;
+  uint64_t msaa_stencil_census_[7] = {};
+  struct MsaaCensusPack {
+    uint64_t serial = 0;
+    uint32_t start = 0, end = 0;
+  };
+  std::unordered_map<uint32_t, uint64_t> msaa_census_last_draw_;
+  std::unordered_map<uint32_t, MsaaCensusPack> msaa_census_last_pack_;
   uint32_t shadow_count_ = 0;  // Cap the sampled transitions per run.
 
   MetalCommandProcessor& command_processor_;

@@ -509,14 +509,25 @@ void MetalRenderTargetCache::Shutdown() {
       release_depth_state(bit_state);
     }
     release_render_pipeline(pipelines.extract_sten);
-    release_compute_pipeline(pipelines.clear_stencil);
-    release_compute_pipeline(pipelines.pack_ms_range_keep);
-    release_compute_pipeline(pipelines.pack_ms_range_px_keep);
+    release_compute_pipeline(pipelines.pack_ms_range_cached);
+    release_compute_pipeline(pipelines.pack_ms_range_px_cached);
     for (void*& extract_state : pipelines.extract_states) {
       release_depth_state(extract_state);
     }
   }
   shadow_pipelines_.clear();
+  for (auto& pair : msaa_stencil_caches_) {
+    if (pair.second.buffer) {
+      id<MTLBuffer> released =
+          (__bridge_transfer id<MTLBuffer>)pair.second.buffer;
+      (void)released;
+    }
+    if (pair.second.fence) {
+      id<MTLFence> released = (__bridge_transfer id<MTLFence>)pair.second.fence;
+      (void)released;
+    }
+  }
+  msaa_stencil_caches_.clear();
   if (msaa_stencil_verify_buffer_) {
     id<MTLBuffer> released =
         (__bridge_transfer id<MTLBuffer>)msaa_stencil_verify_buffer_;
@@ -876,6 +887,12 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
     uint32_t old_height = target->msaa_texture_height();
     void* old_texture = target->ReplaceMsaaTexture(
         entry.texture, sample_count, allocation_height);
+    for (void* replaced : {old_texture, entry.texture}) {
+      auto it = msaa_stencil_caches_.find(replaced);
+      if (it != msaa_stencil_caches_.end()) {
+        it->second.valid = false;
+      }
+    }
     if (old_texture) {
       deferred_texture_releases_.emplace_back(submission, old_texture);
     }
@@ -905,7 +922,47 @@ bool MetalRenderTargetCache::Update(bool is_rasterization_done,
     return false;
   }
   RenderTarget* const* accumulated = last_update_accumulated_render_targets();
+  {
+    // Diagnostic census (XE_METAL_MSAA_STENCIL_CENSUS=1): how often 2x/4x
+    // depth targets are drawn with stencil on, packed and materialized.
+    static const bool s_census =
+        std::getenv("XE_METAL_MSAA_STENCIL_CENSUS") != nullptr;
+    if (s_census) {
+      ++msaa_stencil_census_[0];
+      if (accumulated[0] &&
+          accumulated[0]->key().msaa_samples != xenos::MsaaSamples::k1X) {
+        ++msaa_stencil_census_[1];
+        msaa_census_last_draw_[accumulated[0]->key().key] =
+            msaa_stencil_census_[0];
+        if (normalized_depth_control.stencil_enable) {
+          ++msaa_stencil_census_[2];
+        }
+      }
+      if ((msaa_stencil_census_[0] & 0x3FFFFu) == 0) {
+        XELOGI("MetalMsaaStencilCensus: updates {}, on 2x/4x depth {}, with "
+               "stencil {}; 2x/4x depth packs {} (no draw to the target since "
+               "a pack covering the range {}, since any pack {}), "
+               "materializes {}",
+               msaa_stencil_census_[0], msaa_stencil_census_[1],
+               msaa_stencil_census_[2], msaa_stencil_census_[3],
+               msaa_stencil_census_[5], msaa_stencil_census_[6],
+               msaa_stencil_census_[4]);
+      }
+    }
+  }
   PerformTransfers(accumulated, last_update_transfers());
+  if (!msaa_stencil_caches_.empty() && accumulated[0]) {
+    // The draw may write the target's stencil (or open its pass with a
+    // clear), so its cached stencil is stale -- after the transfers, which
+    // may have packed this target and rebuilt the cache.
+    auto* depth = static_cast<MetalRenderTarget*>(accumulated[0]);
+    if (depth->msaa_texture()) {
+      auto it = msaa_stencil_caches_.find(depth->msaa_texture());
+      if (it != msaa_stencil_caches_.end()) {
+        it->second.valid = false;
+      }
+    }
+  }
   // Track the presentable (BGRA8) color target for the pre-resolve fallback.
   for (uint32_t i = 1; i <= xenos::kMaxColorRenderTargets; ++i) {
     auto* rt = static_cast<MetalRenderTarget*>(accumulated[i]);
@@ -2495,6 +2552,14 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
   }
 }
 
+// Writers of depth targets other than draws and materialization (transfers,
+// resolve clears): every cached 2x/4x stencil may be stale after them.
+void MetalRenderTargetCache::InvalidateMsaaStencilCaches() {
+  for (auto& pair : msaa_stencil_caches_) {
+    pair.second.valid = false;
+  }
+}
+
 static bool MsaaStencilExtract(id<MTLDevice> device);
 
 const MetalRenderTargetCache::ShadowDepthPipelines*
@@ -2671,55 +2736,33 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
   o.stencil = xe_stencil(w);
   return o;
 }
-// 2x/4x depth pack without the X32_Stencil8 view (MsaaStencilExtract), in
-// three steps that only write (or read-modify-write) what the step before
-// wrote: clear the stencil byte of the range's words; one draw per stencil
-// bit -- stencil EQUAL on that bit, early tests, at sample rate -- ORs the bit
-// into each passing sample's word; the pack writes depth into each word,
-// keeping its stencil byte.
-kernel void clear_stencil_ms_range(
-    device uint* canonical [[buffer(0)]],
-    constant SurfaceParams& sp [[buffer(1)]],
-    constant AuthorityRangeParams& range [[buffer(2)]],
-    constant uint4& size [[buffer(3)]],
-    constant uint& row_start [[buffer(5)]],
-    uint3 tid [[thread_position_in_grid]]) {
-  // size = texture width, height, samples.
-  uint3 gid = uint3(tid.x, tid.y + row_start, tid.z);
-  uint guest_sample = xe_metal_sample_to_guest(sp.msaa, gid.z);
-  if (gid.x >= size.x || gid.y >= size.y || gid.z >= size.z ||
-      !xe_authority_in_range(gid.x, gid.y, sp, guest_sample, range)) return;
-  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   sp.is_depth, 0u, guest_sample) >> 2;
-  if (idx < sp.words) canonical[idx] &= ~0xFFu;
-}
-[[early_fragment_tests]] fragment void or_stencil_bit_fs(
+// 2x/4x depth pack without the X32_Stencil8 view (MsaaStencilExtract): the
+// target's stencil is cached per pixel (byte n = sample n) by one draw per
+// stencil bit -- stencil EQUAL on that bit, early tests, at sample rate,
+// ORing the bit into the pixel's word -- and the packs read it from there.
+[[early_fragment_tests]] fragment void cache_stencil_bit_fs(
     DepthVOut in [[stage_in]],
-    device atomic_uint* canonical [[buffer(0)]],
-    constant SurfaceParams& sp [[buffer(1)]],
-    constant AuthorityRangeParams& range [[buffer(2)]],
+    device atomic_uint* cache [[buffer(0)]],
+    constant uint& width [[buffer(1)]],
     constant uint& bit [[buffer(3)]],
     uint sid [[sample_id]]) {
-  uint2 gid = uint2(in.pos.xy);
-  uint guest_sample = xe_metal_sample_to_guest(sp.msaa, sid);
-  if (!xe_authority_in_range(gid.x, gid.y, sp, guest_sample, range)) return;
-  uint idx = xe_edram_offset_bytes(gid.x, gid.y, sp.base, sp.pitch, sp.msaa,
-                                   sp.is_depth, 0u, guest_sample) >> 2;
-  if (idx >= sp.words) return;
-  atomic_fetch_or_explicit(&canonical[idx], bit, memory_order_relaxed);
+  uint2 px = uint2(in.pos.xy);
+  atomic_fetch_or_explicit(&cache[px.y * width + px.x], bit << (8u * sid),
+                           memory_order_relaxed);
 }
-// The packs. XE_METAL_MSAA_STENCIL_EXTRACT_VERIFY builds _verify variants
-// that also compare each sample's stencil byte with the X32_Stencil8 view
-// (only where that read is safe): counts[0] compared, counts[1] differing.
-#define XE_PACK_KEEP_STENCIL_KERNELS(SUFFIX, VERIFY_ARGS, VERIFY)             \
-  kernel void pack_depth_ms_range_keep##SUFFIX(                               \
+// XE_METAL_MSAA_STENCIL_EXTRACT_VERIFY builds _verify variants that also
+// compare each sample's cached byte with the X32_Stencil8 view (only where
+// that read is safe): counts[0] compared, counts[1] differing.
+#define XE_PACK_CACHED_STENCIL_KERNELS(SUFFIX, VERIFY_ARGS, VERIFY)           \
+  kernel void pack_depth_ms_range_cached##SUFFIX(                             \
       depth2d_ms<float, access::read> tex [[texture(0)]],                     \
       device uint* canonical [[buffer(0)]],                                   \
       constant SurfaceParams& sp [[buffer(1)]],                               \
       constant AuthorityRangeParams& range [[buffer(2)]],                     \
       constant HostLaneParams& hl [[buffer(3)]],                              \
       device float* lane [[buffer(4)]],                                       \
-      constant uint& row_start [[buffer(5)]] VERIFY_ARGS,                     \
+      constant uint& row_start [[buffer(5)]],                                 \
+      device const uint* cache [[buffer(7)]] VERIFY_ARGS,                     \
       uint3 tid [[thread_position_in_grid]]) {                                \
     uint3 gid = uint3(tid.x, tid.y + row_start, tid.z);                       \
     uint guest_sample = xe_metal_sample_to_guest(sp.msaa, gid.z);             \
@@ -2734,20 +2777,21 @@ kernel void clear_stencil_ms_range(
     uint2 px = uint2(gid.x, gid.y);                                           \
     uint ms = gid.z;                                                          \
     float d = tex.read(px, ms);                                               \
-    uint s = xe_stencil(canonical[idx]);                                      \
+    uint s = (cache[px.y * tex.get_width() + px.x] >> (8u * ms)) & 0xFFu;     \
     VERIFY                                                                    \
     canonical[idx] =                                                          \
         xe_pack_depth_stencil(xe_host_to_depth_d24(d, sp.is_depth), s);       \
     if ((hl.mode & 1u) && sp.is_depth == 2u) lane[idx] = d;                   \
   }                                                                           \
-  kernel void pack_depth_ms_range_px_keep##SUFFIX(                            \
+  kernel void pack_depth_ms_range_px_cached##SUFFIX(                          \
       depth2d_ms<float, access::read> tex [[texture(0)]],                     \
       device uint* canonical [[buffer(0)]],                                   \
       constant SurfaceParams& sp [[buffer(1)]],                               \
       constant AuthorityRangeParams& range [[buffer(2)]],                     \
       constant HostLaneParams& hl [[buffer(3)]],                              \
       device float* lane [[buffer(4)]],                                       \
-      constant uint& row_start [[buffer(5)]] VERIFY_ARGS,                     \
+      constant uint& row_start [[buffer(5)]],                                 \
+      device const uint* cache [[buffer(7)]] VERIFY_ARGS,                     \
       uint2 tid [[thread_position_in_grid]]) {                                \
     uint2 px = uint2(tid.x, tid.y + row_start);                               \
     if (px.x >= tex.get_width() || px.y >= tex.get_height() ||               \
@@ -2756,12 +2800,13 @@ kernel void clear_stencil_ms_range(
     uint idx0 = xe_edram_offset_bytes(px.x, px.y, sp.base, sp.pitch,          \
                                       sp.msaa, sp.is_depth, 0u, 0u) >> 2;     \
     uint samples = tex.get_num_samples();                                     \
+    uint cached = cache[px.y * tex.get_width() + px.x];                       \
     for (uint ms = 0u; ms < samples; ++ms) {                                  \
       uint idx = xe_pixel_sample_word(                                        \
           idx0, xe_metal_sample_to_guest(sp.msaa, ms), 0u);                   \
       if (idx >= sp.words) continue;                                          \
       float d = tex.read(px, ms);                                             \
-      uint s = xe_stencil(canonical[idx]);                                    \
+      uint s = (cached >> (8u * ms)) & 0xFFu;                                 \
       VERIFY                                                                  \
       canonical[idx] =                                                        \
           xe_pack_depth_stencil(xe_host_to_depth_d24(d, sp.is_depth), s);     \
@@ -2777,8 +2822,8 @@ kernel void clear_stencil_ms_range(
   atomic_fetch_add_explicit(&counts[0], 1u, memory_order_relaxed);            \
   if (s != (view.read(px, ms).r & 0xFFu))                                     \
     atomic_fetch_add_explicit(&counts[1], 1u, memory_order_relaxed);
-XE_PACK_KEEP_STENCIL_KERNELS(, XE_NO_VERIFY_ARGS, XE_NO_VERIFY)
-XE_PACK_KEEP_STENCIL_KERNELS(_verify, XE_VERIFY_ARGS, XE_VERIFY)
+XE_PACK_CACHED_STENCIL_KERNELS(, XE_NO_VERIFY_ARGS, XE_NO_VERIFY)
+XE_PACK_CACHED_STENCIL_KERNELS(_verify, XE_VERIFY_ARGS, XE_VERIFY)
 )MSL";
     std::string src = std::string(kEdramMsl) + kShadowAdapterMsl;
     id<MTLLibrary> lib = [device
@@ -2904,15 +2949,14 @@ XE_PACK_KEEP_STENCIL_KERNELS(_verify, XE_VERIFY_ARGS, XE_VERIFY)
   // Stencil-view-free depth pack for MsaaStencilExtract (warn-only: the pack
   // falls back to the X32_Stencil8 view when absent).
   id<MTLRenderPipelineState> or_stencil = nil;
-  id<MTLComputePipelineState> clear_stencil = nil;
-  id<MTLComputePipelineState> pack_keep = nil;
-  id<MTLComputePipelineState> pack_keep_px = nil;
+  id<MTLComputePipelineState> pack_cached = nil;
+  id<MTLComputePipelineState> pack_cached_px = nil;
   if (ms && MsaaStencilExtract(device)) {
     NSError* extract_err = nil;
     MTLRenderPipelineDescriptor* epd =
         [[MTLRenderPipelineDescriptor alloc] init];
     epd.vertexFunction = [lib newFunctionWithName:@"xe_depth_vs"];
-    epd.fragmentFunction = [lib newFunctionWithName:@"or_stencil_bit_fs"];
+    epd.fragmentFunction = [lib newFunctionWithName:@"cache_stencil_bit_fs"];
     epd.depthAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
     epd.stencilAttachmentPixelFormat = (MTLPixelFormat)kDepthFormat;
     epd.rasterSampleCount = sample_count;
@@ -2925,19 +2969,17 @@ XE_PACK_KEEP_STENCIL_KERNELS(_verify, XE_VERIFY_ARGS, XE_VERIFY)
           newComputePipelineStateWithFunction:[lib newFunctionWithName:name]
                                         error:&extract_err];
     };
-    clear_stencil = compute(@"clear_stencil_ms_range");
-    pack_keep = compute(verify ? @"pack_depth_ms_range_keep_verify"
-                               : @"pack_depth_ms_range_keep");
-    pack_keep_px = compute(verify ? @"pack_depth_ms_range_px_keep_verify"
-                                  : @"pack_depth_ms_range_px_keep");
-    if (!or_stencil || !clear_stencil || !pack_keep || !pack_keep_px) {
+    pack_cached = compute(verify ? @"pack_depth_ms_range_cached_verify"
+                                 : @"pack_depth_ms_range_cached");
+    pack_cached_px = compute(verify ? @"pack_depth_ms_range_px_cached_verify"
+                                    : @"pack_depth_ms_range_px_cached");
+    if (!or_stencil || !pack_cached || !pack_cached_px) {
       XELOGW("MetalShadow: MSAA stencil extraction pipelines failed sc={}: {}",
              sample_count,
              extract_err ? extract_err.localizedDescription.UTF8String : "?");
       or_stencil = nil;
-      clear_stencil = nil;
-      pack_keep = nil;
-      pack_keep_px = nil;
+      pack_cached = nil;
+      pack_cached_px = nil;
     } else if (verify && !msaa_stencil_verify_buffer_) {
       id<MTLBuffer> counts =
           [device newBufferWithLength:2 * sizeof(uint32_t)
@@ -2948,11 +2990,11 @@ XE_PACK_KEEP_STENCIL_KERNELS(_verify, XE_VERIFY_ARGS, XE_VERIFY)
   }
   ShadowDepthPipelines p;
   p.sample_count = sample_count;
+
   if (or_stencil) {
     p.extract_sten = (__bridge_retained void*)or_stencil;
-    p.clear_stencil = (__bridge_retained void*)clear_stencil;
-    p.pack_ms_range_keep = (__bridge_retained void*)pack_keep;
-    p.pack_ms_range_px_keep = (__bridge_retained void*)pack_keep_px;
+    p.pack_ms_range_cached = (__bridge_retained void*)pack_cached;
+    p.pack_ms_range_px_cached = (__bridge_retained void*)pack_cached_px;
     for (uint32_t b = 0; b < 8; ++b) {
       MTLDepthStencilDescriptor* eds = [[MTLDepthStencilDescriptor alloc] init];
       eds.depthCompareFunction = MTLCompareFunctionAlways;
@@ -3025,30 +3067,45 @@ XE_PACK_KEEP_STENCIL_KERNELS(_verify, XE_VERIFY_ARGS, XE_VERIFY)
 // samples (2026-10-29; GTA IV at 2x2 on the M4 mini 19.0 -> 21.3 fps).
 // Default on; XE_METAL_MSAA_PACK_PER_PIXEL=0 packs one thread per sample.
 // 2x/4x depth packs take stencil from stencil-test bit planes instead of an
-// X32_Stencil8 view on pre-Metal 3 GPUs: on the Radeon Pro 580X (Polaris) a
-// compute read of a multisampled stencil view intermittently wedges the GPU
-// (~26 s command buffer -> kIOAccelCommandBufferCallbackErrorTimeout, then
-// every frame; RDR ~90% of five-minute runs with texture heaps off). The bit
-// planes OR straight into the canonical words: an intermediate target that
-// the pack reads and the next pack's bit planes rewrite was overwritten
-// before the read on the RX 6900 XT (correct with a fresh target per pack).
+// X32_Stencil8 view on pre-Metal 3 GPUs: on the Radeon Pro 580X (Polaris)
+// reading a multisampled stencil view (from compute or fragment shaders)
+// intermittently wedges the GPU (~26 s command buffer ->
+// kIOAccelCommandBufferCallbackErrorTimeout, then every frame; RDR ~90% of
+// five-minute runs with texture heaps off). The bit planes need a render pass
+// on the depth target, which costs like a decompression on AMD, so they fill
+// a per-target stencil cache reused until the target is drawn to (USF4 packs
+// ~220 times a frame, 96% without a draw in between): USF4 60 fps (60
+// before), Gears 3 19.5 (20.4). The cache's rewrites wait on a fence the
+// reading packs update: a reused intermediate was rewritten before an
+// earlier pack read it on the RX 6900 XT.
 // XE_METAL_MSAA_STENCIL_EXTRACT_VERIFY compares the packed stencil with the
-// view where reading it is safe: on the 6900, ~6e-5 of samples differ, in
-// bursts; analytic patterns (export, clear, replace, partial-coverage edges,
-// standard and Xenos positions) match exactly both ways.
-// XE_METAL_MSAA_STENCIL_EXTRACT=0/1 overrides.
-static bool MsaaStencilExtract(id<MTLDevice> device) {
-  static const bool enabled = [device] {
+// view where reading it is safe. XE_METAL_MSAA_STENCIL_EXTRACT=0/1 overrides.
+// XE_METAL_MSAA_DEPTH_PACK=compute|bits picks the 2x/4x depth pack: the
+// compute pack reading the X32_Stencil8 view, or the bit-plane stencil cache.
+// (The view read in an attachment-less fragment pass wedged the 580X too.)
+enum class MsaaDepthPackMode { kCompute, kBits };
+static MsaaDepthPackMode GetMsaaDepthPackMode(id<MTLDevice> device) {
+  static const MsaaDepthPackMode mode = [device] {
+    if (const char* v = std::getenv("XE_METAL_MSAA_DEPTH_PACK")) {
+      return !std::strcmp(v, "bits") ? MsaaDepthPackMode::kBits
+                                     : MsaaDepthPackMode::kCompute;
+    }
     if (const char* v = std::getenv("XE_METAL_MSAA_STENCIL_EXTRACT")) {
-      return v[0] == '1';
+      return v[0] == '1' ? MsaaDepthPackMode::kBits
+                         : MsaaDepthPackMode::kCompute;
     }
     bool metal3 = false;
     if (@available(macOS 13.0, *)) {
       metal3 = [device supportsFamily:MTLGPUFamilyMetal3];
     }
-    return !metal3 && ![device supportsFamily:MTLGPUFamilyApple7];
+    return !metal3 && ![device supportsFamily:MTLGPUFamilyApple7]
+               ? MsaaDepthPackMode::kBits
+               : MsaaDepthPackMode::kCompute;
   }();
-  return enabled;
+  return mode;
+}
+static bool MsaaStencilExtract(id<MTLDevice> device) {
+  return GetMsaaDepthPackMode(device) == MsaaDepthPackMode::kBits;
 }
 static bool MsaaPackPerPixel() {
   static const bool enabled = ParseMetalEnvironmentFlag(
@@ -3291,6 +3348,14 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthPack(
 bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
     const void* command_buffer, RenderTarget* render_target,
     uint32_t start_tiles, uint32_t end_tiles) {
+  ++msaa_stencil_census_[4];
+  if (render_target) {
+    auto* materialized = static_cast<MetalRenderTarget*>(render_target);
+    auto it = msaa_stencil_caches_.find(materialized->msaa_texture());
+    if (it != msaa_stencil_caches_.end()) {
+      it->second.valid = false;
+    }
+  }
   if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
       !render_target || !render_target->key().is_depth ||
       render_target->key().msaa_samples == xenos::MsaaSamples::k1X) {
@@ -3438,6 +3503,26 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
 bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
     const void* command_buffer, RenderTarget* render_target,
     uint32_t start_tiles, uint32_t end_tiles) {
+  ++msaa_stencil_census_[3];
+  if (render_target) {
+    const uint32_t key = render_target->key().key;
+    const uint64_t last_draw = msaa_census_last_draw_[key];
+    auto& last = msaa_census_last_pack_[key];
+    if (last.serial && last.serial >= last_draw) {
+      ++msaa_stencil_census_[6];
+      if (start_tiles >= last.start && end_tiles <= last.end) {
+        ++msaa_stencil_census_[5];
+      }
+    }
+    if (last.serial >= last_draw && last.serial) {
+      last.start = std::min(last.start, start_tiles);
+      last.end = std::max(last.end, end_tiles);
+    } else {
+      last.start = start_tiles;
+      last.end = end_tiles;
+    }
+    last.serial = msaa_stencil_census_[0] ? msaa_stencil_census_[0] : 1;
+  }
   if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
       !render_target || !render_target->key().is_depth ||
       render_target->key().msaa_samples == xenos::MsaaSamples::k1X) {
@@ -3483,60 +3568,117 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   if (row_start >= work_height) {
     return true;
   }
-  // Devices where a compute read of a 2x/4x stencil view can wedge the GPU
-  // (MsaaStencilExtract) build the stencil byte from stencil-test bit planes
-  // in the canonical words first, then pack depth around it.
+  // Devices where reading a 2x/4x stencil view can wedge the GPU
+  // (MsaaStencilExtract) read stencil from the target's bit-plane cache.
   const bool extract =
       MsaaStencilExtract(texture.device) && pipelines->extract_sten;
   id<MTLTexture> stencil = nil;
+  id<MTLBuffer> stencil_cache = nil;
+  id<MTLFence> stencil_cache_fence = nil;
   if (extract) {
-    const uint32_t size[4] = {uint32_t(texture.width),
-                              uint32_t(texture.height),
-                              uint32_t(texture.sampleCount), 0u};
-    id<MTLComputePipelineState> clear =
-        (__bridge id<MTLComputePipelineState>)pipelines->clear_stencil;
-    id<MTLComputeCommandEncoder> clear_encoder = [command computeCommandEncoder];
-    clear_encoder.label = @"rtcache:canonical-depth-pack-msaa-stencil-clear";
-    [clear_encoder setComputePipelineState:clear];
-    [clear_encoder setBuffer:canonical offset:0 atIndex:0];
-    [clear_encoder setBytes:&params length:sizeof(params) atIndex:1];
-    [clear_encoder setBytes:&range length:sizeof(range) atIndex:2];
-    [clear_encoder setBytes:size length:sizeof(size) atIndex:3];
-    [clear_encoder setBytes:&row_start length:sizeof(row_start) atIndex:5];
-    [clear_encoder
-              dispatchThreads:MTLSizeMake(texture.width,
-                                          work_height - row_start,
-                                          texture.sampleCount)
-        threadsPerThreadgroup:MTLSizeMake(clear.threadExecutionWidth, 1, 1)];
-    [clear_encoder endEncoding];
-    MTLRenderPassDescriptor* pass =
-        [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.depthAttachment.texture = texture;
-    pass.depthAttachment.loadAction = MTLLoadActionLoad;
-    pass.depthAttachment.storeAction = MTLStoreActionStore;
-    pass.stencilAttachment.texture = texture;
-    pass.stencilAttachment.loadAction = MTLLoadActionLoad;
-    pass.stencilAttachment.storeAction = MTLStoreActionStore;
-    id<MTLRenderCommandEncoder> bits = [command
-        renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(
-                                               pass)];
-    bits.label = @"rtcache:canonical-depth-pack-msaa-stencil-bits";
-    [bits setScissorRect:MTLScissorRect{0, row_start, texture.width,
-                                        work_height - row_start}];
-    [bits setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
-                                     pipelines->extract_sten];
-    [bits setStencilReferenceValue:0xFF];
-    [bits setFragmentBuffer:canonical offset:0 atIndex:0];
-    [bits setFragmentBytes:&params length:sizeof(params) atIndex:1];
-    [bits setFragmentBytes:&range length:sizeof(range) atIndex:2];
-    for (uint32_t b = 0; b < 8; ++b) {
-      const uint32_t bit = 1u << b;
-      [bits setDepthStencilState:(__bridge id<MTLDepthStencilState>)
-                                     pipelines->extract_states[b]];
-      [bits setFragmentBytes:&bit length:sizeof(bit) atIndex:3];
-      [bits drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    // The per-pixel stencil cache: rebuilt by the bit planes after the target
+    // was drawn to or materialized, then read by every pack until then (USF4
+    // packs a target ~220 times a frame, 96% with no draw in between, and the
+    // bit-plane pass costs a render pass on the 2x/4x depth target).
+    MsaaStencilCache& cache = msaa_stencil_caches_[(__bridge void*)texture];
+    const uint64_t cache_bytes =
+        uint64_t(texture.width) * texture.height * sizeof(uint32_t);
+    if (!cache.buffer || cache.bytes < cache_bytes) {
+      if (cache.buffer) {
+        deferred_texture_releases_.emplace_back(
+            command_processor_.CurrentEncodingSubmission(), cache.buffer);
+      }
+      id<MTLBuffer> created =
+          [texture.device newBufferWithLength:cache_bytes
+                                      options:MTLResourceStorageModePrivate];
+      if (!created) {
+        return false;
+      }
+      created.label = @"rtcache:msaa-stencil-cache";
+      cache.buffer = (__bridge_retained void*)created;
+      cache.bytes = cache_bytes;
+      cache.valid = false;
+      if (!cache.fence) {
+        cache.fence = (__bridge_retained void*)[texture.device newFence];
+      }
     }
-    [bits endEncoding];
+    stencil_cache = (__bridge id<MTLBuffer>)cache.buffer;
+    stencil_cache_fence = (__bridge id<MTLFence>)cache.fence;
+    // A stale cache rebuilds the pack's rows; a valid one missing them (more
+    // packs with no draw in between) rebuilds the whole target for the rest.
+    // XE_METAL_MSAA_STENCIL_CACHE=0: rebuild for every pack.
+    static const bool s_cache_off = [] {
+      const char* v = std::getenv("XE_METAL_MSAA_STENCIL_CACHE");
+      return v && v[0] == '0';
+    }();
+    if (s_cache_off) {
+      cache.valid = false;
+    }
+    uint32_t rows_start = row_start;
+    uint32_t rows_end = uint32_t(work_height);
+    if (cache.valid &&
+        (rows_start < cache.valid_start || rows_end > cache.valid_end)) {
+      rows_start = 0;
+      rows_end = uint32_t(texture.height);
+    }
+    if (!cache.valid || rows_start < cache.valid_start ||
+        rows_end > cache.valid_end) {
+      ++msaa_stencil_cache_rebuilds_;
+      // Earlier packs read the cache; Metal did not order a later write
+      // after such reads on the RX 6900 XT, so the clear waits on the fence
+      // they update.
+      id<MTLBlitCommandEncoder> clear = [command blitCommandEncoder];
+      clear.label = @"rtcache:msaa-stencil-cache-clear";
+      [clear waitForFence:stencil_cache_fence];
+      const NSUInteger row_bytes = texture.width * sizeof(uint32_t);
+      [clear fillBuffer:stencil_cache
+                  range:NSMakeRange(rows_start * row_bytes,
+                                    (rows_end - rows_start) * row_bytes)
+                  value:0];
+      [clear endEncoding];
+      MTLRenderPassDescriptor* pass =
+          [MTLRenderPassDescriptor renderPassDescriptor];
+      pass.depthAttachment.texture = texture;
+      pass.depthAttachment.loadAction = MTLLoadActionLoad;
+      pass.depthAttachment.storeAction = MTLStoreActionStore;
+      pass.stencilAttachment.texture = texture;
+      pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+      pass.stencilAttachment.storeAction = MTLStoreActionStore;
+      id<MTLRenderCommandEncoder> bits = [command
+          renderCommandEncoderWithDescriptor:
+              metal::MetalApplyXenosSamplePositions(pass)];
+      bits.label = @"rtcache:msaa-stencil-cache-bits";
+      [bits setScissorRect:MTLScissorRect{0, rows_start, texture.width,
+                                          rows_end - rows_start}];
+      [bits setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                       pipelines->extract_sten];
+      [bits setStencilReferenceValue:0xFF];
+      [bits setFragmentBuffer:stencil_cache offset:0 atIndex:0];
+      const uint32_t width = uint32_t(texture.width);
+      [bits setFragmentBytes:&width length:sizeof(width) atIndex:1];
+      for (uint32_t b = 0; b < 8; ++b) {
+        const uint32_t bit = 1u << b;
+        [bits setDepthStencilState:(__bridge id<MTLDepthStencilState>)
+                                       pipelines->extract_states[b]];
+        [bits setFragmentBytes:&bit length:sizeof(bit) atIndex:3];
+        [bits drawPrimitives:MTLPrimitiveTypeTriangle
+                 vertexStart:0
+                 vertexCount:3];
+      }
+      [bits endEncoding];
+      // Rows rebuilt now; still-valid rows they touch stay valid with them.
+      if (cache.valid && rows_end >= cache.valid_start &&
+          rows_start <= cache.valid_end) {
+        cache.valid_start = std::min(cache.valid_start, rows_start);
+        cache.valid_end = std::max(cache.valid_end, rows_end);
+      } else {
+        cache.valid_start = rows_start;
+        cache.valid_end = rows_end;
+      }
+      cache.valid = true;
+    } else {
+      ++msaa_stencil_cache_hits_;
+    }
     if (msaa_stencil_verify_buffer_) {
       stencil =
           [texture newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
@@ -3551,8 +3693,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   const bool per_pixel = MsaaPackPerPixel();
   id<MTLComputePipelineState> pipeline =
       (__bridge id<MTLComputePipelineState>)(
-          extract ? (per_pixel ? pipelines->pack_ms_range_px_keep
-                               : pipelines->pack_ms_range_keep)
+          extract ? (per_pixel ? pipelines->pack_ms_range_px_cached
+                               : pipelines->pack_ms_range_cached)
                   : (per_pixel ? pipelines->pack_ms_range_px
                                : pipelines->pack_ms_range));
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
@@ -3573,10 +3715,13 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
                 offset:0
                atIndex:4];
   }
-  if (extract && msaa_stencil_verify_buffer_) {
-    [encoder setBuffer:(__bridge id<MTLBuffer>)msaa_stencil_verify_buffer_
-                offset:0
-               atIndex:6];
+  if (extract) {
+    [encoder setBuffer:stencil_cache offset:0 atIndex:7];
+    if (msaa_stencil_verify_buffer_) {
+      [encoder setBuffer:(__bridge id<MTLBuffer>)msaa_stencil_verify_buffer_
+                  offset:0
+                 atIndex:6];
+    }
   }
   NSUInteger thread_width = pipeline.threadExecutionWidth;
   NSUInteger thread_height =
@@ -3585,7 +3730,15 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   [encoder dispatchThreads:MTLSizeMake(texture.width, work_height - row_start,
                                        per_pixel ? 1 : texture.sampleCount)
       threadsPerThreadgroup:MTLSizeMake(thread_width, thread_height, 1)];
+  if (stencil_cache_fence) {
+    [encoder updateFence:stencil_cache_fence];
+  }
   [encoder endEncoding];
+  if (extract && (++msaa_stencil_cache_packs_ & 0xFFFFu) == 0) {
+    XELOGI("MetalMsaaStencilCache: {} packs, {} rebuilds, {} hits",
+           msaa_stencil_cache_packs_, msaa_stencil_cache_rebuilds_,
+           msaa_stencil_cache_hits_);
+  }
   if (extract && msaa_stencil_verify_buffer_ &&
       (++msaa_stencil_verify_packs_ & 1023u) == 0) {
     const uint32_t* counts = static_cast<const uint32_t*>(
@@ -3603,6 +3756,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
 void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
                                                   RenderTarget* source_rt,
                                                   const Transfer& transfer) {
+  InvalidateMsaaStencilCaches();
   // Cap the sampled transitions: the shadow adds real GPU work per transition,
   // and a sample is enough to prove the substrate on live data.
   if (shadow_count_ >= 128u) {
@@ -3780,6 +3934,7 @@ void MetalRenderTargetCache::CanonicalDepthTransfer(const void* command_buffer,
                                                     RenderTarget* source_rt,
                                                     RenderTarget* dest_rt,
                                                     const Transfer& transfer) {
+  InvalidateMsaaStencilCaches();
   // Option 1 depth authority: pack(source depth+stencil) -> canonical EDRAM,
   // then materialize(dest) <- canonical EDRAM, both guarded to the transfer's
   // tiles. Content lives in the durable canonical buffer, so it survives the RT
@@ -3896,6 +4051,7 @@ void MetalRenderTargetCache::CanonicalDepthTransfer(const void* command_buffer,
 void MetalRenderTargetCache::PerformCrossMsaaTransfer(
     const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
     const Transfer& transfer) {
+  InvalidateMsaaStencilCaches();
   auto* source = static_cast<MetalRenderTarget*>(source_rt);
   auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
   // The half-height double-stack forensics: which draw triggers a cross-MSAA
@@ -4328,6 +4484,7 @@ void MetalRenderTargetCache::EnsureStencilBitStates() {
 void MetalRenderTargetCache::PerformColorToDepthTransfer(
     const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
     const Transfer& transfer) {
+  InvalidateMsaaStencilCaches();
   auto* source = static_cast<MetalRenderTarget*>(source_rt);
   auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
@@ -6336,6 +6493,7 @@ bool MetalRenderTargetCache::PerformAttachmentColorResolveClear(
 void MetalRenderTargetCache::PerformResolveClear(
     const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
     uint32_t rows, uint32_t span_pitch, bool is_depth, uint32_t clear_value) {
+  InvalidateMsaaStencilCaches();
   // A zero-sized resolve still carries the clear bits (Forza Horizon issues
   // several 0x0 copies a frame). It clears nothing, so it must not take the
   // authority reset below: forgetting every tile's owner there made the next
