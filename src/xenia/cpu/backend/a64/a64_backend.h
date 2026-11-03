@@ -84,6 +84,10 @@ struct A64BackendContext {
   // bit 1 = got reserve
   unsigned int flags;
   unsigned int Ox1000;  // constant 0x1000
+  // Set by ResolveFunction when a guest longjmp lands at a return site inside
+  // a live frame: the stackpoint depth that frame restores (its index + 1).
+  // The stack synchronization check after each guest call consumes it.
+  unsigned int pending_stackpoint_sync_depth;
 };
 
 // Default FPCR for FPU mode (round to nearest, no flush to zero).

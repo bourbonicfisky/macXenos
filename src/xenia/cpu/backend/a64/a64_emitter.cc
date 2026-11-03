@@ -200,15 +200,8 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // Store zero for call return address (we haven't made a call yet).
   str(xzr, ptr(sp, static_cast<uint32_t>(StackLayout::GUEST_CALL_RET_ADDR)));
 
-  // Record stackpoint for longjmp recovery, then save the resulting depth
-  // for post-call detection (if depth changes, a longjmp skipped frames).
+  // Record stackpoint for longjmp recovery.
   PushStackpoint();
-  if (cvars::a64_enable_host_guest_stack_synchronization) {
-    ldr(w16, ptr(x19, static_cast<uint32_t>(offsetof(
-                          A64BackendContext, current_stackpoint_depth))));
-    str(w16, ptr(sp, static_cast<uint32_t>(
-                         StackLayout::GUEST_SAVED_STACKPOINT_DEPTH)));
-  }
 
   // ========================================================================
   // BODY
@@ -240,9 +233,12 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
     while (instr) {
       // After a guest call, check for longjmp on the next real instruction.
       // Skip SOURCE_OFFSET because the return address from the call would
-      // point past the check, so it would never execute.
+      // point past the check, so it would never execute. With debug info a
+      // COMMENT precedes the SOURCE_OFFSET, so skip that too.
       if (synchronize_stack_on_next_instruction_) {
-        if (instr->GetOpcodeNum() != hir::OPCODE_SOURCE_OFFSET) {
+        const hir::Opcode opcode_num = instr->GetOpcodeNum();
+        if (opcode_num != hir::OPCODE_SOURCE_OFFSET &&
+            opcode_num != hir::OPCODE_COMMENT) {
           synchronize_stack_on_next_instruction_ = false;
           EnsureSynchronizedGuestAndHostStack();
         }
@@ -266,6 +262,11 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // ========================================================================
   L(*epilog_label_);
   epilog_label_ = nullptr;
+  // A call as the last instruction leaves the check unconsumed.
+  if (synchronize_stack_on_next_instruction_) {
+    synchronize_stack_on_next_instruction_ = false;
+    EnsureSynchronizedGuestAndHostStack();
+  }
   code_offsets.epilog = getSize();
 
   // Pop stackpoint before leaving.
@@ -683,36 +684,27 @@ void A64Emitter::EnsureSynchronizedGuestAndHostStack() {
   if (!cvars::a64_enable_host_guest_stack_synchronization) {
     return;
   }
-  // Compare current stackpoint depth against the value saved after
-  // PushStackpoint in the prolog. If different, a longjmp occurred and
-  // some frames' PopStackpoint never ran.
+  // ResolveFunction sets pending_stackpoint_sync_depth when a guest longjmp
+  // branches to the return site after a call in a live frame (see
+  // ResolveLongjmp in a64_backend.cc) and hands back this check's address.
+  // The host SP still belongs to the frame the branch left, so the helper
+  // restores the landing frame's SP and stackpoint depth, then resumes here.
+  // The marker lives in the backend context because SP cannot be trusted.
   auto& return_from_sync = NewCachedLabel();
 
-  ldr(w17, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext,
-                                                   current_stackpoint_depth))));
-  ldr(w16, ptr(sp, static_cast<uint32_t>(
-                       StackLayout::GUEST_SAVED_STACKPOINT_DEPTH)));
-  cmp(w17, w16);
+  ldr(w16, ptr(x19, static_cast<uint32_t>(offsetof(
+                        A64BackendContext, pending_stackpoint_sync_depth))));
+  cbz(w16, return_from_sync);
 
-  auto emit_sync = [&return_from_sync](A64Emitter& e) {
-    // Set up arguments for the sync helper:
-    //   x8 = return address (where to resume after fixup)
-    //   x9 = this function's stack size
-    e.adr(e.x8, return_from_sync);
-    e.mov(e.x9, static_cast<uint64_t>(e.stack_size()));
+  auto& sync_label = AddToTail([](A64Emitter& e, Label& lbl) {
+    // x8 (set in the body, where adr reaches return_from_sync) = where to
+    // resume after the fixup.
     e.mov(e.x10, reinterpret_cast<uint64_t>(
                      e.backend()->synchronize_guest_and_host_stack_helper()));
     e.br(e.x10);
-  };
-  if (far_branches_) {
-    // The tail may be more than 1 MiB away, out of the adr's reach back.
-    b(EQ, return_from_sync);
-    emit_sync(*this);
-  } else {
-    auto& sync_label = AddToTail(
-        [emit_sync](A64Emitter& e, Label& lbl) { emit_sync(e); });
-    b(NE, sync_label);
-  }
+  });
+  adr(x8, return_from_sync);
+  b(sync_label);
 
   L(return_from_sync);
 }
