@@ -103,6 +103,10 @@ class MetalSharedMemory : public SharedMemory {
   // their submission (NoteGpuWriteInFlight), so an upload over them while the
   // readback is in flight takes the staged-blit hazard path.
   static bool DiscreteMirrorEnabled();
+  // Unified-memory mirror in the default (cached) CPU mode rather than
+  // write-combined, since resolve publication and memexport drains read it
+  // on the CPU. Default on; XE_METAL_SHARED_MIRROR_CACHED=0 rolls back.
+  static bool SharedMirrorCachedEnabled();
   bool is_discrete_mirror() const { return gpu_buffer_ != nullptr; }
   void SetCpuWriteCallback(
       std::function<void(uint32_t offset, uint32_t length)> callback) {
