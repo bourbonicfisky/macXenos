@@ -21,6 +21,7 @@
 
 #include <mach/mach.h>
 #include <objc/message.h>
+#include <dlfcn.h>
 #include <objc/runtime.h>
 #include <pthread.h>
 
@@ -1926,9 +1927,249 @@ static void NoteGeometryEmulationDraw(uint32_t geometry_type,
 // FAULTED encoder lines, and 2 queue revokes -- most plausibly ~2 episodes
 // with a large collateral radius, certainly not 45 independent faults and not
 // necessarily 5 either. `grep -c` on any single one of these is misleading.
+// Diagnostic (XE_METAL_CB_ENCODER_RING=1): every encoder a command buffer
+// creates -- render, compute or blit, from any of the backend's call sites --
+// is recorded with its caller, and a faulted command buffer lists them (the
+// draw sequence names draws only; AMD reports no encoder status).
+namespace {
+struct CbEncoderNote {
+  void* command_buffer;
+  void* encoder;
+  void* caller;
+  uint32_t seq;
+  char kind;
+};
+struct CbDispatchNote {
+  void* encoder;
+  void* caller;
+  // g_cb_encoder_next when issued: after its encoder's own seq.
+  uint32_t seq;
+  uint32_t groups[3];
+  uint32_t threads[3];
+  // 'G' dispatchThreadgroups, 'T' dispatchThreads, 'I' indirect.
+  char kind;
+};
+constexpr uint32_t kCbEncoderRingSize = 16384;
+constexpr uint32_t kCbDispatchRingSize = 32768;
+CbEncoderNote g_cb_encoder_ring[kCbEncoderRingSize];
+CbDispatchNote g_cb_dispatch_ring[kCbDispatchRingSize];
+std::atomic<uint32_t> g_cb_encoder_next{0};
+std::atomic<uint32_t> g_cb_dispatch_next{0};
+IMP g_cb_render_imp, g_cb_compute_imp, g_cb_compute_type_imp, g_cb_blit_imp;
+IMP g_enc_groups_imp, g_enc_threads_imp, g_enc_indirect_imp;
+// XE_METAL_CB_BREADCRUMBS=1: before each encoder a one-byte blit marks its
+// seq in a shared buffer (cleared by the CPU first), so after a timeout the
+// encoders the GPU reached are known.
+id<MTLBuffer> g_breadcrumbs;
+uint8_t* g_breadcrumb_bytes;
+constexpr uint32_t kBreadcrumbCount = 65536;
+
+uint32_t BeginCbEncoder(id self) {
+  const uint32_t seq =
+      g_cb_encoder_next.fetch_add(1, std::memory_order_relaxed);
+  if (g_breadcrumbs) {
+    const uint32_t slot = seq % kBreadcrumbCount;
+    g_breadcrumb_bytes[slot] = 0;
+    id<MTLBlitCommandEncoder> blit =
+        reinterpret_cast<id (*)(id, SEL)>(g_cb_blit_imp)(
+            self, @selector(blitCommandEncoder));
+    [blit fillBuffer:g_breadcrumbs range:NSMakeRange(slot, 1) value:1];
+    [blit endEncoding];
+  }
+  return seq;
+}
+
+id NoteCbEncoder(id self, uint32_t seq, char kind, void* caller, id encoder) {
+  CbEncoderNote& note = g_cb_encoder_ring[seq % kCbEncoderRingSize];
+  note.seq = seq;
+  note.command_buffer = (__bridge void*)self;
+  note.encoder = (__bridge void*)encoder;
+  note.caller = caller;
+  note.kind = kind;
+  return encoder;
+}
+void NoteDispatch(id encoder, char kind, void* caller, MTLSize groups,
+                  MTLSize threads) {
+  CbDispatchNote& note =
+      g_cb_dispatch_ring[g_cb_dispatch_next.fetch_add(
+                             1, std::memory_order_relaxed) %
+                         kCbDispatchRingSize];
+  note.encoder = (__bridge void*)encoder;
+  note.caller = caller;
+  note.seq = g_cb_encoder_next.load(std::memory_order_relaxed);
+  note.groups[0] = uint32_t(groups.width);
+  note.groups[1] = uint32_t(groups.height);
+  note.groups[2] = uint32_t(groups.depth);
+  note.threads[0] = uint32_t(threads.width);
+  note.threads[1] = uint32_t(threads.height);
+  note.threads[2] = uint32_t(threads.depth);
+  note.kind = kind;
+}
+id CbRenderHook(id self, SEL sel, id desc) {
+  const uint32_t seq = BeginCbEncoder(self);
+  return NoteCbEncoder(
+      self, seq, 'R', __builtin_return_address(0),
+      reinterpret_cast<id (*)(id, SEL, id)>(g_cb_render_imp)(self, sel, desc));
+}
+id CbComputeHook(id self, SEL sel) {
+  const uint32_t seq = BeginCbEncoder(self);
+  return NoteCbEncoder(
+      self, seq, 'C', __builtin_return_address(0),
+      reinterpret_cast<id (*)(id, SEL)>(g_cb_compute_imp)(self, sel));
+}
+id CbComputeTypeHook(id self, SEL sel, NSUInteger type) {
+  const uint32_t seq = BeginCbEncoder(self);
+  return NoteCbEncoder(self, seq, 'C', __builtin_return_address(0),
+                       reinterpret_cast<id (*)(id, SEL, NSUInteger)>(
+                           g_cb_compute_type_imp)(self, sel, type));
+}
+id CbBlitHook(id self, SEL sel) {
+  const uint32_t seq = BeginCbEncoder(self);
+  return NoteCbEncoder(
+      self, seq, 'B', __builtin_return_address(0),
+      reinterpret_cast<id (*)(id, SEL)>(g_cb_blit_imp)(self, sel));
+}
+void EncGroupsHook(id self, SEL sel, MTLSize groups, MTLSize threads) {
+  NoteDispatch(self, 'G', __builtin_return_address(0), groups, threads);
+  reinterpret_cast<void (*)(id, SEL, MTLSize, MTLSize)>(g_enc_groups_imp)(
+      self, sel, groups, threads);
+}
+void EncThreadsHook(id self, SEL sel, MTLSize grid, MTLSize threads) {
+  NoteDispatch(self, 'T', __builtin_return_address(0), grid, threads);
+  reinterpret_cast<void (*)(id, SEL, MTLSize, MTLSize)>(g_enc_threads_imp)(
+      self, sel, grid, threads);
+}
+void EncIndirectHook(id self, SEL sel, id buffer, NSUInteger offset,
+                     MTLSize threads) {
+  NoteDispatch(self, 'I', __builtin_return_address(0),
+               MTLSizeMake(NSUInteger(offset), 0, 0), threads);
+  reinterpret_cast<void (*)(id, SEL, id, NSUInteger, MTLSize)>(
+      g_enc_indirect_imp)(self, sel, buffer, offset, threads);
+}
+
+bool CbEncoderRingEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_CB_ENCODER_RING");
+    return v && v[0] == '1';
+  }();
+  return s_enabled;
+}
+
+void HookMethod(Class cls, SEL sel, IMP imp, const char* types,
+                IMP* original) {
+  Method m = class_getInstanceMethod(cls, sel);
+  if (!m) {
+    return;
+  }
+  *original = method_getImplementation(m);
+  class_replaceMethod(cls, sel, imp, types);
+}
+
+void InstallCbEncoderRing(id<MTLCommandQueue> queue) {
+  if (!CbEncoderRingEnabled() || !queue || g_cb_blit_imp) {
+    return;
+  }
+  id<MTLCommandBuffer> probe = [queue commandBuffer];
+  Class cls = object_getClass(probe);
+  id<MTLComputeCommandEncoder> probe_encoder = [probe computeCommandEncoder];
+  Class encoder_cls = object_getClass(probe_encoder);
+  [probe_encoder endEncoding];
+  HookMethod(cls, @selector(renderCommandEncoderWithDescriptor:),
+             IMP(CbRenderHook), "@@:@", &g_cb_render_imp);
+  HookMethod(cls, @selector(computeCommandEncoder), IMP(CbComputeHook), "@@:",
+             &g_cb_compute_imp);
+  HookMethod(cls, @selector(computeCommandEncoderWithDispatchType:),
+             IMP(CbComputeTypeHook), "@@:Q", &g_cb_compute_type_imp);
+  HookMethod(cls, @selector(blitCommandEncoder), IMP(CbBlitHook), "@@:",
+             &g_cb_blit_imp);
+  HookMethod(encoder_cls, @selector(dispatchThreadgroups:threadsPerThreadgroup:),
+             IMP(EncGroupsHook), "v@:{MTLSize=QQQ}{MTLSize=QQQ}",
+             &g_enc_groups_imp);
+  HookMethod(encoder_cls, @selector(dispatchThreads:threadsPerThreadgroup:),
+             IMP(EncThreadsHook), "v@:{MTLSize=QQQ}{MTLSize=QQQ}",
+             &g_enc_threads_imp);
+  HookMethod(encoder_cls,
+             @selector(dispatchThreadgroupsWithIndirectBuffer:
+                                          indirectBufferOffset:
+                                         threadsPerThreadgroup:),
+             IMP(EncIndirectHook), "v@:@Q{MTLSize=QQQ}", &g_enc_indirect_imp);
+  if (const char* v = std::getenv("XE_METAL_CB_BREADCRUMBS");
+      v && v[0] == '1') {
+    g_breadcrumbs = [queue.device newBufferWithLength:kBreadcrumbCount
+                                              options:MTLResourceStorageModeShared];
+    g_breadcrumb_bytes = static_cast<uint8_t*>(g_breadcrumbs.contents);
+  }
+  Dl_info info = {};
+  dladdr(reinterpret_cast<void*>(&InstallCbEncoderRing), &info);
+  XELOGW("MetalCbEncoderRing: hooked {} + {} (image base {})",
+         class_getName(cls), class_getName(encoder_cls), info.dli_fbase);
+}
+
+void LogCbEncoders(id<MTLCommandBuffer> command_buffer) {
+  if (!CbEncoderRingEnabled()) {
+    return;
+  }
+  void* cb = (__bridge void*)command_buffer;
+  const uint32_t next = g_cb_encoder_next.load(std::memory_order_relaxed);
+  const uint32_t dispatch_next =
+      g_cb_dispatch_next.load(std::memory_order_relaxed);
+  std::string line;
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < kCbEncoderRingSize; ++i) {
+    const CbEncoderNote& note =
+        g_cb_encoder_ring[(next + i) % kCbEncoderRingSize];
+    if (note.command_buffer != cb) {
+      continue;
+    }
+    if (++n > 300) {
+      line += " ...";
+      break;
+    }
+    line += fmt::format(" {}{}{}", note.kind, note.caller,
+                        !g_breadcrumbs ? ""
+                        : g_breadcrumb_bytes[note.seq % kBreadcrumbCount]
+                            ? "+"
+                            : "-");
+    if (note.kind != 'C' || !note.encoder) {
+      continue;
+    }
+    // This encoder's dispatches: encoder objects are recycled, so only
+    // those after its creation and before the pointer's next creation.
+    uint32_t reuse_seq = UINT32_MAX;
+    for (uint32_t j = 0; j < kCbEncoderRingSize; ++j) {
+      const CbEncoderNote& other = g_cb_encoder_ring[j];
+      if (other.encoder == note.encoder && other.seq > note.seq &&
+          other.seq < reuse_seq) {
+        reuse_seq = other.seq;
+      }
+    }
+    uint32_t dispatches = 0;
+    for (uint32_t j = 0; j < kCbDispatchRingSize; ++j) {
+      const CbDispatchNote& d =
+          g_cb_dispatch_ring[(dispatch_next + j) % kCbDispatchRingSize];
+      if (d.encoder != note.encoder || d.seq <= note.seq ||
+          d.seq > reuse_seq) {
+        continue;
+      }
+      if (++dispatches > 4) {
+        continue;
+      }
+      line += fmt::format("[{}{} {}x{}x{}/{}x{}x{}]", d.kind, d.caller,
+                          d.groups[0], d.groups[1], d.groups[2], d.threads[0],
+                          d.threads[1], d.threads[2]);
+    }
+    if (dispatches > 4) {
+      line += fmt::format("[+{}]", dispatches - 4);
+    }
+  }
+  XELOGE("  encoders ({}):{}", n, line);
+}
+}  // namespace
+
 static void LogCommandBufferFault(id<MTLCommandBuffer> command_buffer,
                                   const char* site, uint32_t swap_count,
                                   uint64_t submission, uint64_t episode) {
+  LogCbEncoders(command_buffer);
   NSError* err = command_buffer.error;
   XELOGE("Metal GPU FAULT ({}, swap#{}, episode={}, submission={}): {} "
          "(code {})", site,
@@ -2605,6 +2846,10 @@ bool MetalCommandProcessor::SetupContext() {
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
   void* device = provider ? provider->device() : nullptr;
   InstallValidationOffHooks((__bridge id<MTLDevice>)device);
+  if (provider) {
+    InstallCbEncoderRing(
+        (__bridge id<MTLCommandQueue>)provider->command_queue());
+  }
   if (!device) {
     XELOGE("MetalCommandProcessor: no Metal device from provider");
     return false;
@@ -5480,6 +5725,20 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
         if (!sequence.empty()) {
           XELOGE("  draw sequence:{}", sequence);
         }
+        std::string rects;
+        for (uint32_t i = 0; i < 256; ++i) {
+          const RectDrawNote& note = rect_draw_ring_[(rect_draw_next_ + i) % 256];
+          if (note.submission != faulted_submission) {
+            continue;
+          }
+          rects += fmt::format(" @{}:ps={:08X} pso={} n={} fmt={}/{}", note.draw,
+                               uint32_t(note.ps), note.pipeline,
+                               note.index_count, note.color_format,
+                               note.depth_format);
+        }
+        if (!rects.empty()) {
+          XELOGE("  rect draws:{}", rects);
+        }
       }
       if (s_cb_errors > 32) {
         XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
@@ -7545,6 +7804,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
   ServiceLazyCommitRequest();
+  // Diagnostic (XE_METAL_COMMIT_EVERY_DRAWS=N): commit the frame's command
+  // buffer once N draws are encoded in it, so a GPU-timeout fault's draw
+  // sequence names at most N draws.
+  {
+    static const uint32_t s_commit_every = [] {
+      const char* v = std::getenv("XE_METAL_COMMIT_EVERY_DRAWS");
+      return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+    }();
+    if (s_commit_every && draws_since_commit_ >= s_commit_every) {
+      EndFrameEncoder(metal::SeamBoundaryReason::kDebugProbe);
+    }
+  }
   const bool state_dedupe = StateDedupeEnabled();
   // Diagnostic (XE_METAL_DRAW_TRACE=<draw>): log entry into IssueDraw for one
   // trace draw, with the primitive and index count, before any early exit.
@@ -14336,6 +14607,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     use_resource(rect_table_buffer, MTLResourceUsageRead);
     use_resource(rect_indices_buffer, MTLResourceUsageRead);
     use_resource(rect_srv_table_buffer, MTLResourceUsageRead);
+    {
+      RectDrawNote& note = rect_draw_ring_[rect_draw_next_++ % 256];
+      note.submission = submission_counter_ + 1;
+      note.ps = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+      note.pipeline = pipeline;
+      note.draw = draw_count_;
+      note.index_count = index_count;
+      note.color_format = uint32_t(color_pixel_formats[0]);
+      note.depth_format = uint32_t(pipeline_depth_format);
+    }
     ir_draw_indexed(MTLPrimitiveTypeTriangleStrip, rect_host_index_count,
                     MTLIndexTypeUInt32, rect_indices_buffer,
                     rect_host_indices_alloc.offset, /*instanceCount=*/1,

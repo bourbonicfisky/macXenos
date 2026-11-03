@@ -1218,6 +1218,18 @@ class MetalCommandProcessor : public CommandProcessor {
     uint32_t first_draw;
   };
   DrawPairNote draw_pair_ring_[8192] = {};
+  // Rectangle-VS-route draws, for the fault report: which pipeline each used.
+  struct RectDrawNote {
+    uint64_t submission;
+    uint64_t ps;
+    void* pipeline;
+    uint32_t draw;
+    uint32_t index_count;
+    uint32_t color_format;
+    uint32_t depth_format;
+  };
+  RectDrawNote rect_draw_ring_[256] = {};
+  uint32_t rect_draw_next_ = 0;
   // XE_METAL_SLOT_AUDIT: the current draw's texture slots.
   std::vector<uint32_t> audit_draw_slots_;
   uint32_t draw_pair_next_ = 0;

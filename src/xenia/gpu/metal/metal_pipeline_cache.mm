@@ -1407,7 +1407,23 @@ void* MetalPipelineCache::NewRenderPipelineState(
       return nullptr;
     }
   }
-  return (__bridge_retained void*)state;
+  void* state_ptr = (__bridge_retained void*)state;
+  // XE_METAL_PIPELINE_LOG=1: every render pipeline built, for matching the
+  // pso= pointers a fault report's rect draws name.
+  static const bool s_pipeline_log = [] {
+    const char* v = std::getenv("XE_METAL_PIPELINE_LOG");
+    return v && v[0] == '1';
+  }();
+  if (s_pipeline_log) {
+    XELOGI("MetalPipelineNew: key={:016X} pso={} vs={} from={}", key,
+           state_ptr,
+           desc.vertexFunction ? [desc.vertexFunction.name UTF8String] : "-",
+           (archive_stale_out && !*archive_stale_out &&
+            binary_archive_lookup_list_ && archived_pipeline_keys_.count(key))
+               ? "archive"
+               : "compiled");
+  }
+  return state_ptr;
 }
 
 void* MetalPipelineCache::AddRenderPipelineState(uint64_t key,
