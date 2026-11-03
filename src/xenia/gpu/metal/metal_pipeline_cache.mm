@@ -778,6 +778,12 @@ bool MetalPipelineCache::TranslateShader(
     DxbcShaderTranslator& translator, MetalShaderConverter& metal_converter) {
   std::lock_guard<std::mutex> translate_lock(
       static_cast<MetalShader&>(translation.shader()).translate_mutex());
+  // Published on every return, before the mutex is released: the outcome
+  // below is final.
+  struct MarkTranslated {
+    MetalShader::MetalTranslation& translation;
+    ~MarkTranslated() { translation.MarkMetalTranslated(); }
+  } mark_translated{translation};
   if (translation.is_translated()) {
     return translation.is_valid() && translation.has_metal_function();
   }
@@ -1630,13 +1636,35 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
                ? from_key(it->second.key, it->second.pixel_used)
                : AsyncPipelineStatus::kFailed;
   }
-  const bool translated =
-      vertex->is_translated() && (!pixel || pixel->is_translated());
+  // Finished translations only. is_translated() is already true while a
+  // background worker is still converting the same translation's DXIL and
+  // metallib: read here it failed the draw as vs-translate (no error logged,
+  // a different shader each run) or built the pipeline without the pixel
+  // shader. XE_METAL_ASYNC_TRANSLATED_GATE=0 restores that check.
+  static const bool s_finished_gate = [] {
+    const char* v = std::getenv("XE_METAL_ASYNC_TRANSLATED_GATE");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  auto finished = [](const MetalShader::MetalTranslation* translation) {
+    return s_finished_gate ? translation->is_metal_translated()
+                           : translation->is_translated();
+  };
+  const bool translated = finished(vertex) && (!pixel || finished(pixel));
   if (!translated || stand_in_allowed) {
     if (translated) {
       MetalShader::MetalTranslation* pixel_used =
           pixel && pixel->has_metal_function() ? pixel : nullptr;
       if (!vertex->has_metal_function()) {
+        if (!vertex->is_metal_translated()) {
+          // Only reachable with the gate off: the race above.
+          static std::atomic<uint32_t> s_race_logs{0};
+          if (s_race_logs.fetch_add(1, std::memory_order_relaxed) < 16) {
+            XELOGW(
+                "MetalPipelineCache: vertex shader {:016X} still translating "
+                "on a background worker; draw fails as vs-translate",
+                vertex->shader().ucode_data_hash());
+          }
+        }
         return AsyncPipelineStatus::kFailed;
       }
       const uint64_t key =

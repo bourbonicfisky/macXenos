@@ -10,6 +10,7 @@
 #ifndef XENIA_GPU_METAL_METAL_MSAA_CLEAR_FOLD_H_
 #define XENIA_GPU_METAL_METAL_MSAA_CLEAR_FOLD_H_
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -40,6 +41,10 @@ namespace metal {
 // fetched position and colour through, PS outputs the interpolated colour.
 constexpr uint64_t kMsaaClearFoldVertexShader = 0x1E6883FCCDE1F688ull;
 constexpr uint64_t kMsaaClearFoldPixelShader = 0xA4A965C189287B99ull;
+// The same pass-through pair in Iron Man (534507F2): VS fetches position and
+// colour, PS writes oC0 = interpolator 0 (ucode dumped 2026-11-03).
+constexpr uint64_t kMsaaClearFoldVertexShaderB = 0x0A6D1DD7767FDF27ull;
+constexpr uint64_t kMsaaClearFoldPixelShaderB = 0x2E372EA28CC404B7ull;
 
 enum class MsaaClearFoldRefusal : uint32_t {
   kNone,
@@ -60,6 +65,9 @@ enum class MsaaClearFoldRefusal : uint32_t {
   kEdgeAlignment,
   kDepthRange,
   kColourFormat,
+  // Depth clear into the colour view (QualifyMsaaDepthClearColourFold).
+  kColourAlias,
+  kWordMismatch,
   kCount,
 };
 
@@ -101,6 +109,10 @@ inline const char* MsaaClearFoldRefusalName(MsaaClearFoldRefusal refusal) {
       return "depth-range";
     case MsaaClearFoldRefusal::kColourFormat:
       return "colour-format";
+    case MsaaClearFoldRefusal::kColourAlias:
+      return "colour-alias";
+    case MsaaClearFoldRefusal::kWordMismatch:
+      return "word-mismatch";
     case MsaaClearFoldRefusal::kCount:
       break;
   }
@@ -260,6 +272,140 @@ inline MsaaClearFoldDecision QualifyMsaaClearFold(
   decision.scale_y_log2 = y_log2;
   decision.surface_info_1x = surface_info_1x.value;
   return decision;
+}
+
+// Depth fast clear into the colour view. Iron Man's (534507F2) runtime Clear
+// of a 1280x720 k_8_8_8_8 colour surface clears its tile-aligned blocks as
+// 4x depth-only rectangles over the colour surface's own EDRAM base (depth
+// ALWAYS + write, stencil REPLACE, the colour encoded in depth and stencil)
+// and the remaining strips as 1x colour rectangles, interleaved: ~65 pairs a
+// clear, and every rectangle flipped the tiles between the 4x D24S8 view and
+// the 1x colour view (pack + materialize each way, 38-44 fps menus on the M1
+// Max). Each depth rectangle writes one constant word to every sample it
+// covers; when that word equals the k_8_8_8_8 encoding of the constant
+// colour the pass-through pixel shader outputs (the runtime picks the depth
+// so that it does), the rectangle is drawn as a 1x colour clear of the same
+// tiles instead (RB_SURFACE_INFO as for the fold, colour target 0 enabled,
+// depth and stencil off): the same canonical words, no ownership change. The
+// word comparison is the caller's (it needs the evaluated vertices); this is
+// the register-only qualification. The colour target must already be the
+// game's: RB_COLOR_INFO 0 at the depth base, k_8_8_8_8 (exact host encoding).
+inline MsaaClearFoldDecision QualifyMsaaDepthClearColourFold(
+    const RegisterFile& regs, uint64_t vertex_shader_hash,
+    uint64_t pixel_shader_hash, xenos::PrimitiveType primitive_type,
+    uint32_t index_count, reg::RB_DEPTHCONTROL normalized_depth_control,
+    uint32_t normalized_color_mask) {
+  MsaaClearFoldDecision decision;
+  if (!((vertex_shader_hash == kMsaaClearFoldVertexShader &&
+         pixel_shader_hash == kMsaaClearFoldPixelShader) ||
+        (vertex_shader_hash == kMsaaClearFoldVertexShaderB &&
+         pixel_shader_hash == kMsaaClearFoldPixelShaderB))) {
+    decision.refusal = MsaaClearFoldRefusal::kShaderPair;
+    return decision;
+  }
+  if (primitive_type != xenos::PrimitiveType::kRectangleList ||
+      index_count != 3) {
+    decision.refusal = MsaaClearFoldRefusal::kPrimitive;
+    return decision;
+  }
+  auto surface_info = regs.Get<reg::RB_SURFACE_INFO>();
+  if (surface_info.msaa_samples == xenos::MsaaSamples::k1X ||
+      surface_info.msaa_samples > xenos::MsaaSamples::k4X) {
+    decision.refusal = MsaaClearFoldRefusal::kSingleSample;
+    return decision;
+  }
+  auto vte = regs.Get<reg::PA_CL_VTE_CNTL>();
+  if (vte.vport_x_scale_ena || vte.vport_x_offset_ena ||
+      vte.vport_y_scale_ena || vte.vport_y_offset_ena) {
+    decision.refusal = MsaaClearFoldRefusal::kViewportTransform;
+    return decision;
+  }
+  // Depth only: no colour written by the draw itself.
+  xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
+  if ((edram_mode != xenos::EdramMode::kColorDepth &&
+       edram_mode != xenos::EdramMode::kDepthOnly) ||
+      normalized_color_mask) {
+    decision.refusal = MsaaClearFoldRefusal::kEdramMode;
+    return decision;
+  }
+  // Every covered sample gets the same complete (d24 << 8) | stencil word.
+  auto depth_info = regs.Get<reg::RB_DEPTH_INFO>();
+  if (!normalized_depth_control.z_enable ||
+      !normalized_depth_control.z_write_enable ||
+      normalized_depth_control.zfunc != xenos::CompareFunction::kAlways ||
+      depth_info.depth_format != xenos::DepthRenderTargetFormat::kD24S8) {
+    decision.refusal = MsaaClearFoldRefusal::kDepthFunction;
+    return decision;
+  }
+  if (!normalized_depth_control.stencil_enable ||
+      normalized_depth_control.backface_enable ||
+      normalized_depth_control.stencilfunc !=
+          xenos::CompareFunction::kAlways ||
+      normalized_depth_control.stencilzpass != xenos::StencilOp::kReplace ||
+      regs.Get<reg::RB_STENCILREFMASK>().stencilwritemask != 0xFF) {
+    decision.refusal = MsaaClearFoldRefusal::kStencil;
+    return decision;
+  }
+  auto color_control = regs.Get<reg::RB_COLORCONTROL>();
+  if ((color_control.alpha_test_enable &&
+       color_control.alpha_func != xenos::CompareFunction::kAlways) ||
+      color_control.alpha_to_mask_enable) {
+    decision.refusal = MsaaClearFoldRefusal::kAlphaTest;
+    return decision;
+  }
+  // An exponent bias would scale the pixel shader's colour on the way in.
+  auto color_info = regs.Get<reg::RB_COLOR_INFO>();
+  if (color_info.color_base != depth_info.depth_base ||
+      color_info.color_format != xenos::ColorRenderTargetFormat::k_8_8_8_8 ||
+      color_info.color_exp_bias) {
+    decision.refusal = MsaaClearFoldRefusal::kColourAlias;
+    return decision;
+  }
+  uint32_t x_log2 =
+      surface_info.msaa_samples >= xenos::MsaaSamples::k4X ? 1u : 0u;
+  uint32_t pitch_1x = uint32_t(surface_info.surface_pitch) << x_log2;
+  if (!surface_info.surface_pitch ||
+      pitch_1x > xenos::kTexture2DCubeMaxWidthHeight) {
+    decision.refusal = MsaaClearFoldRefusal::kPitch;
+    return decision;
+  }
+  reg::RB_SURFACE_INFO surface_info_1x = surface_info;
+  surface_info_1x.msaa_samples = xenos::MsaaSamples::k1X;
+  surface_info_1x.surface_pitch = pitch_1x;
+  decision.refusal = MsaaClearFoldRefusal::kNone;
+  decision.scale_x_log2 = x_log2;
+  decision.scale_y_log2 = 1u;
+  decision.surface_info_1x = surface_info_1x.value;
+  return decision;
+}
+
+// The canonical word a depth view holding `host_depth` packs for kD24S8
+// with stencil `stencil` (CPU mirror of xe_f32_to_unorm24 and
+// xe_pack_depth_stencil, metal_edram_msl.h).
+inline uint32_t MsaaClearFoldD24S8Word(float host_depth, uint32_t stencil) {
+  float clamped = std::min(std::max(host_depth, 0.0f), 1.0f);
+  uint32_t t = std::min(uint32_t(std::nearbyint(clamped * 16777216.0f)),
+                        uint32_t(16777216u));
+  uint32_t n24 = (t > 8388608u ? t - 1u : t) & 0xFFFFFFu;
+  return (n24 << 8) | (stencil & 0xFFu);
+}
+
+// The k_8_8_8_8 word (R in the low byte) of a constant colour, when every
+// channel is an exact multiple of 1/255 in [0, 1] (so no rounding rule is
+// involved); false otherwise.
+inline bool MsaaClearFoldColour8888Word(const float colour[4],
+                                        uint32_t& word_out) {
+  uint32_t word = 0;
+  for (uint32_t i = 0; i < 4; ++i) {
+    float scaled = colour[i] * 255.0f;
+    if (!(scaled >= 0.0f && scaled <= 255.0f) ||
+        scaled != std::floor(scaled)) {
+      return false;
+    }
+    word |= uint32_t(scaled) << (8 * i);
+  }
+  word_out = word;
+  return true;
 }
 
 // Post-vertex-shader values of the clear rectangle's three vertices, from the

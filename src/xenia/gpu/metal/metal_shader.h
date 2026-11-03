@@ -49,9 +49,22 @@ class MetalShader : public DxbcShader {
     // caller supplies the metallib bytes.
     bool CreateMetalFunction(void* device, const std::vector<uint8_t>& metallib);
 
+    // True once MetalPipelineCache::TranslateShader has run every stage for
+    // this translation, whatever the outcome. is_translated() turns true at
+    // the end of the DXBC stage, while DXBC->DXIL->metallib may still be
+    // running on another thread, so code that reads the result without the
+    // shader's translate mutex must check this instead.
+    bool is_metal_translated() const {
+      return metal_translated_.load(std::memory_order_acquire);
+    }
+    void MarkMetalTranslated() {
+      metal_translated_.store(true, std::memory_order_release);
+    }
+
    private:
     void* metal_library_ = nullptr;   // id<MTLLibrary> (retained)
     void* metal_function_ = nullptr;  // id<MTLFunction> (retained)
+    std::atomic<bool> metal_translated_{false};
   };
 
   // Held for the whole of MetalPipelineCache::TranslateShader of any of this

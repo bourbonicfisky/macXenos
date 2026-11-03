@@ -1407,6 +1407,8 @@ class MetalCommandProcessor : public CommandProcessor {
   // MSAA fast-clear fold census (XE_METAL_MSAA_CLEAR_FOLD_LOG), indexed by
   // metal::MsaaClearFoldRefusal (kNone = folded); reset each report.
   uint64_t msaa_fold_census_[32] = {};
+  // Of the folded: depth clears drawn into the colour view.
+  uint64_t msaa_fold_colour_alias_census_ = 0;
   // CPU vertex-shader evaluation for the fold's value/alignment proof.
   std::unique_ptr<ShaderInterpreter> msaa_fold_interpreter_;
   uint64_t memory_authority_sequence_ = 0;

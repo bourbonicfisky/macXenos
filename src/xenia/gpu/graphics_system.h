@@ -120,6 +120,9 @@ class GraphicsSystem {
   void WriteRegister(uint32_t addr, uint32_t value);
 
   void MarkVblank();
+  // D1MODE_V_COUNTER as a guest reads it: the scanout line implied by the
+  // time since the last vblank (see the definition).
+  uint32_t ReadScanlineCounter();
 
   Memory* memory_ = nullptr;
   cpu::Processor* processor_ = nullptr;
@@ -132,6 +135,10 @@ class GraphicsSystem {
 
   std::atomic<bool> frame_limiter_worker_running_;
   std::atomic<uint64_t> vblank_count_{0};
+  // Host steady-clock time of the last MarkVblank and the interval before it,
+  // for the time-derived D1MODE_V_COUNTER.
+  std::atomic<int64_t> last_vblank_host_ns_{0};
+  std::atomic<int64_t> vblank_interval_host_ns_{0};
   uint64_t last_swap_vblank_ = UINT64_MAX;
   kernel::object_ref<kernel::XHostThread> frame_limiter_worker_thread_;
 

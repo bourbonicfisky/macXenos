@@ -1775,6 +1775,233 @@ void CommandProcessor::InitializeTrace() {
                                gamma_ramp_pwl_rgb(), gamma_ramp_rw_component_);
 }
 
+namespace {
+// State behind XE_GPU_ZPD_CENSUS (see command_processor.h). Command processor
+// thread only.
+struct ZPDCensus {
+  struct Note {
+    uint32_t measured = 0;
+    uint32_t unmeasured = 0;
+    uint32_t skipped = 0;
+    uint32_t count_only = 0;
+    uint32_t depth_tested = 0;
+    uint32_t segments = 0;
+    uint32_t zero_segments = 0;
+    uint32_t end_record = 0;
+    // First value the END wrote, which a guest that reads at once sees.
+    uint32_t first_written = 0;
+    bool written_at_end = false;
+  };
+  struct Slot {
+    uint32_t last_delta = 0;
+    bool begun = false;
+    bool written = false;
+    uint32_t history = 0;
+    uint32_t lifetimes = 0;
+  };
+  std::unordered_map<uint64_t, Note> notes;
+  std::unordered_map<uint32_t, Slot> slots;
+  // XE_GPU_ZPD_CENSUS=2: END record -> lines logged, for the first slots seen
+  // with a skipped or count-only draw, or reading hidden for one lifetime
+  // between visible ones.
+  std::unordered_map<uint32_t, uint32_t> traced_slots;
+  uint64_t reports_ended = 0;
+  uint64_t ended_immediate = 0;
+  uint64_t ended_unmeasured = 0;
+  uint64_t end_wrote_fallback_1 = 0;
+  uint64_t end_wrote_cached = 0;
+  uint64_t resolved_current = 0;
+  uint64_t resolved_stale = 0;
+  uint64_t resolved_stale_nonzero = 0;
+  uint64_t abandoned = 0;
+  // A host count arrived for a current report whose END record the guest had
+  // already reissued (see IsZPDReportReissuedByGuest), by the count it carried.
+  uint64_t late_reissued_zero = 0;
+  uint64_t late_reissued_nonzero = 0;
+  // Final values: 0, 1, 2-31, 32-255, 256-4095, 4096+.
+  uint64_t final_buckets[6] = {};
+  uint64_t final_zero_skipped = 0;
+  uint64_t final_zero_unmeasured = 0;
+  uint64_t final_zero_measured_only = 0;
+  uint64_t final_zero_no_draws = 0;
+  uint64_t first_nonzero_final_zero = 0;
+  uint64_t first_low_final_high = 0;
+  uint64_t first_zero_final_nonzero = 0;
+  uint64_t draws_measured = 0;
+  uint64_t draws_unmeasured = 0;
+  uint64_t draws_skipped = 0;
+  uint64_t draws_count_only = 0;
+  uint64_t reports_count_only = 0;
+  uint64_t final_zero_count_only = 0;
+  uint64_t lifetimes = 0;
+  uint64_t lifetimes_unwritten = 0;
+  uint64_t lifetimes_zero = 0;
+  uint64_t visible_to_hidden = 0;
+  uint64_t pops_1 = 0;
+  uint64_t pops_2 = 0;
+  // Hidden for one (two) lifetimes inside a visible streak: VV0VV (VV00VV).
+  // Unlike pops_1/pops_2 these exclude slots alternating between two values.
+  uint64_t streak_pops_1 = 0;
+  uint64_t streak_pops_2 = 0;
+  uint64_t last_log_ms = 0;
+};
+ZPDCensus& GetZPDCensus() {
+  static ZPDCensus census;
+  return census;
+}
+void ZPDCensusFinal(uint64_t handle, uint32_t final_value) {
+  ZPDCensus& c = GetZPDCensus();
+  uint32_t b = final_value == 0     ? 0
+               : final_value == 1   ? 1
+               : final_value < 32   ? 2
+               : final_value < 256  ? 3
+               : final_value < 4096 ? 4
+                                    : 5;
+  ++c.final_buckets[b];
+  auto it = c.notes.find(handle);
+  if (it == c.notes.end()) {
+    return;
+  }
+  const ZPDCensus::Note& n = it->second;
+  static const bool s_slot_trace = [] {
+    const char* v = std::getenv("XE_GPU_ZPD_CENSUS");
+    return v && v[0] == '2';
+  }();
+  if (s_slot_trace && n.end_record) {
+    auto traced = c.traced_slots.find(n.end_record);
+    if (traced == c.traced_slots.end() && (n.skipped || n.count_only) &&
+        c.traced_slots.size() < 4) {
+      traced = c.traced_slots.emplace(n.end_record, 0).first;
+    }
+    if (traced != c.traced_slots.end() && traced->second < 4000) {
+      ++traced->second;
+      auto slot = c.slots.find(n.end_record);
+      XELOGI(
+          "ZPDSlot end={:08X} life={} first={} final={} measured={} "
+          "depth_tested={} unmeasured={} skipped={} count_only={} "
+          "segments={} zero_segments={}",
+          n.end_record, slot != c.slots.end() ? slot->second.lifetimes : 0,
+          n.written_at_end ? int64_t(n.first_written) : int64_t(-1),
+          final_value, n.measured, n.depth_tested, n.unmeasured, n.skipped,
+          n.count_only, n.segments, n.zero_segments);
+    }
+  }
+  if (n.count_only) {
+    ++c.reports_count_only;
+    if (!final_value) {
+      ++c.final_zero_count_only;
+    }
+  }
+  if (final_value == 0) {
+    if (n.skipped) {
+      ++c.final_zero_skipped;
+    } else if (n.unmeasured) {
+      ++c.final_zero_unmeasured;
+    } else if (n.measured) {
+      ++c.final_zero_measured_only;
+    } else {
+      ++c.final_zero_no_draws;
+    }
+  }
+  if (n.written_at_end) {
+    if (n.first_written && !final_value) {
+      ++c.first_nonzero_final_zero;
+    } else if (n.first_written <= 1 && final_value >= 32) {
+      ++c.first_low_final_high;
+    }
+    if (!n.first_written && final_value) {
+      ++c.first_zero_final_nonzero;
+    }
+  }
+  c.notes.erase(it);
+}
+void ZPDCensusMaybeLog() {
+  ZPDCensus& c = GetZPDCensus();
+  uint64_t now = Clock::QueryHostUptimeMillis();
+  if (!c.last_log_ms) {
+    c.last_log_ms = now;
+    return;
+  }
+  if (now - c.last_log_ms < 5000) {
+    return;
+  }
+  c.last_log_ms = now;
+  XELOGI(
+      "ZPDCensus ended={} immediate={} unmeasured={} end_wrote[fallback1={} "
+      "cached={}] resolved[current={} stale={} stale_nonzero={}] "
+      "abandoned={} late_reissued[0={} nonzero={}] "
+      "final[0={} 1={} 2-31={} 32-255={} 256-4095={} 4096+={}] "
+      "final0[skipped={} unmeasured={} measured_only={} no_draws={}] "
+      "first_vs_final[nonzero_to_0={} low_to_high={} 0_to_nonzero={}] "
+      "draws[measured={} unmeasured={} skipped={} count_only={}] "
+      "count_only_reports={} count_only_final0={} slots={} lifetimes={} "
+      "unwritten={} zero={} vis_to_hidden={} pops[1={} 2={}] "
+      "streak_pops[1={} 2={}]",
+      c.reports_ended, c.ended_immediate, c.ended_unmeasured,
+      c.end_wrote_fallback_1, c.end_wrote_cached, c.resolved_current,
+      c.resolved_stale, c.resolved_stale_nonzero, c.abandoned,
+      c.late_reissued_zero, c.late_reissued_nonzero, c.final_buckets[0],
+      c.final_buckets[1], c.final_buckets[2], c.final_buckets[3],
+      c.final_buckets[4], c.final_buckets[5], c.final_zero_skipped,
+      c.final_zero_unmeasured, c.final_zero_measured_only,
+      c.final_zero_no_draws, c.first_nonzero_final_zero, c.first_low_final_high,
+      c.first_zero_final_nonzero, c.draws_measured, c.draws_unmeasured,
+      c.draws_skipped, c.draws_count_only, c.reports_count_only,
+      c.final_zero_count_only, c.slots.size(), c.lifetimes,
+      c.lifetimes_unwritten, c.lifetimes_zero, c.visible_to_hidden, c.pops_1,
+      c.pops_2, c.streak_pops_1, c.streak_pops_2);
+  if (c.notes.size() > 65536) {
+    c.notes.clear();
+  }
+}
+}  // namespace
+
+bool CommandProcessor::ZPDCensusEnabled() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_GPU_ZPD_CENSUS");
+    return v && v[0] && v[0] != '0';
+  }();
+  return enabled;
+}
+
+void CommandProcessor::NoteZPDCensusDraw(ZPDCensusDraw kind,
+                                         bool depth_tested) {
+  if (!ZPDCensusEnabled() || !zpd_active_segment_.logical_active) {
+    return;
+  }
+  ZPDCensus& c = GetZPDCensus();
+  ZPDCensus::Note& n = c.notes[zpd_active_segment_.report_handle];
+  if (depth_tested) {
+    ++n.depth_tested;
+  }
+  switch (kind) {
+    case ZPDCensusDraw::kMeasured:
+      ++n.measured;
+      ++c.draws_measured;
+      break;
+    case ZPDCensusDraw::kUnmeasured:
+      ++n.unmeasured;
+      ++c.draws_unmeasured;
+      break;
+    case ZPDCensusDraw::kSkipped:
+      ++n.skipped;
+      ++c.draws_skipped;
+      break;
+    case ZPDCensusDraw::kCountOnly:
+      ++n.count_only;
+      ++c.draws_count_only;
+      // Counted by a query only when one is open.
+      if (zpd_active_segment_.segment_active) {
+        ++n.measured;
+        ++c.draws_measured;
+      } else {
+        ++n.unmeasured;
+        ++c.draws_unmeasured;
+      }
+      break;
+  }
+}
+
 CommandProcessor::PendingZPDSlot CommandProcessor::GetPendingZPDSlot(
     uint32_t slot_base, uint32_t end_record) const {
   PendingZPDSlot pending_slot;
@@ -1873,6 +2100,56 @@ bool CommandProcessor::BeginZPDReport(uint32_t report_address) {
     return false;
   }
 
+  if (ZPDCensusEnabled()) {
+    // The previous lifetime of this slot is over: whatever was last written to
+    // its END is what the guest was left holding.
+    ZPDCensus& c = GetZPDCensus();
+    ZPDCensus::Slot& slot = c.slots[end_record];
+    if (slot.begun) {
+      ++c.lifetimes;
+      if (!slot.written) {
+        ++c.lifetimes_unwritten;
+      } else {
+        uint32_t visible = slot.last_delta ? 1 : 0;
+        if (!visible) {
+          ++c.lifetimes_zero;
+          if (slot.history & 1) {
+            ++c.visible_to_hidden;
+          }
+        }
+        slot.history = (slot.history << 1) | visible;
+        ++slot.lifetimes;
+        if (slot.lifetimes >= 3 && (slot.history & 0x7) == 0x5) {
+          ++c.pops_1;
+        }
+        if (slot.lifetimes >= 4 && (slot.history & 0xF) == 0x9) {
+          ++c.pops_2;
+        }
+        if (slot.lifetimes >= 5 && (slot.history & 0x1F) == 0x1B) {
+          ++c.streak_pops_1;
+          static const bool s_pop_trace = [] {
+            const char* v = std::getenv("XE_GPU_ZPD_CENSUS");
+            return v && v[0] == '2';
+          }();
+          if (s_pop_trace && c.traced_slots.size() < 16) {
+            c.traced_slots.emplace(end_record, 0);
+          }
+          auto traced = c.traced_slots.find(end_record);
+          if (s_pop_trace && traced != c.traced_slots.end() &&
+              traced->second < 4000) {
+            ++traced->second;
+            XELOGI("ZPDPop end={:08X} life={}", end_record, slot.lifetimes);
+          }
+        }
+        if (slot.lifetimes >= 6 && (slot.history & 0x3F) == 0x33) {
+          ++c.streak_pops_2;
+        }
+      }
+    }
+    slot.begun = true;
+    slot.written = false;
+  }
+
   // Resolve same slot hazards before invalidating pending writes from the prior
   // lifetime. For finished strict queries with unpolled completion, refresh now
   // and drain, avoiding unnecessary AwaitQueryResolve blocking.
@@ -1951,6 +2228,7 @@ bool CommandProcessor::BeginZPDReport(uint32_t report_address) {
   logical.cached_delta = 0;
   logical.has_cached_delta = false;
   logical.ended = false;
+  logical.provisional_written = false;
 
   if (slot_base == carried_from_slot_base && has_carried_cached_delta) {
     logical.cached_delta = carried_cached_delta;
@@ -2047,6 +2325,21 @@ bool CommandProcessor::EndZPDReport(uint32_t report_address,
     CommitZPDReport(logical, final_value);
     logical_zpd_reports_.erase(it);
   }
+  if (ZPDCensusEnabled()) {
+    ZPDCensus& c = GetZPDCensus();
+    ++c.reports_ended;
+    c.notes[report_handle].end_record = report_record_base;
+    if (resolved_immediately) {
+      ++c.ended_immediate;
+      ZPDCensus::Note& n = c.notes[report_handle];
+      if (!n.measured) {
+        // No host query ever closed for this report: the value is not a count.
+        ++c.ended_unmeasured;
+      }
+      n.first_written = final_value;
+      n.written_at_end = true;
+    }
+  }
 
   bool has_cross_slot_end =
       stored_end_record && stored_end_record != report_record_base;
@@ -2071,9 +2364,33 @@ bool CommandProcessor::EndZPDReport(uint32_t report_address,
           (cached_delta != 0 || GetZPDMode() == ZPDMode::kFastAlt)) {
         speculative = cached_delta;
       }
+      // Attribution probe (default off): XE_GPU_ZPD_FAST_GUESS_FLOOR=N raises
+      // every provisional value to at least N, to tell whether a title culls
+      // on small guesses (a threshold above 1) rather than on zeros.
+      static const uint32_t s_guess_floor = [] {
+        const char* v = std::getenv("XE_GPU_ZPD_FAST_GUESS_FLOOR");
+        return v ? uint32_t(std::strtoul(v, nullptr, 10)) : 0u;
+      }();
+      speculative = std::max(speculative, s_guess_floor);
     }
     WriteZPDReport(begin_record, report_record_base, begin_value, speculative,
                    write_begin);
+    if (!resolved_immediately) {
+      logical.provisional_written = true;
+    }
+    if (ZPDCensusEnabled()) {
+      ZPDCensus& c = GetZPDCensus();
+      ZPDCensus::Note& n = c.notes[report_handle];
+      n.first_written = speculative;
+      n.written_at_end = true;
+      if (!resolved_immediately) {
+        if (speculative == cached_delta && has_cached_delta) {
+          ++c.end_wrote_cached;
+        } else {
+          ++c.end_wrote_fallback_1;
+        }
+      }
+    }
   } else if (!resolved_immediately) {
     PumpQueryResolves();
 
@@ -2087,6 +2404,13 @@ bool CommandProcessor::EndZPDReport(uint32_t report_address,
       zpd_pending_retire_stalls_ = 0;
       zpd_pending_retire_start_ms_ = Clock::QueryHostUptimeMillis();
     }
+  }
+
+  if (ZPDCensusEnabled()) {
+    if (resolved_immediately) {
+      ZPDCensusFinal(report_handle, final_value);
+    }
+    ZPDCensusMaybeLog();
   }
 
   zpd_active_segment_ = {};
@@ -2160,6 +2484,9 @@ void CommandProcessor::CloseQuerySegment() {
   }
 
   auto it = logical_zpd_reports_.find(zpd_active_segment_.report_handle);
+  if (ZPDCensusEnabled()) {
+    ++GetZPDCensus().notes[zpd_active_segment_.report_handle].segments;
+  }
   if (it != logical_zpd_reports_.end()) {
     // Lets PumpPendingRetire drain early segments without blocking on the
     // final segment's submission.
@@ -2191,6 +2518,9 @@ void CommandProcessor::OnZPDQueryResolved(ReportHandle report_handle,
 
   ZPDReport& logical = it->second;
 
+  if (ZPDCensusEnabled() && !raw_samples) {
+    ++GetZPDCensus().notes[report_handle].zero_segments;
+  }
   if (logical.pending_segments) {
     logical.pending_segments--;
   }
@@ -2209,7 +2539,32 @@ void CommandProcessor::OnZPDQueryResolved(ReportHandle report_handle,
       }
       fast_zpd_report_cached_values_[logical.end_record] = final_value;
     }
-    if (IsZPDReportCurrent(logical)) {
+    // Census only: a count arriving after the guest already reissued the
+    // record (see IsZPDReportReissuedByGuest) is still written, over the new
+    // query's pending sentinel.
+    const bool current = IsZPDReportCurrent(logical);
+    if (ZPDCensusEnabled()) {
+      ZPDCensus& c = GetZPDCensus();
+      if (current && IsZPDReportReissuedByGuest(logical)) {
+        ++(final_value ? c.late_reissued_nonzero : c.late_reissued_zero);
+      }
+      if (current) {
+        ++c.resolved_current;
+        ZPDCensusFinal(report_handle, final_value);
+      } else {
+        // The slot began again first: the guest never sees this count and was
+        // left with whatever END wrote.
+        ++c.resolved_stale;
+        if (final_value) {
+          ++c.resolved_stale_nonzero;
+        }
+        auto note = c.notes.find(report_handle);
+        if (note != c.notes.end()) {
+          ZPDCensusFinal(report_handle, note->second.first_written);
+        }
+      }
+    }
+    if (current) {
       CommitZPDReport(logical, final_value);
     }
     logical_zpd_reports_.erase(it);
@@ -2274,6 +2629,10 @@ void CommandProcessor::PumpPendingRetire() {
                                     ? logical_report->second.cached_delta
                                     : 1;
       CommitZPDReport(logical_report->second, fallback_delta);
+      if (ZPDCensusEnabled()) {
+        ++GetZPDCensus().abandoned;
+        ZPDCensusFinal(handle_to_await, fallback_delta);
+      }
     }
     logical_zpd_reports_.erase(logical_report);
     zpd_pending_retire_handle_ = kInvalidReportHandle;
@@ -2307,6 +2666,11 @@ void CommandProcessor::WriteZPDReport(uint32_t begin_record,
 
   XenosZPDReport::WriteReportDelta(begin, end, begin_value, delta_value,
                                    write_begin_record);
+  if (ZPDCensusEnabled()) {
+    ZPDCensus::Slot& slot = GetZPDCensus().slots[end_record];
+    slot.last_delta = delta_value;
+    slot.written = true;
+  }
   // Guest-RAM write census (fix-replay-guest-ram-rollback 1.1): ZPD report
   // records are GPU-derived sample counts written into guest RAM. This is the
   // funnel for both the resolved-commit and the orphaned-END cached-delta
@@ -2604,6 +2968,25 @@ bool CommandProcessor::IsZPDReportCurrent(const ZPDReport& report) const {
   auto it = zpd_slot_sequences_.find(report.slot_base);
   uint64_t current_sequence = it != zpd_slot_sequences_.end() ? it->second : 0;
   return current_sequence == report.slot_sequence_id;
+}
+
+bool CommandProcessor::IsZPDReportReissuedByGuest(
+    const ZPDReport& report) const {
+  // Strict mode writes nothing at END, so its records legitimately hold the
+  // sentinel until the count arrives.
+  if (!report.provisional_written) {
+    return false;
+  }
+  uint32_t end_record =
+      report.end_record ? report.end_record
+                        : XenosZPDReport::GetEndRecordBase(report.slot_base);
+  if (!end_record) {
+    return false;
+  }
+  const auto* end =
+      memory_->TranslatePhysical<const xenos::xe_gpu_depth_sample_counts*>(
+          end_record);
+  return end && XenosZPDReport::HasPendingSentinel(end);
 }
 
 uint32_t CommandProcessor::NormalizeSampleCount(uint64_t samples) const {

@@ -177,17 +177,23 @@ bool MetalSharedMemory::Initialize() {
   }
 
   if (!buffer) {
-    // The pre-existing mirror allocation, unchanged: shared storage so uploads
-    // are plain host memcpys (unified memory on Apple Silicon); write-combined
-    // is fine because nothing reads it from the CPU.
+    // The mirror allocation: shared storage so uploads are plain host memcpys
+    // (unified memory on Apple Silicon).
     const uint32_t mirror_length =
         kBufferSize + (VfetchRenameEnabled() ? kRenameArenaBytes : 0u);
     // Discrete mirror: the CPU mirror is read back on the CPU (publication),
     // so it keeps the default cached mode; the GPU copy lives in VRAM.
     const bool discrete =
         DiscreteMirrorEnabled() && ![device hasUnifiedMemory];
+    // The unified mirror is read on the CPU too: GPU-current resolve
+    // publication and memexport drains copy it into guest RAM. Write-combined
+    // CPU reads are uncached, about 0.5 GB/s on the M1 Max: Super Street
+    // Fighter II Turbo HD Remix publishes two 4 MB 1080p bands every frame
+    // (8.5 ms each, the frame at 30 fps); cached, 60 (2026-11-02).
+    // XE_METAL_SHARED_MIRROR_CACHED=0 restores the write-combined mirror.
+    const bool cached = discrete || SharedMirrorCachedEnabled();
     buffer = [device newBufferWithLength:mirror_length
-                                 options:discrete
+                                 options:cached
                                              ? MTLResourceStorageModeShared
                                              : (MTLResourceStorageModeShared |
                                                 MTLResourceCPUCacheModeWriteCombined)];
@@ -725,6 +731,16 @@ bool MetalSharedMemory::DiscreteMirrorEnabled() {
       return v[0] == '1';
     }
     return cvars::metal_discrete_vram_mirror;
+  }();
+  return s_enabled;
+}
+
+bool MetalSharedMemory::SharedMirrorCachedEnabled() {
+  // Default on (2026-11-02); XE_METAL_SHARED_MIRROR_CACHED=0 is the exact
+  // rollback to the write-combined unified mirror.
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_SHARED_MIRROR_CACHED");
+    return !(v && v[0] == '0' && !v[1]);
   }();
   return s_enabled;
 }

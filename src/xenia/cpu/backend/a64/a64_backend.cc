@@ -48,6 +48,15 @@ DEFINE_bool(a64_enable_host_guest_stack_synchronization, true,
             "impact, but fixes crashes in games that use setjmp/longjmp.",
             "a64");
 
+DEFINE_bool(a64_longjmp_reentry, true,
+            "Resume a guest longjmp inside the live frame of the function "
+            "that called setjmp, restoring the host stack and stackpoints. "
+            "Off translates the landing site as a new function, which leaves "
+            "the skipped frames on the host stack (Fable III and Black Ops "
+            "III then overflow the stackpoints). Needs "
+            "a64_enable_host_guest_stack_synchronization.",
+            "a64");
+
 namespace xe {
 namespace cpu {
 namespace backend {
@@ -56,6 +65,38 @@ namespace a64 {
 // Resolve a guest function at runtime. Called by the resolve thunk when
 // a guest address has not yet been compiled.
 uint64_t ResolveFunction(void* raw_context, uint64_t target_address);
+
+// The stackpoint depth a branch at guest stack pointer |guest_sp| unwinds to
+// (the innermost live frame entered above it, plus one), or 0 when the guest
+// still runs in the innermost live frame. A function allocates its guest frame
+// below the r1 it was entered with and only restores that r1 to return or tail
+// call, which pop its stackpoint before the branch resolves; so a live frame
+// entered at or below r1 is one the guest has already unwound.
+//
+// x64 (and Xenia Edge's a64) count only frames entered strictly below r1 and
+// require two of them. The frame the setjmp caller called was entered at
+// exactly the r1 longjmp restores and is never counted, so that misses a
+// longjmp raised one or two calls below the setjmp caller. Fable III's Lua
+// error path (luaD_throw under the protected call) takes that branch on
+// script errors, and each miss translated the landing site as a new function
+// that left the skipped frames on the host stack.
+static uint32_t FindStackpointSyncDepth(const A64BackendStackpoint* stackpoints,
+                                        uint32_t current_depth,
+                                        uint32_t guest_sp) {
+  if (!stackpoints || current_depth == 0) {
+    return 0;
+  }
+  uint32_t idx = current_depth - 1;
+  uint32_t frames_skipped = 0;
+  while (idx != 0xFFFFFFFFu && guest_sp >= stackpoints[idx].guest_stack_) {
+    --idx;
+    ++frames_skipped;
+  }
+  if (idx == 0xFFFFFFFFu || frames_skipped == 0) {
+    return 0;
+  }
+  return idx + 1;
+}
 
 // ==========================================================================
 // A64HelperEmitter — generates thunks using xbyak_aarch64.
@@ -391,15 +432,14 @@ ResolveFunctionThunk A64HelperEmitter::EmitResolveFunctionThunk() {
 // --------------------------------------------------------------------------
 // GuestAndHostSynchronizeStackHelper
 // --------------------------------------------------------------------------
-// Called when longjmp is detected (guest r1 changed after a call returned).
-// Walks the stackpoint array backward to find the matching host SP, restores
-// it, and jumps back to the caller.
+// Branched to by the stack synchronization check after a guest call when
+// ResolveFunction landed a guest longjmp in a live frame (ResolveLongjmp).
+// Restores that frame's host SP and makes it the innermost stackpoint, which
+// drops the frames the longjmp skipped, then resumes in the frame.
 //
-// On entry (set by the tail-emitted sync check in the guest function):
-//   x8  = return address (where to jump after fixup)
-//   x9  = caller's stack size (to subtract from restored SP)
+// On entry:
+//   x8  = where to resume (the check's continuation in the landing frame)
 //   x19 = A64BackendContext*
-//   x20 = PPCContext*
 void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
   using namespace Xbyak_aarch64;
   struct {
@@ -414,65 +454,39 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
   code_offsets.prolog_stack_alloc = getSize();
   code_offsets.body = getSize();
 
-  // x19 = backend context pointer (already set up by HostToGuestThunk)
-
-  // x10 = stackpoints array pointer
-  ldr(x10, ptr(x19, static_cast<uint32_t>(
-                        offsetof(A64BackendContext, stackpoints))));
-  // w11 = current_stackpoint_depth
-  ldr(w11, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext,
-                                                   current_stackpoint_depth))));
-
-  // w12 = current guest r1
-  ldr(w12, ptr(x20, static_cast<int32_t>(offsetof(ppc::PPCContext, r[1]))));
-
-  // Search backward through stackpoints for the first entry where
-  // guest_stack_ >= current r1 (guest stack was unwound past that frame).
-  // ecx = loop index, starting at depth - 1
-  sub(w13, w11, 1);
-
-  auto& loop = NewCachedLabel();
-  auto& found = NewCachedLabel();
   auto& underflow = NewCachedLabel();
 
-  L(loop);
-  // Bounds check
-  tbnz(w13, 31, underflow);  // if index went negative, bail
+  // x10 = stackpoints array, w11 = current depth, w13 = target depth.
+  ldr(x10, ptr(x19, static_cast<uint32_t>(
+                        offsetof(A64BackendContext, stackpoints))));
+  ldr(w11, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext,
+                                                   current_stackpoint_depth))));
+  ldr(w13, ptr(x19, static_cast<uint32_t>(offsetof(
+                        A64BackendContext, pending_stackpoint_sync_depth))));
+  cbz(x10, underflow);
+  cbz(w13, underflow);
+  // The landing frame must still be live.
+  cmp(w13, w11);
+  b(HI, underflow);
 
-  // x14 = &stackpoints[w13] = x10 + w13 * sizeof(A64BackendStackpoint)
-  mov(w14, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
-  umull(x14, w13, w14);
+  // x14 = &stackpoints[target_depth - 1]
+  sub(w14, w13, 1);
+  mov(w15, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
+  umull(x14, w14, w15);
   add(x14, x10, x14);
 
-  // w15 = stackpoints[index].guest_stack_
-  ldr(w15, ptr(x14, static_cast<uint32_t>(
-                        offsetof(A64BackendStackpoint, guest_stack_))));
-
-  // If guest_stack_ >= current r1, we found our target frame.
-  cmp(w15, w12);
-  b(GE, found);
-
-  // Not found yet, go to previous entry.
-  sub(w13, w13, 1);
-  b(loop);
-
-  L(found);
-  // x14 points to the matching stackpoint entry.
-  // Restore host SP from stackpoints[index].host_stack_
+  // a64 records a stackpoint after the prolog allocates the frame, so its
+  // host_stack_ is already the SP the landing frame's body runs at.
   ldr(x16, ptr(x14, static_cast<uint32_t>(
                         offsetof(A64BackendStackpoint, host_stack_))));
-
-  // Adjust for the caller's stack frame: SP = host_stack_ - stack_size
-  sub(x16, x16, x9);
   mov(sp, x16);
 
-  // Update current_stackpoint_depth = index + 1
-  // (the entry we restored to has been consumed)
-  add(w13, w13, 1);
+  // The landing frame is the innermost live one now; consume the marker.
   str(w13, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext,
                                                    current_stackpoint_depth))));
+  str(wzr, ptr(x19, static_cast<uint32_t>(offsetof(
+                        A64BackendContext, pending_stackpoint_sync_depth))));
 
-  // Jump back to the caller.
   br(x8);
 
   L(underflow);
@@ -498,10 +512,116 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
 // ==========================================================================
 // ResolveFunction — runtime function resolution.
 // ==========================================================================
+// Whether translated code at |host_address| starts with the stack
+// synchronization check A64Emitter::EnsureSynchronizedGuestAndHostStack emits
+// after a guest call: ldr w16, [x19, #pending_stackpoint_sync_depth].
+static bool IsStackSyncCheck(uintptr_t host_address) {
+  constexpr uint32_t offset = static_cast<uint32_t>(
+      offsetof(A64BackendContext, pending_stackpoint_sync_depth));
+  static_assert(offset % 4 == 0 && offset / 4 < 4096,
+                "the check loads the marker with a scaled 12-bit offset");
+  constexpr uint32_t kLdrW16FromX19 =
+      0xB9400000u | ((offset / 4) << 10) | (19u << 5) | 16u;
+  return *reinterpret_cast<const uint32_t*>(host_address) == kLdrW16FromX19;
+}
+
+// The function running in the live frame stackpoints[index], from the host
+// address the next frame returns to, or nullptr when host code entered the
+// next frame (a guest callback) or there is no next frame.
+static A64Function* LookupFrameFunction(A64Backend* backend,
+                                        const A64BackendStackpoint* stackpoints,
+                                        uint32_t index, uint32_t depth) {
+  if (index + 1 >= depth) {
+    return nullptr;
+  }
+  // The next frame's prolog saved x30, which a tail call passes on unchanged.
+  const uint64_t host_return = *reinterpret_cast<const uint64_t*>(
+      stackpoints[index + 1].host_stack_ + StackLayout::HOST_RET_ADDR);
+  return static_cast<A64Function*>(
+      backend->code_cache()->LookupFunction(host_return));
+}
+
+// Where a branch to |target_address|, the instruction after a call, continues
+// when the guest is unwinding to it past live frames (longjmp), or 0.
+// The branch lands in the translated code of the live frame that made the
+// call, and the stack synchronization check there restores that frame. Mirrors
+// x64_emitter.cc's ResolveFunction and Xenia Edge's a64 ResolveLongjmp.
+static uint64_t ResolveLongjmp(ppc::PPCContext* guest_context,
+                               uint32_t target_address) {
+  auto* backend = static_cast<A64Backend*>(guest_context->processor->backend());
+  auto* backend_context = backend->BackendContextForGuestContext(guest_context);
+  const A64BackendStackpoint* stackpoints = backend_context->stackpoints;
+  const uint32_t depth = backend_context->current_stackpoint_depth;
+  const uint32_t stack_pointer = static_cast<uint32_t>(guest_context->r[1]);
+  const uint32_t sync_depth =
+      FindStackpointSyncDepth(stackpoints, depth, stack_pointer);
+  if (!sync_depth) {
+    return 0;
+  }
+  // r1 alone can name the wrong frame (recursion, or a frame that made a
+  // call at the same r1), so land in the innermost frame entered above r1
+  // whose own function holds the target.
+  for (uint32_t i = sync_depth; i-- > 0;) {
+    // The frame the branch lands in runs below the r1 it was entered with.
+    if (stackpoints[i].guest_stack_ <= stack_pointer) {
+      continue;
+    }
+    auto* function = LookupFrameFunction(backend, stackpoints, i, depth);
+    if (!function) {
+      // Host code entered the next frame (a guest callback). Never unwind
+      // past host frames.
+      break;
+    }
+    // Landing on a function's first instruction would skip its prolog.
+    if (function->address() == target_address) {
+      continue;
+    }
+    // A function's range can hold unreachable instructions it has no code
+    // for.
+    const uintptr_t host_address =
+        function->MapGuestAddressToMachineCode(target_address);
+    if (!host_address) {
+      continue;
+    }
+    // Only a return site after a guest call starts with the check that
+    // restores the frame (one after a kernel call does not).
+    if (!IsStackSyncCheck(host_address)) {
+      return 0;
+    }
+    backend_context->pending_stackpoint_sync_depth = i + 1;
+    return host_address;
+  }
+  return 0;
+}
+
 uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   auto guest_context = reinterpret_cast<ppc::PPCContext*>(raw_context);
   auto thread_state = guest_context->thread_state;
   assert_not_zero(target_address);
+
+  // A guest longjmp branches (blr) to the instruction after its setjmp call.
+  // Resume there in the live frame instead of translating the site as a new
+  // function: that would leave every skipped frame on the host stack and in
+  // the stackpoints, and every later return in the unwound chain would miss
+  // its frame's return address too. Landing creates no function, so the
+  // site's indirection slot keeps the resolve thunk and each longjmp comes
+  // back here.
+  if (cvars::a64_enable_host_guest_stack_synchronization &&
+      cvars::a64_longjmp_reentry && target_address <= 0xFFFFFFFFu) {
+    auto* processor = thread_state->processor();
+    auto* xexmod = dynamic_cast<XexModule*>(
+        processor->LookupModule(static_cast<uint32_t>(target_address)));
+    if (xexmod) {
+      InfoCacheFlags* flags = xexmod->GetInstructionAddressFlags(
+          static_cast<uint32_t>(target_address));
+      if (flags && flags->is_return_site) {
+        if (uint64_t host_address = ResolveLongjmp(
+                guest_context, static_cast<uint32_t>(target_address))) {
+          return host_address;
+        }
+      }
+    }
+  }
 
   auto fn = thread_state->processor()->ResolveFunction(
       static_cast<uint32_t>(target_address));
