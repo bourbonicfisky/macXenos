@@ -202,6 +202,150 @@ TEST_CASE("MSAA clear fold: each disqualifier refuses with its reason",
   }
 }
 
+namespace {
+
+// Iron Man's (534507F2) runtime clear block: a 4x depth-only rectangle over
+// the 1x k_8_8_8_8 colour surface's own EDRAM base.
+struct DepthOverColourClear : ClearState {
+  DepthOverColourClear() : ClearState(xenos::MsaaSamples::k4X, 640) {
+    vs = metal::kMsaaClearFoldVertexShaderB;
+    ps = metal::kMsaaClearFoldPixelShaderB;
+    reg::RB_MODECONTROL mode{};
+    mode.edram_mode = xenos::EdramMode::kDepthOnly;
+    regs->values[XE_GPU_REG_RB_MODECONTROL] = mode.value;
+    reg::RB_DEPTH_INFO depth_info{};
+    depth_info.depth_base = 720;
+    depth_info.depth_format = xenos::DepthRenderTargetFormat::kD24S8;
+    regs->values[XE_GPU_REG_RB_DEPTH_INFO] = depth_info.value;
+    reg::RB_COLOR_INFO color_info{};
+    color_info.color_base = 720;
+    color_info.color_format = xenos::ColorRenderTargetFormat::k_8_8_8_8;
+    regs->values[reg::RB_COLOR_INFO::rt_register_indices[0]] =
+        color_info.value;
+    reg::RB_STENCILREFMASK stencil{};
+    stencil.stencilwritemask = 0xFF;
+    regs->values[XE_GPU_REG_RB_STENCILREFMASK] = stencil.value;
+  }
+  metal::MsaaClearFoldDecision QualifyColour() const {
+    return metal::QualifyMsaaDepthClearColourFold(
+        *regs, vs, ps, primitive, index_count, depth, color_mask);
+  }
+};
+
+}  // namespace
+
+TEST_CASE("MSAA depth clear colour fold: a depth clear over the colour "
+          "target folds into the 1x colour view",
+          "[metal][msaa_clear_fold]") {
+  DepthOverColourClear clear;
+  auto decision = clear.QualifyColour();
+  REQUIRE(decision.fold());
+  CHECK(decision.scale_x_log2 == 1);
+  CHECK(decision.scale_y_log2 == 1);
+  reg::RB_SURFACE_INFO surface_1x;
+  surface_1x.value = decision.surface_info_1x;
+  CHECK(surface_1x.msaa_samples == xenos::MsaaSamples::k1X);
+  CHECK(surface_1x.surface_pitch == 1280);
+  // The Gears 3 / JC2 pair qualifies the same way.
+  clear.vs = metal::kMsaaClearFoldVertexShader;
+  clear.ps = metal::kMsaaClearFoldPixelShader;
+  CHECK(clear.QualifyColour().fold());
+}
+
+TEST_CASE("MSAA depth clear colour fold: each disqualifier refuses",
+          "[metal][msaa_clear_fold]") {
+  {
+    DepthOverColourClear c;
+    c.ps = metal::kMsaaClearFoldPixelShader;
+    CHECK(c.QualifyColour().refusal == MsaaClearFoldRefusal::kShaderPair);
+  }
+  {
+    DepthOverColourClear c;
+    c.color_mask = 0xF;
+    CHECK(c.QualifyColour().refusal == MsaaClearFoldRefusal::kEdramMode);
+  }
+  {
+    // Stencil-only or depth without write leaves bits of the word unknown.
+    DepthOverColourClear c;
+    c.depth.z_write_enable = 0;
+    CHECK(c.QualifyColour().refusal == MsaaClearFoldRefusal::kDepthFunction);
+  }
+  {
+    DepthOverColourClear c;
+    reg::RB_DEPTH_INFO depth_info;
+    depth_info.value = c.regs->values[XE_GPU_REG_RB_DEPTH_INFO];
+    depth_info.depth_format = xenos::DepthRenderTargetFormat::kD24FS8;
+    c.regs->values[XE_GPU_REG_RB_DEPTH_INFO] = depth_info.value;
+    CHECK(c.QualifyColour().refusal == MsaaClearFoldRefusal::kDepthFunction);
+  }
+  {
+    DepthOverColourClear c;
+    c.depth.stencil_enable = 0;
+    CHECK(c.QualifyColour().refusal == MsaaClearFoldRefusal::kStencil);
+  }
+  {
+    DepthOverColourClear c;
+    reg::RB_STENCILREFMASK stencil{};
+    stencil.stencilwritemask = 0x0F;
+    c.regs->values[XE_GPU_REG_RB_STENCILREFMASK] = stencil.value;
+    CHECK(c.QualifyColour().refusal == MsaaClearFoldRefusal::kStencil);
+  }
+  {
+    DepthOverColourClear c;
+    c.depth.backface_enable = 1;
+    CHECK(c.QualifyColour().refusal == MsaaClearFoldRefusal::kStencil);
+  }
+  {
+    // The main depth buffer (no colour target at its base) is not a
+    // candidate.
+    DepthOverColourClear c;
+    reg::RB_COLOR_INFO color_info{};
+    color_info.color_base = 0;
+    c.regs->values[reg::RB_COLOR_INFO::rt_register_indices[0]] =
+        color_info.value;
+    CHECK(c.QualifyColour().refusal == MsaaClearFoldRefusal::kColourAlias);
+  }
+  {
+    DepthOverColourClear c;
+    reg::RB_COLOR_INFO color_info{};
+    color_info.color_base = 720;
+    color_info.color_format = xenos::ColorRenderTargetFormat::k_2_10_10_10;
+    c.regs->values[reg::RB_COLOR_INFO::rt_register_indices[0]] =
+        color_info.value;
+    CHECK(c.QualifyColour().refusal == MsaaClearFoldRefusal::kColourAlias);
+  }
+  {
+    DepthOverColourClear c;
+    reg::RB_COLOR_INFO color_info{};
+    color_info.color_base = 720;
+    color_info.color_format = xenos::ColorRenderTargetFormat::k_8_8_8_8;
+    color_info.color_exp_bias = 1;
+    c.regs->values[reg::RB_COLOR_INFO::rt_register_indices[0]] =
+        color_info.value;
+    CHECK(c.QualifyColour().refusal == MsaaClearFoldRefusal::kColourAlias);
+  }
+}
+
+TEST_CASE("MSAA depth clear colour fold: depth and colour words",
+          "[metal][msaa_clear_fold]") {
+  // Iron Man's opaque black clear: z = 0xFF0001 / 2^24 (the runtime's
+  // 0xFF0000 / (2^24 - 1)) packs d24 0xFF0000, stencil 0.
+  CHECK(metal::MsaaClearFoldD24S8Word(float(0xFF0001) / 16777216.0f, 0) ==
+        0xFF000000u);
+  CHECK(metal::MsaaClearFoldD24S8Word(0.0f, 0x5A) == 0x0000005Au);
+  CHECK(metal::MsaaClearFoldD24S8Word(1.0f, 0) == 0xFFFFFF00u);
+  uint32_t word = 0;
+  const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  REQUIRE(metal::MsaaClearFoldColour8888Word(black, word));
+  CHECK(word == 0xFF000000u);
+  const float red[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+  REQUIRE(metal::MsaaClearFoldColour8888Word(red, word));
+  CHECK(word == 0x000000FFu);
+  // Not an exact 8-bit value: no rounding rule is assumed.
+  const float half[4] = {0.5f, 0.0f, 0.0f, 1.0f};
+  CHECK(!metal::MsaaClearFoldColour8888Word(half, word));
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace xe

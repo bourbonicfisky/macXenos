@@ -8237,9 +8237,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     RegisterFile* regs = nullptr;
     RenderTargetCache* render_target_cache = nullptr;
     uint32_t saved = 0;
+    // A depth clear drawn into the colour view also rewrites these.
+    uint32_t colour_alias_count = 0;
+    std::array<std::pair<uint32_t, uint32_t>, 4> colour_alias_saved{};
     ~MsaaFoldSurfaceRestore() {
       if (regs) {
         regs->values[XE_GPU_REG_RB_SURFACE_INFO] = saved;
+        for (uint32_t i = 0; i < colour_alias_count; ++i) {
+          regs->values[colour_alias_saved[i].first] =
+              colour_alias_saved[i].second;
+        }
       }
       if (render_target_cache) {
         render_target_cache->SetDrawExtentYScale(1);
@@ -8251,11 +8258,35 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         cvars::metal_msaa_clear_fold, std::getenv("XE_METAL_MSAA_CLEAR_FOLD"));
     static const bool s_fold_log =
         std::getenv("XE_METAL_MSAA_CLEAR_FOLD_LOG") != nullptr;
+    // Depth clears into the colour view of the same tiles
+    // (QualifyMsaaDepthClearColourFold): default on with the fold;
+    // XE_METAL_DEPTH_CLEAR_COLOR_FOLD=0 rolls back to the transfer path
+    // (2026-11-03: Iron Man's title and menus 39-45 -> 60 fps on the M1 Max).
+    static const bool s_colour_fold_enabled =
+        s_fold_enabled && metal::ParseMetalEnvironmentFlag(
+                              std::getenv("XE_METAL_DEPTH_CLEAR_COLOR_FOLD"),
+                              /*default_enabled=*/true);
     if (s_fold_enabled || s_fold_log) {
-      metal::MsaaClearFoldDecision fold = metal::QualifyMsaaClearFold(
-          regs, vertex_shader ? vertex_shader->ucode_data_hash() : 0,
-          pixel_shader ? pixel_shader->ucode_data_hash() : 0, prim_type,
-          index_count, norm_depth, normalized_color_mask);
+      const uint64_t fold_vs_hash =
+          vertex_shader ? vertex_shader->ucode_data_hash() : 0;
+      const uint64_t fold_ps_hash =
+          pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+      // A depth clear over the colour target's own tiles is drawn into the
+      // colour view; anything it refuses tries the ordinary fold.
+      // Not inside an occlusion query: those count the depth clear's
+      // samples against its own state.
+      metal::MsaaClearFoldDecision fold;
+      if (s_colour_fold_enabled && !zpd_active_segment_.logical_active) {
+        fold = metal::QualifyMsaaDepthClearColourFold(
+            regs, fold_vs_hash, fold_ps_hash, prim_type, index_count,
+            norm_depth, normalized_color_mask);
+      }
+      bool colour_alias = fold.fold();
+      if (!colour_alias) {
+        fold = metal::QualifyMsaaClearFold(regs, fold_vs_hash, fold_ps_hash,
+                                           prim_type, index_count, norm_depth,
+                                           normalized_color_mask);
+      }
       // Value invariance, edge alignment and the depth the transfer path
       // would leave (design D3): evaluate the clear's vertices on the CPU.
       if (fold.fold()) {
@@ -8270,7 +8301,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           fold.refusal = metal::MsaaClearFoldRefusal::kVertexEvaluation;
         } else {
           switch (metal::CheckMsaaClearFoldValues(
-              regs, vertices, normalized_color_mask != 0,
+              regs, vertices, normalized_color_mask != 0 || colour_alias,
               cvars::half_pixel_offset)) {
             case metal::MsaaClearFoldValueRefusal::kNone:
               break;
@@ -8308,6 +8339,38 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               (fold_viewport.z_max != 1.0f && fold_viewport.z_max != 0.5f) ||
               (pixel_shader && pixel_shader->writes_depth())) {
             fold.refusal = metal::MsaaClearFoldRefusal::kDepthRange;
+          } else if (colour_alias) {
+            // The word the transfer path would carry into the colour view
+            // (depth pack of the rasterized depth, stencil REPLACE) must be
+            // the k_8_8_8_8 word of the colour the pass-through PS writes.
+            // Out of [0, 1] the host clamps only with clipping off (as the
+            // depth pack saturates); with clipping on the clear is clipped.
+            float host_depth = vertices.position[0][2] * fold_viewport.z_max;
+            const bool depth_clamped =
+                regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable ||
+                cvars::force_depth_clamp;
+            uint32_t colour_word = 0;
+            const uint32_t depth_word = metal::MsaaClearFoldD24S8Word(
+                host_depth, regs.Get<reg::RB_STENCILREFMASK>().stencilref);
+            const bool colour_exact = metal::MsaaClearFoldColour8888Word(
+                vertices.interpolator0[0], colour_word);
+            if (!(depth_clamped ||
+                  (host_depth >= 0.0f && host_depth <= 1.0f)) ||
+                !colour_exact || colour_word != depth_word) {
+              fold.refusal = metal::MsaaClearFoldRefusal::kWordMismatch;
+              static uint32_t s_mismatch_logs = 0;
+              if (s_fold_log && s_mismatch_logs < 16) {
+                ++s_mismatch_logs;
+                XELOGI(
+                    "MetalMsaaClearFold word-mismatch draw={} depth={} "
+                    "word={:08X} colour=({}, {}, {}, {}) exact={} "
+                    "word={:08X} clamped={}",
+                    trace_draw_index_, host_depth, depth_word,
+                    vertices.interpolator0[0][0], vertices.interpolator0[0][1],
+                    vertices.interpolator0[0][2], vertices.interpolator0[0][3],
+                    colour_exact, colour_word, depth_clamped);
+              }
+            }
           } else {
             float host_depth = vertices.position[0][2] * fold_viewport.z_max;
             float transferred = render_target_cache_->CanonicalDepthTransferResult(
@@ -8321,6 +8384,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // candidates and would drown the refusal reasons).
       if (fold.refusal != metal::MsaaClearFoldRefusal::kShaderPair) {
         ++msaa_fold_census_[uint32_t(fold.refusal)];
+        msaa_fold_colour_alias_census_ += colour_alias && fold.fold();
       }
       if (!s_fold_enabled || !fold.fold()) {
         msaa_fold_pin_depth = false;
@@ -8336,6 +8400,36 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         // (MSAA-level) rows; scale it into the 1x view's rows.
         msaa_fold_restore.render_target_cache = render_target_cache_.get();
         render_target_cache_->SetDrawExtentYScale(msaa_fold_scale_y);
+        if (colour_alias) {
+          // Present the depth clear as a colour clear of the same tiles:
+          // colour target 0 (already at the depth base, k_8_8_8_8) fully
+          // written with replace blending, depth and stencil off.
+          auto rewrite = [&](uint32_t index, uint32_t value) {
+            msaa_fold_restore.colour_alias_saved
+                [msaa_fold_restore.colour_alias_count++] = {
+                index, register_file_->values[index]};
+            register_file_->values[index] = value;
+          };
+          reg::RB_MODECONTROL mode = regs.Get<reg::RB_MODECONTROL>();
+          mode.edram_mode = xenos::EdramMode::kColorDepth;
+          reg::RB_BLENDCONTROL blend = regs.Get<reg::RB_BLENDCONTROL>(
+              reg::RB_BLENDCONTROL::rt_register_indices[0]);
+          blend.color_srcblend = xenos::BlendFactor::kOne;
+          blend.color_destblend = xenos::BlendFactor::kZero;
+          blend.color_comb_fcn = xenos::BlendOp::kAdd;
+          blend.alpha_srcblend = xenos::BlendFactor::kOne;
+          blend.alpha_destblend = xenos::BlendFactor::kZero;
+          blend.alpha_comb_fcn = xenos::BlendOp::kAdd;
+          rewrite(XE_GPU_REG_RB_MODECONTROL, mode.value);
+          rewrite(XE_GPU_REG_RB_COLOR_MASK, 0xFu);
+          rewrite(XE_GPU_REG_RB_DEPTHCONTROL, 0u);
+          rewrite(reg::RB_BLENDCONTROL::rt_register_indices[0], blend.value);
+          normalized_color_mask = draw_util::GetNormalizedColorMask(
+              regs, pixel_shader->writes_color_targets());
+          norm_depth = draw_util::GetNormalizedDepthControl(regs);
+          depth_bound = false;
+          msaa_fold_pin_depth = false;
+        }
       }
     }
   }
@@ -20388,9 +20482,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
               msaa_fold_census_[i]);
         }
       }
+      if (msaa_fold_colour_alias_census_) {
+        line += fmt::format(" (into-colour={})",
+                            msaa_fold_colour_alias_census_);
+      }
       XELOGI("MetalMsaaClearFold swap#{} (60 swaps):{}", swap_count_,
              line.empty() ? std::string(" none") : line);
       std::memset(msaa_fold_census_, 0, sizeof(msaa_fold_census_));
+      msaa_fold_colour_alias_census_ = 0;
     }
   }
 
