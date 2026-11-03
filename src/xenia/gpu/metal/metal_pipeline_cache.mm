@@ -1312,6 +1312,9 @@ void* MetalPipelineCache::NewRenderPipelineDescriptor(
   // "vs:H1,H2" = those whose vertex shader ucode hash is in the list.
   static const std::string s_validation_off = [] {
     const char* v = std::getenv("XE_METAL_VALIDATION_OFF");
+    if (!v && std::getenv("XE_METAL_VALIDATION_OFF_OTHER")) {
+      v = "none";
+    }
     return std::string(v ? v : "");
   }();
   if (!s_validation_off.empty()) {
@@ -1339,9 +1342,10 @@ void* MetalPipelineCache::NewRenderPipelineDescriptor(
         off = s_validation_off.find(fmt::format("{:016X}", vs.ucode_hash)) !=
               std::string::npos;
       }
-      if (off) {
-        desc.shaderValidation = MTLShaderValidationDisabled;
-      }
+      // Explicit either way, so XE_METAL_VALIDATION_OFF_OTHER's hook (which
+      // only changes pipelines left at the default) leaves these alone.
+      desc.shaderValidation =
+          off ? MTLShaderValidationDisabled : MTLShaderValidationEnabled;
       static std::atomic<uint32_t> s_logged{0};
       if (s_logged.fetch_add(1, std::memory_order_relaxed) < 4096) {
         XELOGI("MetalValidationOff: vs={:016X} ps={:016X} validation={}",

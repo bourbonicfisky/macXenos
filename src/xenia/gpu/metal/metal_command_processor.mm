@@ -21,6 +21,7 @@
 
 #include <mach/mach.h>
 #include <objc/message.h>
+#include <objc/runtime.h>
 #include <pthread.h>
 
 // Public ObjC ABI for manual autorelease-pool scopes that span calls (the
@@ -2429,6 +2430,132 @@ bool TessDrawRangeAllows(uint32_t draw_index) {
 
 }  // namespace
 
+// XE_METAL_VALIDATION_OFF_OTHER=compute|render|all (diagnostic, with
+// MTL_SHADER_VALIDATION=1): pipelines other than the guest draw pipelines
+// (which XE_METAL_VALIDATION_OFF sets explicitly) are created without shader
+// validation, by hooking the device's pipeline-creation methods. Compute
+// pipelines here are built from bare functions, which carry no per-pipeline
+// validation setting, so the hook rebuilds them from a descriptor. Returns
+// pass through as raw pointers: these are "new" methods (+1 references).
+namespace {
+IMP g_validation_off_render = nullptr;
+IMP g_validation_off_render_options = nullptr;
+std::atomic<uint32_t> g_validation_off_logged{0};
+
+void LogValidationOffPipeline(const char* kind, void* state) {
+  if (!state ||
+      g_validation_off_logged.fetch_add(1, std::memory_order_relaxed) >= 32) {
+    return;
+  }
+  if (@available(macOS 15.0, *)) {
+    id object = (__bridge id)state;
+    MTLShaderValidation validation = MTLShaderValidationDefault;
+    if ([object conformsToProtocol:@protocol(MTLComputePipelineState)]) {
+      validation = ((id<MTLComputePipelineState>)object).shaderValidation;
+    } else if ([object conformsToProtocol:@protocol(MTLRenderPipelineState)]) {
+      validation = ((id<MTLRenderPipelineState>)object).shaderValidation;
+    }
+    XELOGI("MetalValidationOffOther: {} pipeline created, shaderValidation={}",
+           kind, int(validation));
+  }
+}
+
+void* ValidationOffComputeFromFunction(__unsafe_unretained id self, SEL,
+                                       __unsafe_unretained id function,
+                                       NSError* __autoreleasing* error) {
+  void* state = nullptr;
+  if (@available(macOS 15.0, *)) {
+    MTLComputePipelineDescriptor* descriptor =
+        [[MTLComputePipelineDescriptor alloc] init];
+    descriptor.computeFunction = function;
+    descriptor.shaderValidation = MTLShaderValidationDisabled;
+    state = ((void* (*)(id, SEL, id, NSUInteger, id*, NSError* __autoreleasing*))
+                 objc_msgSend)(
+        self,
+        @selector(newComputePipelineStateWithDescriptor:options:reflection:error:),
+        descriptor, MTLPipelineOptionNone, nullptr, error);
+  }
+  LogValidationOffPipeline("compute", state);
+  return state;
+}
+
+void* ValidationOffRender(__unsafe_unretained id self, SEL selector,
+                          __unsafe_unretained MTLRenderPipelineDescriptor* desc,
+                          NSError* __autoreleasing* error) {
+  if (@available(macOS 15.0, *)) {
+    if (desc.shaderValidation == MTLShaderValidationDefault) {
+      desc.shaderValidation = MTLShaderValidationDisabled;
+    }
+  }
+  void* state = ((void* (*)(id, SEL, id, NSError* __autoreleasing*))
+                     g_validation_off_render)(self, selector, desc, error);
+  LogValidationOffPipeline("render", state);
+  return state;
+}
+
+void* ValidationOffRenderOptions(
+    __unsafe_unretained id self, SEL selector,
+    __unsafe_unretained MTLRenderPipelineDescriptor* desc,
+    MTLPipelineOption options, id* reflection,
+    NSError* __autoreleasing* error) {
+  if (@available(macOS 15.0, *)) {
+    if (desc.shaderValidation == MTLShaderValidationDefault) {
+      desc.shaderValidation = MTLShaderValidationDisabled;
+    }
+  }
+  void* state =
+      ((void* (*)(id, SEL, id, MTLPipelineOption, id*,
+                  NSError* __autoreleasing*))g_validation_off_render_options)(
+          self, selector, desc, options, reflection, error);
+  LogValidationOffPipeline("render", state);
+  return state;
+}
+
+void InstallValidationOffHooks(id<MTLDevice> device) {
+  static bool s_installed = false;
+  const char* mode = std::getenv("XE_METAL_VALIDATION_OFF_OTHER");
+  if (s_installed || !mode || !device) {
+    return;
+  }
+  s_installed = true;
+  const bool compute = !std::strcmp(mode, "compute") || !std::strcmp(mode, "all");
+  const bool render = !std::strcmp(mode, "render") || !std::strcmp(mode, "all");
+  Class device_class = object_getClass(device);
+  if (compute) {
+    SEL selector = @selector(newComputePipelineStateWithFunction:error:);
+    Method method = class_getInstanceMethod(device_class, selector);
+    if (method) {
+      class_replaceMethod(device_class, selector,
+                          (IMP)ValidationOffComputeFromFunction,
+                          method_getTypeEncoding(method));
+    }
+  }
+  if (render) {
+    SEL selector = @selector(newRenderPipelineStateWithDescriptor:error:);
+    Method method = class_getInstanceMethod(device_class, selector);
+    if (method) {
+      g_validation_off_render =
+          class_getMethodImplementation(device_class, selector);
+      class_replaceMethod(device_class, selector, (IMP)ValidationOffRender,
+                          method_getTypeEncoding(method));
+    }
+    SEL options_selector =
+        @selector(newRenderPipelineStateWithDescriptor:options:reflection:error:);
+    Method options_method =
+        class_getInstanceMethod(device_class, options_selector);
+    if (options_method) {
+      g_validation_off_render_options =
+          class_getMethodImplementation(device_class, options_selector);
+      class_replaceMethod(device_class, options_selector,
+                          (IMP)ValidationOffRenderOptions,
+                          method_getTypeEncoding(options_method));
+    }
+  }
+  XELOGI("MetalValidationOffOther: {} on {} (compute={} render={})", mode,
+         class_getName(device_class), compute, render);
+}
+}  // namespace
+
 bool MetalCommandProcessor::SetupContext() {
   encode_stream_ = std::make_unique<MetalEncodeStream>();
   encode_stream_->Start(MetalEncodeStream::ModeFromEnvironment());
@@ -2477,6 +2604,7 @@ bool MetalCommandProcessor::SetupContext() {
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
   void* device = provider ? provider->device() : nullptr;
+  InstallValidationOffHooks((__bridge id<MTLDevice>)device);
   if (!device) {
     XELOGE("MetalCommandProcessor: no Metal device from provider");
     return false;
