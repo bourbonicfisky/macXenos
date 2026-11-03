@@ -797,6 +797,15 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     void* mat_depth_sten_range = nullptr;
     void* depth_state = nullptr;    // depth write + stencil REPLACE-to-0
     void* bit_states[8] = {};       // one stencil bit-plane REPLACE state each
+    // 2x/4x depth pack without the X32_Stencil8 view (MsaaStencilExtract):
+    // clear_stencil zeroes the range's stencil bytes, one extract_sten draw
+    // per bit (extract_states[b]: EQUAL on that bit, no writes) ORs the bits
+    // in, and the _keep packs write depth around them.
+    void* extract_sten = nullptr;  // id<MTLRenderPipelineState>
+    void* extract_states[8] = {};
+    void* clear_stencil = nullptr;
+    void* pack_ms_range_keep = nullptr;
+    void* pack_ms_range_px_keep = nullptr;
     uint32_t sample_count = 0;
   };
   const ShadowDepthPipelines* EnsureShadowDepthPipelines(uint32_t sample_count);
@@ -820,6 +829,9 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                 uint32_t start_tiles, uint32_t end_tiles);
   void* shadow_depth_library_ = nullptr;  // id<MTLLibrary> from kEdramMsl.
   std::unordered_map<uint32_t, ShadowDepthPipelines> shadow_pipelines_;
+  // XE_METAL_MSAA_STENCIL_EXTRACT_VERIFY: id<MTLBuffer> of two counters.
+  void* msaa_stencil_verify_buffer_ = nullptr;
+  uint64_t msaa_stencil_verify_packs_ = 0;
   uint32_t shadow_count_ = 0;  // Cap the sampled transitions per run.
 
   MetalCommandProcessor& command_processor_;
