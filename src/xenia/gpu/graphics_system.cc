@@ -419,14 +419,16 @@ uint32_t GraphicsSystem::ReadScanlineCounter() {
   // every ~23rd vblank: the videos played at 2.6 fps (60 * 45 / 1024).
   // Report the line the 720p scanout (750 lines, 720 active) is on: the
   // vblank region starts at the vblank interrupt, the active lines follow
-  // until the next one. XE_GPU_VCOUNTER_ACCUMULATE=1 restores the
-  // accumulated register value (exact rollback).
-  static const bool accumulate = [] {
+  // until the next one. scanline_counter_from_time = false (per title:
+  // Mafia II's built-in config keeps its uncapped frame rate that way) or
+  // XE_GPU_VCOUNTER_ACCUMULATE=1 restores the accumulated register value
+  // (exact rollback).
+  static const bool accumulate_env = [] {
     const char* v = std::getenv("XE_GPU_VCOUNTER_ACCUMULATE");
     return v && !(v[0] == '0' && !v[1]);
   }();
   const int64_t last = last_vblank_host_ns_.load(std::memory_order_acquire);
-  if (accumulate || !last) {
+  if (accumulate_env || !cvars::scanline_counter_from_time || !last) {
     return register_file()->values[XE_GPU_REG_D1MODE_V_COUNTER];
   }
   // Matches the 720 lines the D1MODE_VIEWPORT_SIZE read reports.

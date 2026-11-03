@@ -55,6 +55,15 @@ DEFINE_bool(limit_uncapped_games, false,
             "per vblank, 60 FPS. Games that cap themselves are unaffected.",
             "GPU");
 
+DEFINE_bool(scanline_counter_from_time, true,
+            "Report the display scanline counter (D1MODE_V_COUNTER) from the "
+            "time since the last vblank, as the hardware does. Off restores "
+            "the old counter, which only advances once per frame-pacing "
+            "step: some games' own frame limiters then never wait (Mafia II "
+            "runs uncapped instead of at 30), and video players that poll it "
+            "for vblank crawl (WALL-E's videos at 2.6 FPS).",
+            "GPU");
+
 DEFINE_bool(
     gpu_allow_invalid_fetch_constants, true,
     "Allow texture and vertex fetch constants with invalid type - generally "
