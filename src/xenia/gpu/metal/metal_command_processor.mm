@@ -253,9 +253,9 @@ DEFINE_transient_bool(
 DEFINE_transient_bool(
     metal_rect_vs_title_off, false,
     "Per-title hint: skip rectangle lists instead of expanding them in the "
-    "vertex shader on GPUs without Metal 3 (Radeon Pro 580X), set by the "
-    "built-in config of titles that hang the GPU there (Red Dead Redemption). "
-    "XE_METAL_RECT_VS=1 overrides.",
+    "vertex shader on GPUs without Metal 3 (Radeon Pro 580X), for a title's "
+    "built-in config. No title sets it since the RDR 580X hang was fixed "
+    "(MSAA depth pack stencil). XE_METAL_RECT_VS=1 overrides.",
     "GPU");
 
 DEFINE_bool(
