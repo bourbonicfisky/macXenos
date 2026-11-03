@@ -640,6 +640,24 @@ bool MetalMemexportPixelNoTargetGateOn() {
   return s_gate_on;
 }
 
+// A draw with no color writes, depth and stencil off and no memory export
+// changes nothing in EDRAM, but inside an open occlusion (ZPD) report it is
+// what the report counts: with the depth test off every covered sample passes.
+// Mafia II issues about a dozen such reports a frame (540-index triangle
+// lists, no pixel shader; 5-125 samples each once drawn), and every one of
+// them read 0 while they were skipped (2026-11-03, M4 mini census).
+// D3D12 and Vulkan draw such a draw into the render targets already bound, so
+// it is executed here the same way: the targets stay as they are (no
+// ownership change, write mask 0, depth state disabled) and only the sample
+// count is affected. XE_METAL_ZPD_COUNT_NO_TARGET_DRAWS=0 restores the skip.
+bool MetalZPDCountNoTargetDrawsOn() {
+  static const bool s_on = [] {
+    const char* value = std::getenv("XE_METAL_ZPD_COUNT_NO_TARGET_DRAWS");
+    return !(value && value[0] == '0' && !value[1]);
+  }();
+  return s_on;
+}
+
 // ATTRIBUTION DIAGNOSTICS (both default-off, log/route-filter only; neither
 // can alter behavior unless explicitly set).
 //
@@ -6852,6 +6870,9 @@ void MetalCommandProcessor::RecordDrawSkip(MetalDrawSkipReason reason,
     }
   }
   ++draw_skip_count_;
+  if (ZPDCensusEnabled()) {
+    NoteZPDCensusDraw(ZPDCensusDraw::kSkipped);
+  }
   const RegisterFile& regs = *register_file_;
   uint32_t prim_type =
       uint32_t(regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type);
@@ -8833,7 +8854,15 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
   }
 
-  if (!color_bound && !(kDepthEnabled && depth_bound) && !pixel_export_only) {
+  // See MetalZPDCountNoTargetDrawsOn. Only a draw with nothing to export, so
+  // the memory export paths below are untouched.
+  const bool zpd_count_only_draw =
+      !color_bound && !(kDepthEnabled && depth_bound) && !pixel_export_only &&
+      memexport_ranges.empty() &&
+      !(pixel_shader && pixel_shader->memexport_eM_written()) &&
+      zpd_active_segment_.logical_active && MetalZPDCountNoTargetDrawsOn();
+  if (!color_bound && !(kDepthEnabled && depth_bound) && !pixel_export_only &&
+      !zpd_count_only_draw) {
     bool ps_exports = pixel_shader && pixel_shader->memexport_eM_written();
     if (memexport_ranges.empty() || ps_exports) {
       // Nothing to render and nothing exportable via the v1 path (plain
@@ -8861,12 +8890,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           XELOGW(
               "MetalZPDSkip draw={} no-RT draw skipped inside a logically "
               "active ZPD segment (segment_active={} pending_begin={} "
-              "zfunc={} z_en={} prim={} index_count={})",
+              "zfunc={} z_en={} prim={} index_count={} edram_mode={} "
+              "color_mask={:08X} ps={} stencil={})",
               trace_draw_index_, zpd_active_segment_.segment_active,
               zpd_active_segment_.segment_pending_begin,
               uint32_t(regs.Get<reg::RB_DEPTHCONTROL>().zfunc),
               uint32_t(regs.Get<reg::RB_DEPTHCONTROL>().z_enable),
-              uint32_t(prim_type), index_count);
+              uint32_t(prim_type), index_count,
+              uint32_t(regs.Get<reg::RB_MODECONTROL>().edram_mode),
+              regs.Get<reg::RB_COLOR_MASK>().value, pixel_shader != nullptr,
+              uint32_t(regs.Get<reg::RB_DEPTHCONTROL>().stencil_enable));
         }
       }
       RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
@@ -9636,10 +9669,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
   }
+  // A count-only ZPD draw rasterizes with no target of its own: the shared
+  // cache then keeps the accumulated targets bound, as on D3D12 and Vulkan.
   if (!memexport_draw && !pixel_export_only &&
-      !render_target_cache_->Update(color_bound || depth_bound, norm_depth,
-                                    normalized_color_mask, *vertex_shader,
-                                    window_offset_tiles)) {
+      !render_target_cache_->Update(
+          color_bound || depth_bound || zpd_count_only_draw, norm_depth,
+          normalized_color_mask, *vertex_shader, window_offset_tiles)) {
     RecordDrawSkip(MetalDrawSkipReason::kResourceFailure, "rt-cache-update");
     return true;
   }
@@ -9674,7 +9709,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 render_target_cache_->current_depth_texture() != nullptr;
   if (!have_color && !depth_bound && !memexport_draw && !pixel_export_only) {
     RecordDrawSkip(MetalDrawSkipReason::kExpectedNoEffect,
-                   "no-bound-targets");
+                   zpd_count_only_draw ? "zpd-count-no-targets"
+                                       : "no-bound-targets");
     return true;
   }
   // Diagnostic: XE_METAL_PRECLEAR_RT=<trace draw index> clears the bound
@@ -10229,6 +10265,13 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       metal::MetalPassBindingDecision decision = metal::DecideMetalPassBinding(
           pass_present, used, same_key_open, encoder_bound_attachments_);
       pass_bound = decision.bound;
+    } else if (zpd_count_only_draw && frame_open_ &&
+               encoder_attachment_key_ ==
+                   PassAttachmentKey(dummy_depth, false) &&
+               (encoder_bound_attachments_ & pass_present)) {
+      // A count-only ZPD draw touches no attachment: join the open pass with
+      // the set it already binds rather than splitting it for the legacy set.
+      pass_bound = encoder_bound_attachments_ & pass_present;
     }
     // Attribution aid: XE_METAL_PASS_ATTACHMENTS_DROPPABLE=<hex set> limits
     // which attachments by-use binding may leave unbound (bits: 1 depth,
@@ -11623,6 +11666,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                    "encoder-unavailable");
     return true;
+  }
+  if (ZPDCensusEnabled()) {
+    NoteZPDCensusDraw(zpd_count_only_draw ? ZPDCensusDraw::kCountOnly
+                      : zpd_query_open_   ? ZPDCensusDraw::kMeasured
+                                          : ZPDCensusDraw::kUnmeasured,
+                      kDepthEnabled && depth_bound && norm_depth.z_enable);
   }
   // Every encoder call below goes through the stream; whatever path returns,
   // the draw's ops are published (or replayed inline) on the way out.
@@ -20809,6 +20858,68 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   }
   if (RcCensusEnabled()) {
     RcCensusNoteSwap(count);
+  }
+  if (ZPDCensusEnabled()) {
+    // Occlusion-culling pops seen from the draw side (XE_GPU_ZPD_CENSUS): a
+    // frame whose draw count falls at least K below both neighbours (dip1),
+    // or two frames below the frames around them (dip2). dip1_all_neighbours
+    // needs the frame below all four of t-2..t+2, so a title that alternates
+    // work between frames (Mafia II: ~15 draws) does not count. Logged every
+    // 128 swaps, cumulative.
+    static uint32_t s_last_total = draw_count_;
+    static uint32_t s_hist[5] = {};
+    static uint64_t s_frames = 0;
+    static uint64_t s_dip1[3] = {};
+    static uint64_t s_dip2[3] = {};
+    static uint64_t s_dip1_parity[3] = {};
+    static const uint32_t kDipK[3] = {5, 20, 50};
+    uint32_t frame_draws = draw_count_ - s_last_total;
+    s_last_total = draw_count_;
+    for (int i = 0; i < 4; ++i) {
+      s_hist[i] = s_hist[i + 1];
+    }
+    s_hist[4] = frame_draws;
+    if (++s_frames >= 5) {
+      // s_hist[3] is the candidate frame (one frame of look-ahead), s_hist[2]
+      // and s_hist[3] the candidate pair.
+      for (int k = 0; k < 3; ++k) {
+        uint32_t lo1 = std::min(s_hist[2], s_hist[4]);
+        if (s_hist[3] + kDipK[k] <= lo1) {
+          ++s_dip1[k];
+        }
+        uint32_t lo2 = std::min(s_hist[1], s_hist[4]);
+        if (std::max(s_hist[2], s_hist[3]) + kDipK[k] <= lo2) {
+          ++s_dip2[k];
+        }
+        uint32_t lop = std::min(s_hist[0], s_hist[4]);
+        if (s_hist[2] + kDipK[k] <= lop && s_hist[2] + kDipK[k] <= s_hist[1] &&
+            s_hist[2] + kDipK[k] <= s_hist[3]) {
+          ++s_dip1_parity[k];
+        }
+      }
+    }
+    // XE_GPU_ZPD_CENSUS=3 also logs 64 consecutive per-frame draw counts
+    // every 1024 swaps, to tell a one-off dip from an alternating pattern.
+    static const bool s_series = [] {
+      const char* v = std::getenv("XE_GPU_ZPD_CENSUS");
+      return v && v[0] == '3';
+    }();
+    static std::string s_series_text;
+    if (s_series && (count & 1023) < 64) {
+      s_series_text += fmt::format(" {}", frame_draws);
+      if ((count & 1023) == 63) {
+        XELOGI("ZPDDrawSeries swap#{}:{}", count, s_series_text);
+        s_series_text.clear();
+      }
+    }
+    if ((count & 127) == 0 && count) {
+      XELOGI(
+          "ZPDDrawDips swap#{} frames={} last={} dip1[5={} 20={} 50={}] "
+          "dip2[5={} 20={} 50={}] dip1_all_neighbours[5={} 20={} 50={}]",
+          count, s_frames, frame_draws, s_dip1[0], s_dip1[1], s_dip1[2],
+          s_dip2[0], s_dip2[1], s_dip2[2], s_dip1_parity[0],
+          s_dip1_parity[1], s_dip1_parity[2]);
+    }
   }
   if (PassCensusEnabled()) {
     pass_census_.NoteFrame();

@@ -1,0 +1,18 @@
+# macXenos built-in per-title config: Mafia II (545407E6).
+# The title culls whole objects on occlusion query results. Its query records
+# come from a ring, so a record's previous count (what fast mode guesses from
+# until the GPU's arrives) belongs to some other object, usually an occluded
+# one: with the default fast queries buildings and people in the opening
+# Sicily cutscene drop out for a frame or two. Strict queries wait for the
+# real result; about 2% slower uncapped on the M4 mini.
+# (xenia-mac-evidence mafia2-pop-20261103: frames with >= 50 draws missing
+# against all four neighbours, per route run: fast 96-108, strict 1, fake 0;
+# 122.6 vs 119.6 fps, 5 runs each)
+[GPU]
+occlusion_query = "strict"
+# Uncapped by choice (2026-11-03): the title's own limiter waits on the display
+# scanline counter; with the hardware-timed counter (9c88a1281) it holds 30
+# fps, with the old per-frame-step counter it runs uncapped (113.9 vs 30.0 fps
+# on the M1 Max, routes-20261103/occl-m1 m2-accum / m2-default).
+# limit_uncapped_games still holds it to 60 when that is on.
+scanline_counter_from_time = false

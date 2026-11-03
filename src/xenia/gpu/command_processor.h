@@ -508,6 +508,10 @@ class CommandProcessor {
     uint32_t cached_delta = 0;
     bool has_cached_delta = false;
     bool ended = false;
+    // Fast modes: END already gave the guest a provisional value, so the guest
+    // may have consumed the report and reissued the record before the host
+    // count arrives.
+    bool provisional_written = false;
   };
 
   // Currently open guest lifetime. Retired reports are tracked separately
@@ -591,8 +595,30 @@ class CommandProcessor {
   void CommitZPDReport(ZPDReport& report, uint32_t delta_value);
   // Checks that the report's slot sequence is still current (not reused).
   bool IsZPDReportCurrent(const ZPDReport& report) const;
+  // True if the guest has already reissued this report's END record (it holds
+  // the pending sentinel again) after taking the provisional value: the slot
+  // now belongs to a newer query the command processor has not reached yet.
+  bool IsZPDReportReissuedByGuest(const ZPDReport& report) const;
   PendingZPDSlot GetPendingZPDSlot(uint32_t slot_base,
                                    uint32_t end_record) const;
+
+  // XE_GPU_ZPD_CENSUS=1 (diagnostic, default off): per occlusion report, what
+  // it was built from (draws counted by a host query, draws issued with no
+  // query open, draws the backend skipped), what END and then the host count
+  // wrote, and how often the count landed after the guest had already
+  // reissued the record. Logged every 5 s. Per record, how often it read
+  // hidden for one or two lifetimes between visible ones; only a hint, since
+  // D3D hands records out from a ring, so successive lifetimes are usually
+  // different objects. The direct pop metric is the backend's per-frame draw
+  // dip count (ZPDDrawDips on Metal). =2 also traces a few records'
+  // lifetimes, =3 logs runs of per-frame draw counts.
+  // kCountOnly: a draw with no target and the depth test off, counted by a
+  // host query; every covered sample passes, so its report cannot be 0 unless
+  // the draw is off screen.
+  enum class ZPDCensusDraw { kMeasured, kUnmeasured, kSkipped, kCountOnly };
+  static bool ZPDCensusEnabled();
+  // Backends call this for each draw while a guest report is logically open.
+  void NoteZPDCensusDraw(ZPDCensusDraw kind, bool depth_tested = false);
 
   void ResetZPDState() {
     zpd_active_segment_ = {};
