@@ -22,6 +22,7 @@
 #include <cstring>
 #include <limits>
 #include <thread>
+#include <vector>
 
 using namespace xe;
 using namespace xe::cpu;
@@ -393,6 +394,110 @@ TEST_CASE("RSQRT_V128_INLINE_MATCHES_HELPER", "[vector]") {
   }
   REQUIRE(mismatches == 0);
 }
+
+DECLARE_bool(a64_skip_fma_input_denorm_flush);
+
+// vmaddfp/vnmsubfp input flushes skipped under NJM (FPCR.FZ flushes inside
+// the FMA) must give the software flush's bits, with NJM on and off.
+TEST_CASE("VMX_FMA_INPUT_FLUSH_SKIP_MATCHES_SOFTWARE", "[vector]") {
+  std::vector<uint32_t> inputs = {
+      0x00000001, 0x007FFFFF, 0x80000001, 0x807FFFFF, 0x00400000,
+      0x00000000, 0x80000000, 0x00800000, 0x80800000, 0x3F800000,
+      0xBF800000, 0x7F800000, 0xFF800000, 0x7FC00000, 0x7F800001,
+      0xFFC00001, 0x7F7FFFFF, 0x0DA24260, 0x8DA24260, 0x1F800000,
+  };
+  uint32_t seed = 0x9E3779B9u;
+  while (inputs.size() < 3 * 4 * 2000) {
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    // Half the lanes denormal (sign kept), the rest any bits.
+    inputs.push_back((seed & 1) ? (seed & 0x807FFFFFu) : seed);
+  }
+  auto run = [&](bool skip, bool njm, bool subtract) {
+    cvars::a64_skip_fma_input_denorm_flush = skip;
+    std::vector<uint32_t> out(inputs.size() / 3);
+    TestFunction test([njm, subtract](HIRBuilder& b) {
+      b.SetNJM(b.LoadConstantInt8(njm ? 1 : 0));
+      auto a = b.VectorDenormFlush(LoadVR(b, 4));
+      auto c = b.VectorDenormFlush(LoadVR(b, 5));
+      auto d = b.VectorDenormFlush(LoadVR(b, 6));
+      StoreVR(b, 3, subtract ? b.MulSub(a, c, d) : b.MulAdd(a, c, d));
+      b.Return();
+    });
+    for (size_t k = 0; k + 12 <= inputs.size(); k += 12) {
+      test.Run(
+          [&](PPCContext* ctx) {
+            ctx->v[4] =
+                vec128i(inputs[k], inputs[k + 1], inputs[k + 2], inputs[k + 3]);
+            ctx->v[5] = vec128i(inputs[k + 4], inputs[k + 5], inputs[k + 6],
+                                inputs[k + 7]);
+            ctx->v[6] = vec128i(inputs[k + 8], inputs[k + 9], inputs[k + 10],
+                                inputs[k + 11]);
+          },
+          [&](PPCContext* ctx) {
+            for (int lane = 0; lane < 4; ++lane) {
+              out[k / 3 + lane] = ctx->v[3].u32[lane];
+            }
+          });
+    }
+    return out;
+  };
+  for (const bool njm : {true, false}) {
+    for (const bool subtract : {false, true}) {
+      const std::vector<uint32_t> software = run(false, njm, subtract);
+      const std::vector<uint32_t> skipped = run(true, njm, subtract);
+      size_t mismatches = 0;
+      for (size_t k = 0; k < software.size(); ++k) {
+        if (software[k] != skipped[k]) {
+          if (!mismatches) {
+            UNSCOPED_INFO("njm " << njm << " sub " << subtract
+                                 << " first mismatch at " << k << std::hex
+                                 << " software " << software[k] << " skipped "
+                                 << skipped[k]);
+          }
+          ++mismatches;
+        }
+      }
+      CHECK(mismatches == 0);
+    }
+  }
+  cvars::a64_skip_fma_input_denorm_flush = true;
+}
+
+// The NJM-off flush sits in tail code: in a function far larger than a tbz's
+// +-32 KiB reach the branch to it must still assemble and run.
+TEST_CASE("VMX_FMA_INPUT_FLUSH_SKIP_LARGE_FUNCTION", "[vector]") {
+  auto run = [](bool skip, bool njm) {
+    cvars::a64_skip_fma_input_denorm_flush = skip;
+    TestFunction test([njm](HIRBuilder& b) {
+      b.SetNJM(b.LoadConstantInt8(njm ? 1 : 0));
+      auto v = LoadVR(b, 4);
+      for (int k = 0; k < 600; ++k) {
+        v = b.MulAdd(b.VectorDenormFlush(v), b.VectorDenormFlush(LoadVR(b, 5)),
+                     b.VectorDenormFlush(LoadVR(b, 6)));
+      }
+      StoreVR(b, 3, v);
+      b.Return();
+    });
+    vec128_t out;
+    test.Run(
+        [](PPCContext* ctx) {
+          ctx->v[4] = vec128i(0x00000001, 0x3F800000, 0x807FFFFF, 0x00400000);
+          ctx->v[5] = vec128i(0x3F800000, 0x00000010, 0x3F800000, 0x3F800000);
+          ctx->v[6] = vec128i(0x00000002, 0x80000003, 0x00000000, 0x00000001);
+        },
+        [&](PPCContext* ctx) { out = ctx->v[3]; });
+    return out;
+  };
+  for (const bool njm : {true, false}) {
+    const vec128_t software = run(false, njm);
+    const vec128_t skipped = run(true, njm);
+    INFO("njm " << njm);
+    CHECK(software == skipped);
+  }
+  cvars::a64_skip_fma_input_denorm_flush = true;
+}
 #endif  // XE_ARCH_ARM64
 
 // ============================================================================
@@ -707,81 +812,78 @@ TEST_CASE("LOAD_VECTOR_RIGHT", "[memory]") {
 // ============================================================================
 constexpr std::array<uint8_t, 16> kStoreVectorSource = {
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
-constexpr uint32_t kPartialStoreOffsets[] = {0, 1, 4, 8, 12, 15};
 
-TEST_CASE("STORE_VECTOR_LEFT", "[memory]") {
-  TestFunction test([](HIRBuilder& b) {
-    b.StoreVectorLeft(LoadGPR(b, 4), LoadVR(b, 5));
-    b.Return();
-  });
+#if XE_ARCH_ARM64
+DECLARE_bool(a64_chunked_partial_vector_stores);
+#endif
 
-  for (const uint32_t offset : kPartialStoreOffsets) {
-    uint32_t guest_addr = test.memory->SystemHeapAlloc(64, 16);
-    REQUIRE(guest_addr != 0);
-    const uint32_t aligned_addr = (guest_addr + 15) & ~15u;
-    auto* host_ptr =
-        reinterpret_cast<uint8_t*>(test.memory->TranslateVirtual(aligned_addr));
+// Every offset, with the 16 bytes on each side of the target block checked
+// untouched. On a64 both the chunked stores and the byte loop run.
+static void TestPartialVectorStore(bool left) {
+#if XE_ARCH_ARM64
+  const bool chunked_modes[] = {true, false};
+#else
+  const bool chunked_modes[] = {true};
+#endif
+  for (const bool chunked : chunked_modes) {
+#if XE_ARCH_ARM64
+    cvars::a64_chunked_partial_vector_stores = chunked;
+#else
+    (void)chunked;
+#endif
+    TestFunction test([left](HIRBuilder& b) {
+      if (left) {
+        b.StoreVectorLeft(LoadGPR(b, 4), LoadVR(b, 5));
+      } else {
+        b.StoreVectorRight(LoadGPR(b, 4), LoadVR(b, 5));
+      }
+      b.Return();
+    });
+    for (uint32_t offset = 0; offset < 16; ++offset) {
+      uint32_t guest_addr = test.memory->SystemHeapAlloc(80, 16);
+      REQUIRE(guest_addr != 0);
+      const uint32_t window_addr = (guest_addr + 15) & ~15u;
+      const uint32_t block_addr = window_addr + 16;
+      auto* window = reinterpret_cast<uint8_t*>(
+          test.memory->TranslateVirtual(window_addr));
 
-    std::array<uint8_t, 16> expected;
-    for (uint32_t i = 0; i < 16; ++i) {
-      host_ptr[i] = static_cast<uint8_t>(0xA0 + i);
-      expected[i] = host_ptr[i];
+      std::array<uint8_t, 48> expected;
+      for (uint32_t i = 0; i < 48; ++i) {
+        window[i] = static_cast<uint8_t>(0xA0 + i);
+        expected[i] = window[i];
+      }
+      if (left) {
+        for (uint32_t i = offset; i < 16; ++i) {
+          expected[16 + i] = kStoreVectorSource[i - offset];
+        }
+      } else {
+        for (uint32_t i = 0; i < offset; ++i) {
+          expected[16 + i] = kStoreVectorSource[16 - offset + i];
+        }
+      }
+
+      test.Run(
+          [&](PPCContext* ctx) {
+            ctx->r[4] = block_addr + offset;
+            ctx->v[5] =
+                vec128b(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+          },
+          [&](PPCContext* ctx) {
+            INFO("offset " << offset << " chunked " << chunked);
+            REQUIRE(std::memcmp(window, expected.data(), expected.size()) == 0);
+          });
+
+      test.memory->SystemHeapFree(guest_addr);
     }
-
-    for (uint32_t i = offset; i < 16; ++i) {
-      expected[i] = kStoreVectorSource[(i - offset)];
-    }
-
-    test.Run(
-        [&](PPCContext* ctx) {
-          ctx->r[4] = aligned_addr + offset;
-          ctx->v[5] =
-              vec128b(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        },
-        [&](PPCContext* ctx) {
-          REQUIRE(std::memcmp(host_ptr, expected.data(), expected.size()) == 0);
-        });
-
-    test.memory->SystemHeapFree(guest_addr);
   }
+#if XE_ARCH_ARM64
+  cvars::a64_chunked_partial_vector_stores = true;
+#endif
 }
 
-TEST_CASE("STORE_VECTOR_RIGHT", "[memory]") {
-  TestFunction test([](HIRBuilder& b) {
-    b.StoreVectorRight(LoadGPR(b, 4), LoadVR(b, 5));
-    b.Return();
-  });
+TEST_CASE("STORE_VECTOR_LEFT", "[memory]") { TestPartialVectorStore(true); }
 
-  for (const uint32_t offset : kPartialStoreOffsets) {
-    uint32_t guest_addr = test.memory->SystemHeapAlloc(64, 16);
-    REQUIRE(guest_addr != 0);
-    const uint32_t aligned_addr = (guest_addr + 15) & ~15u;
-    auto* host_ptr =
-        reinterpret_cast<uint8_t*>(test.memory->TranslateVirtual(aligned_addr));
-
-    std::array<uint8_t, 16> expected;
-    for (uint32_t i = 0; i < 16; ++i) {
-      host_ptr[i] = static_cast<uint8_t>(0xA0 + i);
-      expected[i] = host_ptr[i];
-    }
-
-    for (uint32_t i = 0; i < offset; ++i) {
-      expected[i] = kStoreVectorSource[(16 - offset + i)];
-    }
-
-    test.Run(
-        [&](PPCContext* ctx) {
-          ctx->r[4] = aligned_addr + offset;
-          ctx->v[5] =
-              vec128b(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        },
-        [&](PPCContext* ctx) {
-          REQUIRE(std::memcmp(host_ptr, expected.data(), expected.size()) == 0);
-        });
-
-    test.memory->SystemHeapFree(guest_addr);
-  }
-}
+TEST_CASE("STORE_VECTOR_RIGHT", "[memory]") { TestPartialVectorStore(false); }
 
 TEST_CASE("STORE_VECTOR_LEFT_MEMCPY_HEAD", "[memory]") {
   TestFunction test([](HIRBuilder& b) {

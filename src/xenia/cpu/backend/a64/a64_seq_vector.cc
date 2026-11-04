@@ -11,12 +11,27 @@
 
 #include <cstring>
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/math.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
 #include "xenia/cpu/backend/a64/a64_seq_util.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/hir/instr.h"
+
+DEFINE_bool(a64_chunked_partial_vector_stores, true,
+            "Emit stvlx/stvrx as at most four power-of-two stores (8/4/2/1 "
+            "bytes, or one 16-byte store for an aligned stvlx) of exactly the "
+            "selected bytes instead of a byte-at-a-time loop. Off = the byte "
+            "loop.",
+            "a64");
+DEFINE_bool(
+    a64_skip_fma_input_denorm_flush, true,
+    "Skip the software denormal flush of vmaddfp/vnmsubfp inputs "
+    "while VSCR[NJM] is set, where FPCR.FZ already flushes them inside "
+    "the fused multiply-add (cores whose FZ flushes inputs only). Off = "
+    "always flush in software.",
+    "a64");
 
 namespace xe {
 namespace cpu {
@@ -861,9 +876,57 @@ EMITTER_OPCODE_TABLE(OPCODE_VECTOR_AVERAGE, VECTOR_AVERAGE);
 struct VECTOR_DENORMFLUSH
     : Sequence<VECTOR_DENORMFLUSH,
                I<OPCODE_VECTOR_DENORMFLUSH, V128Op, V128Op>> {
+  // True when every use of the flushed value is a vector MUL_ADD / MUL_SUB.
+  // Those run under the VMX FPCR, whose FZ bit is VSCR[NJM], and with
+  // kA64FZFlushesInputs they rely on FZ to flush their inputs.
+  static bool OnlyFeedsVmxFma(const hir::Instr* instr) {
+    const hir::Value::Use* use = instr->dest->use_head;
+    if (!use) {
+      return false;
+    }
+    for (; use; use = use->next) {
+      const hir::Instr* user = use->instr;
+      if ((user->opcode != &hir::OPCODE_MUL_ADD_info &&
+           user->opcode != &hir::OPCODE_MUL_SUB_info) ||
+          user->dest->type != hir::VEC128_TYPE) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    int s = SrcVReg(e, i.src1, 0);
-    int d = i.dest.reg().getIdx();
+    if (cvars::a64_skip_fma_input_denorm_flush &&
+        e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs) &&
+        OnlyFeedsVmxFma(i.instr)) {
+      // vmaddfp flushes denormal inputs whatever NJM says. With NJM set the
+      // FMA's FZ does the same flush (to the same signed zero), so only an
+      // NJM-off guest needs the software flush, out of line. NBA 2K11's
+      // animation thread is a chain of these FMAs: 27 -> 57 fps on the M4
+      // mini (jit-profile-20261103).
+      int s = SrcVReg(e, i.src1, 0);
+      int d = i.dest.reg().getIdx();
+      auto& resume = e.NewCachedLabel();
+      auto& flush = e.AddToTail(
+          [s, d, &resume](A64Emitter& e, Xbyak_aarch64::Label& lbl) {
+            EmitFlush(e, s, d);
+            e.b(resume);
+          });
+      e.ldr(e.w0, ptr(e.GetBackendCtxReg(), static_cast<uint32_t>(offsetof(
+                                                A64BackendContext, flags))));
+      // tbz reaches only +-32 KiB; BranchIf reaches the tail of any function.
+      e.tst(e.w0, 1u << kA64BackendNJMOn);
+      e.BranchIf(Xbyak_aarch64::EQ, flush);
+      if (d != s) {
+        e.mov(VReg(d).b16, VReg(s).b16);
+      }
+      e.L(resume);
+      return;
+    }
+    EmitFlush(e, SrcVReg(e, i.src1, 0), i.dest.reg().getIdx());
+  }
+
+  static void EmitFlush(A64Emitter& e, int s, int d) {
     // Extract exponent bits; if exponent == 0 and mantissa != 0, it's denormal.
     // Replace with signed zero (keep sign bit).
     // Mask: exponent = bits 30:23 of each float.
@@ -1918,6 +1981,32 @@ struct LVR_V128 : Sequence<LVR_V128, I<OPCODE_LVR, V128Op, I64Op>> {
 };
 EMITTER_OPCODE_TABLE(OPCODE_LVR, LVR_V128);
 
+// Copy w2 (0..15) bytes from x1 to x0 with at most four stores, largest
+// first, each covering only bytes inside the range: no byte outside it is
+// read back or rewritten, so a concurrent guest write to a neighbouring byte
+// is never lost. Both ranges lie inside one 16-byte block, so a store never
+// crosses a page and write-watch faults hit the same pages as the byte loop.
+// Advances x0 and x1; clobbers w3.
+static void EmitPartialVectorStoreChunks(A64Emitter& e) {
+  Xbyak_aarch64::Label skip8, skip4, skip2, done;
+  e.tbz(e.w2, 3, skip8);
+  e.ldr(e.x3, Xbyak_aarch64::post_ptr(e.x1, 8));
+  e.str(e.x3, Xbyak_aarch64::post_ptr(e.x0, 8));
+  e.L(skip8);
+  e.tbz(e.w2, 2, skip4);
+  e.ldr(e.w3, Xbyak_aarch64::post_ptr(e.x1, 4));
+  e.str(e.w3, Xbyak_aarch64::post_ptr(e.x0, 4));
+  e.L(skip4);
+  e.tbz(e.w2, 1, skip2);
+  e.ldrh(e.w3, Xbyak_aarch64::post_ptr(e.x1, 2));
+  e.strh(e.w3, Xbyak_aarch64::post_ptr(e.x0, 2));
+  e.L(skip2);
+  e.tbz(e.w2, 0, done);
+  e.ldrb(e.w3, ptr(e.x1));
+  e.strb(e.w3, ptr(e.x0));
+  e.L(done);
+}
+
 // ============================================================================
 // OPCODE_STVL (Store Vector Left)
 // ============================================================================
@@ -1926,6 +2015,10 @@ struct STVL_V128 : Sequence<STVL_V128, I<OPCODE_STVL, VoidOp, I64Op, V128Op>> {
     // Store bytes offset..15 from the byte-swapped source. Don't implement
     // this as a full 16-byte read-modify-write: another guest thread may write
     // the untouched bytes between the host load and store.
+    if (cvars::a64_chunked_partial_vector_stores) {
+      EmitChunked(e, i);
+      return;
+    }
     int s = SrcVReg(e, i.src2, 0);
 
     // Stash rev32(src) so its bytes can be addressed individually.
@@ -1953,6 +2046,32 @@ struct STVL_V128 : Sequence<STVL_V128, I<OPCODE_STVL, VoidOp, I64Op, V128Op>> {
     e.b(loop);
     e.L(done);
   }
+
+  // The byte loop (variable trip count, exit mispredict) was a fifth of NBA
+  // 2K11's animation thread samples; chunked, 17 -> 27 fps on the M4 mini
+  // (jit-profile-20261103). An aligned address stores all 16 bytes at once;
+  // otherwise the 16 - offset bytes go out in power-of-two pieces from a
+  // stash of the swapped source.
+  static void EmitChunked(A64Emitter& e, const EmitArgType& i) {
+    int s = SrcVReg(e, i.src2, 0);
+    e.rev32(VReg(0).b16, VReg(s).b16);
+    // x0 = host destination (unaligned), w17 = offset within its block.
+    auto addr = ComputeMemoryAddress(e, i.src1);
+    e.add(e.x0, e.GetMembaseReg(), addr);
+    e.and_(e.w17, e.w0, 0xF);
+    Xbyak_aarch64::Label partial, done;
+    e.cbnz(e.w17, partial);
+    e.str(QReg(0), ptr(e.x0));
+    e.b(done);
+    e.L(partial);
+    e.str(QReg(0),
+          ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
+    e.add(e.x1, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH));
+    e.mov(e.w2, 16);
+    e.sub(e.w2, e.w2, e.w17);
+    EmitPartialVectorStoreChunks(e);
+    e.L(done);
+  }
 };
 EMITTER_OPCODE_TABLE(OPCODE_STVL, STVL_V128);
 
@@ -1963,6 +2082,10 @@ struct STVR_V128 : Sequence<STVR_V128, I<OPCODE_STVR, VoidOp, I64Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // Store bytes 0..offset-1 from the byte-swapped source tail, touching only
     // the selected bytes. offset == 0 stores nothing.
+    if (cvars::a64_chunked_partial_vector_stores) {
+      EmitChunked(e, i);
+      return;
+    }
     int s = SrcVReg(e, i.src2, 0);
 
     e.rev32(VReg(0).b16, VReg(s).b16);
@@ -1990,6 +2113,28 @@ struct STVR_V128 : Sequence<STVR_V128, I<OPCODE_STVR, VoidOp, I64Op, V128Op>> {
     e.strb(e.w3, ptr(e.x16, e.x1));
     e.add(e.w1, e.w1, 1);
     e.b(loop);
+    e.L(done);
+  }
+
+  // The first offset bytes of the block take the last offset bytes of the
+  // swapped source, in power-of-two pieces (see STVL_V128::EmitChunked).
+  static void EmitChunked(A64Emitter& e, const EmitArgType& i) {
+    int s = SrcVReg(e, i.src2, 0);
+    e.rev32(VReg(0).b16, VReg(s).b16);
+    // w17 = offset; x0 = aligned destination base.
+    auto addr = ComputeMemoryAddress(e, i.src1);
+    e.add(e.x0, e.GetMembaseReg(), addr);
+    e.and_(e.w17, e.w0, 0xF);
+    Xbyak_aarch64::Label done;
+    e.cbz(e.w17, done);
+    e.and_(e.x0, e.x0, ~0xFull);
+    e.str(QReg(0),
+          ptr(e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH)));
+    // x1 = stash + 16 - offset.
+    e.add(e.x1, e.sp, static_cast<uint32_t>(StackLayout::GUEST_SCRATCH) + 16);
+    e.sub(e.x1, e.x1, e.x17);
+    e.mov(e.w2, e.w17);
+    EmitPartialVectorStoreChunks(e);
     e.L(done);
   }
 };
