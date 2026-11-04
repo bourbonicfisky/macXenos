@@ -271,6 +271,8 @@ MetalRenderTargetCache::MetalRenderTarget::~MetalRenderTarget() {
     texture_ = nullptr;
   }
   if (msaa_texture_) {
+    // A later texture may reuse the pointer: never let it hit this cache.
+    cache_.InvalidateMsaaStencilCache(msaa_texture_, kMsaaStencilNew);
     cache_.deferred_texture_releases_.emplace_back(
         MetalCommandProcessor::S7TagsOff()
             ? 0
@@ -891,6 +893,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
       auto it = msaa_stencil_caches_.find(replaced);
       if (it != msaa_stencil_caches_.end()) {
         it->second.valid = false;
+        it->second.why = kMsaaStencilReplace;
       }
     }
     if (old_texture) {
@@ -954,14 +957,11 @@ bool MetalRenderTargetCache::Update(bool is_rasterization_done,
   if (!msaa_stencil_caches_.empty() && accumulated[0]) {
     // The draw may write the target's stencil (or open its pass with a
     // clear), so its cached stencil is stale -- after the transfers, which
-    // may have packed this target and rebuilt the cache.
+    // may have packed this target and rebuilt the cache. (Invalidating only
+    // after stencil-writing draws saves ~nothing: Gears 3, RDR and Judgment
+    // rebuild after those.)
     auto* depth = static_cast<MetalRenderTarget*>(accumulated[0]);
-    if (depth->msaa_texture()) {
-      auto it = msaa_stencil_caches_.find(depth->msaa_texture());
-      if (it != msaa_stencil_caches_.end()) {
-        it->second.valid = false;
-      }
-    }
+    InvalidateMsaaStencilCache(depth->msaa_texture(), kMsaaStencilDraw);
   }
   // Track the presentable (BGRA8) color target for the pre-resolve fallback.
   for (uint32_t i = 1; i <= xenos::kMaxColorRenderTargets; ++i) {
@@ -1371,6 +1371,13 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
       }
     }
     if (defer_clear) {
+      if (slot == 0) {
+        // The pass opens on the clear (or the draw overwrites) instead of a
+        // materialize, which would have invalidated the cached stencil.
+        InvalidateMsaaStencilCache(
+            static_cast<MetalRenderTarget*>(render_target)->msaa_texture(),
+            kMsaaStencilClearLoad);
+      }
       PendingClearLoad& pending = pending_clear_load_[slot];
       pending.valid = true;
       pending.attachment = attachment;
@@ -2554,9 +2561,25 @@ void MetalRenderTargetCache::RecordTransition(TransferKind kind,
 
 // Writers of depth targets other than draws and materialization (transfers,
 // resolve clears): every cached 2x/4x stencil may be stale after them.
-void MetalRenderTargetCache::InvalidateMsaaStencilCaches() {
+void MetalRenderTargetCache::InvalidateMsaaStencilCache(
+    void* msaa_texture, MsaaStencilInvalidation why) {
+  if (!msaa_texture) {
+    return;
+  }
+  auto it = msaa_stencil_caches_.find(msaa_texture);
+  if (it != msaa_stencil_caches_.end() && it->second.valid) {
+    it->second.valid = false;
+    it->second.why = why;
+  }
+}
+
+void MetalRenderTargetCache::InvalidateMsaaStencilCaches(
+    MsaaStencilInvalidation why) {
   for (auto& pair : msaa_stencil_caches_) {
-    pair.second.valid = false;
+    if (pair.second.valid) {
+      pair.second.valid = false;
+      pair.second.why = why;
+    }
   }
 }
 
@@ -3351,10 +3374,8 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   ++msaa_stencil_census_[4];
   if (render_target) {
     auto* materialized = static_cast<MetalRenderTarget*>(render_target);
-    auto it = msaa_stencil_caches_.find(materialized->msaa_texture());
-    if (it != msaa_stencil_caches_.end()) {
-      it->second.valid = false;
-    }
+    InvalidateMsaaStencilCache(materialized->msaa_texture(),
+                               kMsaaStencilMaterialize);
   }
   if (!sample_edram_enabled_ || !canonical_edram_ || !command_buffer ||
       !render_target || !render_target->key().is_depth ||
@@ -3598,6 +3619,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
       cache.buffer = (__bridge_retained void*)created;
       cache.bytes = cache_bytes;
       cache.valid = false;
+      cache.why = kMsaaStencilNew;
       if (!cache.fence) {
         cache.fence = (__bridge_retained void*)[texture.device newFence];
       }
@@ -3613,6 +3635,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
     }();
     if (s_cache_off) {
       cache.valid = false;
+      cache.why = kMsaaStencilOff;
     }
     uint32_t rows_start = row_start;
     uint32_t rows_end = uint32_t(work_height);
@@ -3624,6 +3647,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
     if (!cache.valid || rows_start < cache.valid_start ||
         rows_end > cache.valid_end) {
       ++msaa_stencil_cache_rebuilds_;
+      ++msaa_stencil_rebuild_why_[cache.valid ? kMsaaStencilRows : cache.why];
       // Earlier packs read the cache; Metal did not order a later write
       // after such reads on the RX 6900 XT, so the clear waits on the fence
       // they update.
@@ -3735,9 +3759,20 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
   }
   [encoder endEncoding];
   if (extract && (++msaa_stencil_cache_packs_ & 0xFFFFu) == 0) {
-    XELOGI("MetalMsaaStencilCache: {} packs, {} rebuilds, {} hits",
+    static const char* const kWhy[kMsaaStencilInvalidationCount] = {
+        "new", "draw", "rows", "materialize", "replace",
+        "clear-load", "shadow-cross", "depth-transfer", "cross-msaa",
+        "color-to-depth", "resolve-clear", "off"};
+    std::string why;
+    for (uint32_t i = 0; i < kMsaaStencilInvalidationCount; ++i) {
+      if (msaa_stencil_rebuild_why_[i]) {
+        why += fmt::format(" {}={}", kWhy[i], msaa_stencil_rebuild_why_[i]);
+      }
+    }
+    XELOGI("MetalMsaaStencilCache: {} packs, {} rebuilds, {} hits; rebuilt "
+           "after:{}",
            msaa_stencil_cache_packs_, msaa_stencil_cache_rebuilds_,
-           msaa_stencil_cache_hits_);
+           msaa_stencil_cache_hits_, why);
   }
   if (extract && msaa_stencil_verify_buffer_ &&
       (++msaa_stencil_verify_packs_ & 1023u) == 0) {
@@ -3756,7 +3791,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
 void MetalRenderTargetCache::ShadowCrossMsaaDepth(const void* command_buffer,
                                                   RenderTarget* source_rt,
                                                   const Transfer& transfer) {
-  InvalidateMsaaStencilCaches();
+  InvalidateMsaaStencilCaches(kMsaaStencilShadowCross);
   // Cap the sampled transitions: the shadow adds real GPU work per transition,
   // and a sample is enough to prove the substrate on live data.
   if (shadow_count_ >= 128u) {
@@ -3934,7 +3969,7 @@ void MetalRenderTargetCache::CanonicalDepthTransfer(const void* command_buffer,
                                                     RenderTarget* source_rt,
                                                     RenderTarget* dest_rt,
                                                     const Transfer& transfer) {
-  InvalidateMsaaStencilCaches();
+  InvalidateMsaaStencilCaches(kMsaaStencilDepthTransfer);
   // Option 1 depth authority: pack(source depth+stencil) -> canonical EDRAM,
   // then materialize(dest) <- canonical EDRAM, both guarded to the transfer's
   // tiles. Content lives in the durable canonical buffer, so it survives the RT
@@ -4051,7 +4086,7 @@ void MetalRenderTargetCache::CanonicalDepthTransfer(const void* command_buffer,
 void MetalRenderTargetCache::PerformCrossMsaaTransfer(
     const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
     const Transfer& transfer) {
-  InvalidateMsaaStencilCaches();
+  InvalidateMsaaStencilCaches(kMsaaStencilCrossMsaa);
   auto* source = static_cast<MetalRenderTarget*>(source_rt);
   auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
   // The half-height double-stack forensics: which draw triggers a cross-MSAA
@@ -4484,7 +4519,7 @@ void MetalRenderTargetCache::EnsureStencilBitStates() {
 void MetalRenderTargetCache::PerformColorToDepthTransfer(
     const void* command_buffer, RenderTarget* source_rt, RenderTarget* dest_rt,
     const Transfer& transfer) {
-  InvalidateMsaaStencilCaches();
+  InvalidateMsaaStencilCaches(kMsaaStencilColorToDepth);
   auto* source = static_cast<MetalRenderTarget*>(source_rt);
   auto* dest = static_cast<MetalRenderTarget*>(dest_rt);
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
@@ -6247,6 +6282,11 @@ bool MetalRenderTargetCache::TakePendingDepthClearLoad(double* clear_depth,
   }
   *clear_depth = pending.depth;
   *clear_stencil = pending.stencil;
+  // The pass opens on this clear: a pack since the deferral may have cached
+  // the stencil it replaces.
+  InvalidateMsaaStencilCache(
+      static_cast<MetalRenderTarget*>(used[0])->msaa_texture(),
+      kMsaaStencilClearLoad);
   for (const auto& operation : pending.operations) {
     pack_census_.clear_load_tiles += operation.end_tiles - operation.start_tiles;
   }
@@ -6493,7 +6533,7 @@ bool MetalRenderTargetCache::PerformAttachmentColorResolveClear(
 void MetalRenderTargetCache::PerformResolveClear(
     const void* command_buffer, uint32_t span_base, uint32_t row_length_used,
     uint32_t rows, uint32_t span_pitch, bool is_depth, uint32_t clear_value) {
-  InvalidateMsaaStencilCaches();
+  InvalidateMsaaStencilCaches(kMsaaStencilResolveClear);
   // A zero-sized resolve still carries the clear bits (Forza Horizon issues
   // several 0x0 copies a frame). It clears nothing, so it must not take the
   // authority reset below: forgetting every tile's owner there made the next

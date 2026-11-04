@@ -842,9 +842,30 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     // Valid texture rows [valid_start, valid_end).
     uint32_t valid_start = 0, valid_end = 0;
     bool valid = false;
+    // MsaaStencilInvalidation: what last invalidated it (rebuild census).
+    uint8_t why = 0;
   };
   std::unordered_map<void*, MsaaStencilCache> msaa_stencil_caches_;
-  void InvalidateMsaaStencilCaches();
+  // Rebuild census reasons (the MetalMsaaStencilCache log line).
+  enum MsaaStencilInvalidation : uint8_t {
+    kMsaaStencilNew,
+    kMsaaStencilDraw,
+    kMsaaStencilRows,
+    kMsaaStencilMaterialize,
+    kMsaaStencilReplace,
+    kMsaaStencilClearLoad,
+    kMsaaStencilShadowCross,
+    kMsaaStencilDepthTransfer,
+    kMsaaStencilCrossMsaa,
+    kMsaaStencilColorToDepth,
+    kMsaaStencilResolveClear,
+    kMsaaStencilOff,
+    kMsaaStencilInvalidationCount,
+  };
+  uint64_t msaa_stencil_rebuild_why_[kMsaaStencilInvalidationCount] = {};
+  void InvalidateMsaaStencilCaches(MsaaStencilInvalidation why);
+  void InvalidateMsaaStencilCache(void* msaa_texture,
+                                  MsaaStencilInvalidation why);
   uint64_t msaa_stencil_cache_packs_ = 0;
   uint64_t msaa_stencil_cache_rebuilds_ = 0;
   uint64_t msaa_stencil_cache_hits_ = 0;
