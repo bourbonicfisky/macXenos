@@ -17,6 +17,8 @@
 #if !XE_PLATFORM_WIN32
 #include <pthread.h>
 #include <signal.h>
+#include <cstdlib>
+#include <cstring>
 #endif
 
 #include "xenia/base/byte_stream.h"
@@ -29,6 +31,7 @@
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
+#include "xenia/kernel/util/guest_suspend.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 
 DEFINE_bool(ignore_thread_priorities, false,
@@ -247,6 +250,30 @@ void CreateXThreadNativeExitReleaseKey() {
 
 }  // namespace
 #endif
+
+#if !XE_PLATFORM_WIN32
+// XE_THREAD_SUSPEND_LEGACY=1 restores the pre-2026-11-03 POSIX suspend rule
+// (host held on every guest suspend, released only at a guest count of 0).
+static bool LegacyGuestSuspendRule() {
+  static const bool legacy = [] {
+    const char* value = std::getenv("XE_THREAD_SUSPEND_LEGACY");
+    return value && *value && std::strcmp(value, "0") != 0;
+  }();
+  return legacy;
+}
+#endif
+
+// The guest thread (handle and return address) making a lifecycle call.
+static std::string LifecycleCaller() {
+  if (!XThread::IsInThread()) {
+    return "host";
+  }
+  XThread* caller = XThread::GetCurrentThread();
+  const auto* state = caller ? caller->thread_state() : nullptr;
+  return fmt::format(
+      "{:08X} lr={:08X}", caller ? caller->handle() : 0,
+      state ? uint32_t(state->context()->lr) : 0);
+}
 
 bool XThread::IsInThread() { return Thread::IsInThread(); }
 
@@ -653,6 +680,15 @@ X_STATUS XThread::Create() {
   // Notify processor of our creation.
   emulator()->processor()->OnThreadCreated(handle(), thread_state_, this);
 
+  if (xe::threading::ThreadLifecycleLogEnabled()) {
+    XELOGI(
+        "ThreadLifecycle create handle={:08X} tid={:X} host={:X} flags={:08X} "
+        "start={:08X} guest_suspend={} by {}",
+        handle(), thread_id_, thread_->system_id(),
+        creation_params_.creation_flags, creation_params_.start_address,
+        uint32_t(guest_object<X_KTHREAD>()->suspend_count), LifecycleCaller());
+  }
+
   if ((creation_params_.creation_flags & X_CREATE_SUSPENDED) == 0) {
     // Start the thread now that we're all setup.
     thread_->Resume();
@@ -752,6 +788,7 @@ X_STATUS XThread::Terminate(int exit_code) {
 }
 
 void XThread::Execute() {
+  execute_began_ = true;
   XELOGKERNEL("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X})",
               thread_id_, handle(), thread_name_snapshot(), thread_->system_id());
   // Let the kernel know we are starting.
@@ -1120,6 +1157,7 @@ uint32_t XThread::start_address() {
 X_STATUS XThread::Resume(uint32_t* out_suspend_count) {
   auto guest_thread = guest_object<X_KTHREAD>();
   uint32_t unused_host_suspend_count = 0;
+  resume_calls_.fetch_add(1, std::memory_order_relaxed);
 
 #if XE_PLATFORM_WIN32
   uint8_t previous_suspend_count =
@@ -1135,24 +1173,47 @@ X_STATUS XThread::Resume(uint32_t* out_suspend_count) {
     return X_STATUS_UNSUCCESSFUL;
   }
 #else
-  // Use mutex to protect suspend_count access and coordinate with SelfSuspend.
-  bool should_resume_host = false;
-  {
+  uint32_t previous = 0;
+  if (!LegacyGuestSuspendRule()) {
+    // Release the host thread once per resume of a non-zero guest count, the
+    // same number of times GuestSuspendHost held it (see guest_suspend.h).
+    // Not parked by a suspend signal while holding suspend_mutex_ (Resume
+    // needs it).
+    xe::threading::SuspendDeferralScope suspend_deferral;
     std::lock_guard<std::mutex> lock(suspend_mutex_);
-    uint8_t previous = guest_thread->suspend_count;
-    if (previous > 0) {
-      guest_thread->suspend_count--;
-    }
-    if (out_suspend_count) {
-      *out_suspend_count = previous;
-    }
-    should_resume_host = (guest_thread->suspend_count == 0);
+    previous =
+        util::GuestResumeHost(&guest_thread->suspend_count, thread_.get());
     suspend_cv_.notify_all();
-  }
+  } else {
+    // Use mutex to protect suspend_count access and coordinate with
+    // SelfSuspend.
+    bool should_resume_host = false;
+    {
+      // Not parked by a suspend signal while holding suspend_mutex_ (Resume
+      // needs it).
+      xe::threading::SuspendDeferralScope suspend_deferral;
+      std::lock_guard<std::mutex> lock(suspend_mutex_);
+      previous = guest_thread->suspend_count;
+      if (previous > 0) {
+        guest_thread->suspend_count--;
+      }
+      should_resume_host = (guest_thread->suspend_count == 0);
+      suspend_cv_.notify_all();
+    }
 
-  // Try to resume host thread if fully resumed (for non-self-suspended case).
-  if (should_resume_host) {
-    thread_->Resume(&unused_host_suspend_count);
+    // Try to resume host thread if fully resumed (for non-self-suspended
+    // case).
+    if (should_resume_host) {
+      thread_->Resume(&unused_host_suspend_count);
+    }
+  }
+  if (out_suspend_count) {
+    *out_suspend_count = previous;
+  }
+  if (xe::threading::ThreadLifecycleLogEnabled()) {
+    XELOGI("ThreadLifecycle resume handle={:08X} guest_suspend {}->{} by {} {}",
+           handle(), previous, uint32_t(guest_thread->suspend_count),
+           LifecycleCaller(), thread_->DebugState());
   }
   return X_STATUS_SUCCESS;
 #endif
@@ -1163,12 +1224,58 @@ X_STATUS XThread::Suspend(uint32_t* out_suspend_count) {
   // mode apc that does the actual suspension
 
   X_KTHREAD* guest_thread = guest_object<X_KTHREAD>();
+  suspend_calls_.fetch_add(1, std::memory_order_relaxed);
+
+#if !XE_PLATFORM_WIN32
+  if (!LegacyGuestSuspendRule()) {
+    if (XThread::IsInThread(this)) {
+      // Parks on the guest count alone; Resume wakes it at 0.
+      if (xe::threading::ThreadLifecycleLogEnabled()) {
+        XELOGI("ThreadLifecycle self-suspend handle={:08X} via Suspend by {}",
+               handle(), LifecycleCaller());
+      }
+      uint32_t previous = SelfSuspend();
+      if (out_suspend_count) {
+        *out_suspend_count = previous;
+      }
+      return X_STATUS_SUCCESS;
+    }
+    uint32_t previous = 0;
+    {
+      // Under the lock so a concurrent Resume sees the guest and host counts
+      // change together.
+      // Not parked by a suspend signal while holding suspend_mutex_ (Resume
+      // needs it).
+      xe::threading::SuspendDeferralScope suspend_deferral;
+      std::lock_guard<std::mutex> lock(suspend_mutex_);
+      previous =
+          util::GuestSuspendHost(&guest_thread->suspend_count, thread_.get());
+    }
+    if (out_suspend_count) {
+      *out_suspend_count = previous;
+    }
+    if (xe::threading::ThreadLifecycleLogEnabled()) {
+      XELOGI(
+          "ThreadLifecycle suspend handle={:08X} guest_suspend {}->{} by {} {}",
+          handle(), previous, uint32_t(guest_thread->suspend_count),
+          LifecycleCaller(), thread_->DebugState());
+    }
+    return X_STATUS_SUCCESS;
+  }
+#endif
 
   uint8_t previous_suspend_count =
       reinterpret_cast<std::atomic_uint8_t*>(&guest_thread->suspend_count)
           ->fetch_add(1);
   if (out_suspend_count) {
     *out_suspend_count = previous_suspend_count;
+  }
+  if (xe::threading::ThreadLifecycleLogEnabled()) {
+    XELOGI(
+        "ThreadLifecycle suspend(legacy) handle={:08X} guest_suspend {}->{} "
+        "by {}",
+        handle(), uint32_t(previous_suspend_count),
+        uint32_t(guest_thread->suspend_count), LifecycleCaller());
   }
   // If we are suspending ourselves, we can't hold the lock.
   uint32_t unused_host_suspend_count = 0;
@@ -1189,14 +1296,35 @@ X_STATUS XThread::Suspend(uint32_t* out_suspend_count) {
 #if !XE_PLATFORM_WIN32
 uint32_t XThread::SelfSuspend() {
   auto guest_thread = guest_object<X_KTHREAD>();
+  // Not parked by a suspend signal while holding suspend_mutex_ (Resume
+  // needs it).
+  xe::threading::SuspendDeferralScope suspend_deferral;
   std::unique_lock<std::mutex> lock(suspend_mutex_);
   uint32_t previous = guest_thread->suspend_count;
   guest_thread->suspend_count++;
+  if (xe::threading::ThreadLifecycleLogEnabled()) {
+    XELOGI("ThreadLifecycle self-suspend handle={:08X} guest_suspend {}->{}",
+           handle(), previous, uint32_t(guest_thread->suspend_count));
+  }
   suspend_cv_.wait(
       lock, [guest_thread]() { return guest_thread->suspend_count == 0; });
   return previous;
 }
 #endif  // !XE_PLATFORM_WIN32
+
+std::string XThread::DebugSuspendState() {
+  const X_KTHREAD* guest_thread = guest_object<X_KTHREAD>();
+  return fmt::format(
+      "gsusp={} flags={:08X}{} exec={} susp_calls={} res_calls={} {}",
+      guest_thread ? uint32_t(guest_thread->suspend_count) : 0xFFFFFFFFu,
+      creation_params_.creation_flags,
+      (creation_params_.creation_flags & X_CREATE_SUSPENDED) ? "(suspended)"
+                                                              : "",
+      execute_began_.load(std::memory_order_relaxed) ? 1 : 0,
+      suspend_calls_.load(std::memory_order_relaxed),
+      resume_calls_.load(std::memory_order_relaxed),
+      thread_ ? thread_->DebugState() : std::string("host[none]"));
+}
 
 X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
                         uint64_t interval) {

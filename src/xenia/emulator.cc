@@ -1445,6 +1445,10 @@ void Emulator::LogGuestThreadStates(std::string_view reason) {
                  *memory()->TranslateVirtualBE<uint32_t>(array + i * 4));
       }
     }
+    // Why a thread is not running: guest suspend count and creation flags,
+    // whether guest code ever began, and the host thread's suspend state
+    // (start_wait=1 = still parked before its first guest instruction).
+    msg.append(fmt::format("\n    sched {}", thread->DebugSuspendState()));
     // Spinning threads keep their loop state in callee-saved registers and
     // the frame; r31 is usually the object being spun on.
     msg.append(fmt::format("\n    r28={:08X} r29={:08X} r30={:08X} r31={:08X}",

@@ -428,6 +428,9 @@ class XThread : public XObject, public cpu::Thread {
   bool is_guest_thread() const { return guest_thread_; }
   bool main_thread() const { return main_thread_; }
   bool is_running() const { return running_; }
+  // Hang diagnostics: guest suspend count, creation flags, whether guest code
+  // ever began, suspend/resume call counts and the host thread state.
+  std::string DebugSuspendState();
 
   uint32_t thread_id() const { return thread_id_; }
   uint32_t last_error();
@@ -583,6 +586,10 @@ class XThread : public XObject, public cpu::Thread {
   bool guest_thread_ = false;
   bool main_thread_ = false;  // Entry-point thread
   bool running_ = false;
+  // Hang diagnostics (DebugSuspendState).
+  std::atomic<bool> execute_began_{false};
+  std::atomic<uint32_t> suspend_calls_{0};
+  std::atomic<uint32_t> resume_calls_{0};
 
   int32_t priority_ = 0;       // current effective priority (may be decayed)
   int32_t base_priority_ = 0;  // priority floor — decay never goes below this

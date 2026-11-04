@@ -495,9 +495,33 @@ class Thread : public WaitHandle {
   // threads that had been waiting for the thread to terminate.
   virtual void Terminate(int exit_code) = 0;
 
+  // Hang diagnostics: the host scheduler state behind this thread (suspend
+  // count, whether it is still parked before its start routine). Empty where
+  // the platform does not report it. Never blocks.
+  virtual std::string DebugState() const { return std::string(); }
+
  protected:
   std::string name_;
 };
+
+// While one is alive on a thread, a suspend request for that thread is held
+// and served when the outermost scope ends. On POSIX a suspended thread parks
+// inside the suspend signal handler wherever it was, so it must not park
+// holding a lock its resumer needs (a thread renaming itself under its own
+// state lock blocked every Resume() of it: NBA Street Homecourt's loader
+// thread never started). XE_THREAD_SUSPEND_DEFER=0 parks at once again.
+// No-op on Windows.
+class SuspendDeferralScope {
+ public:
+  SuspendDeferralScope();
+  ~SuspendDeferralScope();
+  SuspendDeferralScope(const SuspendDeferralScope&) = delete;
+  SuspendDeferralScope& operator=(const SuspendDeferralScope&) = delete;
+};
+
+// True when XE_THREAD_LIFECYCLE_LOG=1: thread create/suspend/resume/start
+// events are logged (host and guest). Read once; off costs one branch.
+bool ThreadLifecycleLogEnabled();
 
 }  // namespace threading
 }  // namespace xe

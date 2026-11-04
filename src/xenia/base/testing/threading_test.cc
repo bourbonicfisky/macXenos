@@ -8,8 +8,10 @@
 */
 
 #include <array>
+#include <memory>
 
 #include "xenia/base/threading.h"
+#include "xenia/kernel/util/guest_suspend.h"
 
 #define CATCH_CONFIG_ENABLE_CHRONO_STRINGMAKER
 #include "third_party/catch/include/catch.hpp"
@@ -1095,6 +1097,159 @@ TEST_CASE("Resume Right After Create Suspended", "[thread]") {
     REQUIRE(Wait(creator.get(), false, 120s) == WaitResult::kSuccess);
   }
   REQUIRE(lost == 0);
+}
+
+TEST_CASE("Suspend Is Deferred Past A Held Lock", "[thread]") {
+  // A thread suspended while holding a lock its resumer needs parked with
+  // the lock held, and the resume never came: inside a SuspendDeferralScope
+  // the thread parks only once the scope (and the lock) is gone.
+  std::mutex held;
+  std::atomic<int> phase{0};
+  std::atomic<bool> after_scope{false};
+  auto thread = Thread::Create({}, [&] {
+    {
+      SuspendDeferralScope deferral;
+      std::lock_guard<std::mutex> lock(held);
+      phase = 1;
+      while (phase != 2) {
+        MaybeYield();
+      }
+    }
+    after_scope = true;
+  });
+  while (phase != 1) {
+    MaybeYield();
+  }
+  REQUIRE(thread->Suspend());
+  Sleep(20ms);
+  phase = 2;
+  Sleep(50ms);
+  REQUIRE_FALSE(after_scope);
+  // The lock is free although the thread is suspended.
+  bool locked = false;
+  for (int i = 0; i < 100 && !locked; ++i) {
+    locked = held.try_lock();
+    if (!locked) {
+      Sleep(10ms);
+    }
+  }
+  REQUIRE(locked);
+  held.unlock();
+  REQUIRE(thread->Resume());
+  REQUIRE(Wait(thread.get(), false, 2s) == WaitResult::kSuccess);
+  REQUIRE(after_scope);
+}
+
+TEST_CASE("Resume Of A Thread Renaming Itself", "[thread]") {
+  // NBA Street Homecourt: a guest thread was suspended inside its startup
+  // set_name(), under its own state lock, and the creator's resume waited on
+  // that lock forever. Suspend/resume a thread that renames itself in a loop;
+  // each resume runs on a helper so a lost one fails instead of hanging.
+  // Shared state on the heap: a thread left stuck by a failure must not
+  // outlive what it touches.
+  struct State {
+    std::atomic<bool> stop{false};
+    std::atomic<uint32_t> renames{0};
+  };
+  auto state = std::make_shared<State>();
+  auto target = Thread::Create({}, [state] {
+    while (!state->stop) {
+      Thread::GetCurrentThread()->set_name(
+          state->renames % 2 ? "rename-a" : "rename-b");
+      ++state->renames;
+    }
+  });
+  while (state->renames == 0) {
+    MaybeYield();
+  }
+  Thread* target_ptr = target.get();
+  int stuck = 0;
+  for (int i = 0; i < 2000 && !stuck; ++i) {
+    target->Suspend();
+    auto resumer = Thread::Create({}, [target_ptr] { target_ptr->Resume(); });
+    if (Wait(resumer.get(), false, 2s) != WaitResult::kSuccess) {
+      ++stuck;
+      resumer.release();  // Still blocked; leak it rather than free it.
+    }
+  }
+  state->stop = true;
+  const bool finished =
+      !stuck && Wait(target.get(), false, 2s) == WaitResult::kSuccess;
+  if (!finished) {
+    target.release();
+  }
+  REQUIRE(stuck == 0);
+  REQUIRE(finished);
+}
+
+TEST_CASE("Guest Suspend Mirror Releases Nested Suspends", "[thread]") {
+  // NBA Street Homecourt / Tekken Tag 2: a guest thread created suspended
+  // and suspended once more by the title (guest count 2) must start after two
+  // resumes. The legacy POSIX rule released the host thread only when the
+  // guest count reached 0, leaving a host count of 1: the thread never ran.
+  using xe::kernel::util::GuestResumeHost;
+  using xe::kernel::util::GuestSuspendHost;
+  Thread::CreationParameters params = {};
+  params.create_suspended = true;
+
+  for (bool legacy : {false, true}) {
+    uint8_t guest_count = 1;  // X_CREATE_SUSPENDED
+    std::atomic<bool> ran{false};
+    auto thread = Thread::Create(params, [&ran] { ran = true; });
+    REQUIRE(GuestSuspendHost(&guest_count, thread.get()) == 1);
+    REQUIRE(guest_count == 2);
+    REQUIRE(GuestResumeHost(&guest_count, thread.get(), legacy) == 2);
+    REQUIRE(Wait(thread.get(), false, 50ms) == WaitResult::kTimeout);
+    REQUIRE(GuestResumeHost(&guest_count, thread.get(), legacy) == 1);
+    REQUIRE(guest_count == 0);
+    const WaitResult result = Wait(thread.get(), false, 500ms);
+    if (!legacy) {
+      REQUIRE(result == WaitResult::kSuccess);
+      REQUIRE(ran);
+    } else {
+      // The lost resume: still held on the host with a guest count of 0.
+      REQUIRE(result == WaitResult::kTimeout);
+      REQUIRE_FALSE(ran);
+      uint32_t host_count = 0;
+      REQUIRE(thread->Resume(&host_count));
+      REQUIRE(host_count == 1);
+      REQUIRE(Wait(thread.get(), false, 2s) == WaitResult::kSuccess);
+    }
+  }
+
+  // A running thread suspended twice runs again after two resumes, and a
+  // resume at guest count 0 does not touch the host.
+  {
+    uint8_t guest_count = 0;
+    std::atomic<bool> release{false};
+    std::atomic<uint32_t> spins{0};
+    auto thread = Thread::Create({}, [&] {
+      while (!release) {
+        ++spins;
+        MaybeYield();
+      }
+    });
+    while (spins == 0) {
+      MaybeYield();
+    }
+    REQUIRE(GuestSuspendHost(&guest_count, thread.get()) == 0);
+    REQUIRE(GuestSuspendHost(&guest_count, thread.get()) == 1);
+    Sleep(20ms);
+    const uint32_t held = spins;
+    Sleep(50ms);
+    REQUIRE(spins == held);
+    REQUIRE(GuestResumeHost(&guest_count, thread.get()) == 2);
+    Sleep(50ms);
+    REQUIRE(spins == held);
+    REQUIRE(GuestResumeHost(&guest_count, thread.get()) == 1);
+    REQUIRE(GuestResumeHost(&guest_count, thread.get()) == 0);
+    REQUIRE(guest_count == 0);
+    const uint32_t before = spins;
+    Sleep(50ms);
+    REQUIRE(spins > before);
+    release = true;
+    REQUIRE(Wait(thread.get(), false, 2s) == WaitResult::kSuccess);
+  }
 }
 
 TEST_CASE("Test Thread QueueUserCallback", "[thread]") {
