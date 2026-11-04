@@ -32,6 +32,18 @@ DEFINE_bool(
     "the fused multiply-add (cores whose FZ flushes inputs only). Off = "
     "always flush in software.",
     "a64");
+DEFINE_bool(a64_fma_njm_check_per_op, true,
+            "With a64_skip_fma_input_denorm_flush: test VSCR[NJM] once per "
+            "vmaddfp/vnmsubfp (the FMA flushes its deferred inputs in place "
+            "when NJM is off) instead of once per flushed input. Off = one "
+            "check per input.",
+            "a64");
+DEFINE_bool(a64_vmx_nan_fixup_out_of_line, true,
+            "Keep only the any-lane-NaN test inline after vector float ops and "
+            "emit the PPC NaN fix-up in tail code; vector FMAs then stash "
+            "their sources for it only on that path and read their inputs in "
+            "place. Off = inline fix-up, stash on every FMA.",
+            "a64");
 
 namespace xe {
 namespace cpu {
@@ -896,6 +908,18 @@ struct VECTOR_DENORMFLUSH
   }
 
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    if (IsFmaDeferredInputFlush(e, i.instr)) {
+      // The consuming FMA tests NJM once and, only when it is off, flushes
+      // this register in place (MUL_ADD_V128 / MUL_SUB_V128). Every use is
+      // such an FMA, so the value only ever reaches flushing FMAs: with NJM
+      // set FZ flushes it, with NJM off the FMA does.
+      int s = SrcVReg(e, i.src1, 0);
+      int d = i.dest.reg().getIdx();
+      if (d != s) {
+        e.mov(VReg(d).b16, VReg(s).b16);
+      }
+      return;
+    }
     if (cvars::a64_skip_fma_input_denorm_flush &&
         e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs) &&
         OnlyFeedsVmxFma(i.instr)) {
@@ -949,6 +973,14 @@ struct VECTOR_DENORMFLUSH
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_VECTOR_DENORMFLUSH, VECTOR_DENORMFLUSH);
+
+bool IsFmaDeferredInputFlush(const A64Emitter& e, const hir::Instr* def) {
+  return def && def->opcode == &hir::OPCODE_VECTOR_DENORMFLUSH_info &&
+         cvars::a64_skip_fma_input_denorm_flush &&
+         cvars::a64_fma_njm_check_per_op &&
+         e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs) &&
+         VECTOR_DENORMFLUSH::OnlyFeedsVmxFma(def);
+}
 
 // ============================================================================
 // OPCODE_PERMUTE

@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_BACKEND_A64_A64_SEQ_UTIL_H_
 #define XENIA_CPU_BACKEND_A64_A64_SEQ_UTIL_H_
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/vec128.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
@@ -30,10 +31,17 @@ constexpr uint32_t DCZID_EL0 = ARM64_SYSREG(0b11, 0b011, 0b0000, 0b0000, 0b111);
 #error "No MRS wrapper available for current compiler implemented."
 #endif
 
+DECLARE_bool(a64_vmx_nan_fixup_out_of_line);
+
 namespace xe {
 namespace cpu {
 namespace backend {
 namespace a64 {
+
+// True when def is a VECTOR_DENORMFLUSH whose software flush is left to the
+// vector MUL_ADD / MUL_SUB consuming it (one NJM check per FMA). Defined with
+// the flush in a64_seq_vector.cc.
+bool IsFmaDeferredInputFlush(const A64Emitter& e, const hir::Instr* def);
 
 using Xbyak_aarch64::QReg;
 using Xbyak_aarch64::VReg;
@@ -382,16 +390,10 @@ inline void PrepareVmxFpSources(A64Emitter& e, const T1& op1, const T2& op2,
 // PPC rule: first NaN by operand position wins; SNaN is quieted (bit 22 set).
 // If neither input was NaN but the op generated NaN (e.g., inf-inf),
 // use the PPC default NaN (0xFFC00000).
-inline void FixupVmxNan_V128(A64Emitter& e) {
+// The per-lane part of FixupVmxNan_V128, run only when a result lane is NaN:
+// expects v0/v1 = the sources, v2 = the result.
+inline void EmitVmxNanLanes_V128(A64Emitter& e) {
   using namespace Xbyak_aarch64;
-  auto& done = e.NewCachedLabel();
-
-  // Fast path: if no result lane is NaN, skip entirely.
-  e.fcmeq(VReg(3).s4, VReg(2).s4, VReg(2).s4);  // all-1s for non-NaN
-  e.uminv(SReg(3), VReg(3).s4);                 // min across lanes
-  e.fmov(e.w0, SReg(3));
-  e.cbnz(e.w0, done);  // all non-NaN → skip
-
   // Save s1/s2 to stack for scalar lane extraction.
   e.str(QReg(0), ptr(e.sp, static_cast<int32_t>(StackLayout::GUEST_SCRATCH)));
   e.str(QReg(1),
@@ -443,7 +445,29 @@ inline void FixupVmxNan_V128(A64Emitter& e) {
 
     e.L(lane_ok);
   }
+}
 
+inline void FixupVmxNan_V128(A64Emitter& e) {
+  using namespace Xbyak_aarch64;
+  auto& done = e.NewCachedLabel();
+
+  // Fast path: if no result lane is NaN, skip entirely.
+  e.fcmeq(VReg(3).s4, VReg(2).s4, VReg(2).s4);  // all-1s for non-NaN
+  e.uminv(SReg(3), VReg(3).s4);                 // min across lanes
+  e.fmov(e.w0, SReg(3));
+  if (cvars::a64_vmx_nan_fixup_out_of_line) {
+    // The lane fix-up runs only for NaN results: keep its ~70 instructions in
+    // tail code so the hot path is the four above plus one branch.
+    auto& fixup =
+        e.AddToTail([&done](A64Emitter& e, Xbyak_aarch64::Label& lbl) {
+          EmitVmxNanLanes_V128(e);
+          e.b(done);
+        });
+    e.BranchIfZero(e.w0, fixup);
+  } else {
+    e.cbnz(e.w0, done);  // all non-NaN → skip
+    EmitVmxNanLanes_V128(e);
+  }
   e.L(done);
 }
 
@@ -454,16 +478,11 @@ inline void FixupVmxNan_V128(A64Emitter& e) {
 //   GUEST_SCRATCH + 32 = src3 (16 bytes)
 // PPC rule: first NaN by operand position (src1 > src2 > src3) wins.
 // Clobbers v0, v1, v3, w0, w16, w17.
-inline void FixupVmxNan_V128_Fma(A64Emitter& e) {
+// The per-lane part of FixupVmxNan_V128_Fma, run only when a result lane is
+// NaN: expects v2 = the result, sources on the stack as below. Touches only
+// v2, w0, w16 and w17.
+inline void EmitVmxNanLanes_V128_Fma(A64Emitter& e) {
   using namespace Xbyak_aarch64;
-  auto& done = e.NewCachedLabel();
-
-  // Fast path: if no result lane is NaN, skip entirely.
-  e.fcmeq(VReg(3).s4, VReg(2).s4, VReg(2).s4);
-  e.uminv(SReg(3), VReg(3).s4);
-  e.fmov(e.w0, SReg(3));
-  e.cbnz(e.w0, done);
-
   // NaN threshold constant.
   e.mov(e.w16, 0xFF000000u);
 
@@ -517,7 +536,27 @@ inline void FixupVmxNan_V128_Fma(A64Emitter& e) {
 
     e.L(lane_ok);
   }
+}
 
+inline void FixupVmxNan_V128_Fma(A64Emitter& e) {
+  using namespace Xbyak_aarch64;
+  auto& done = e.NewCachedLabel();
+
+  // Fast path: if no result lane is NaN, skip entirely.
+  e.fcmeq(VReg(3).s4, VReg(2).s4, VReg(2).s4);
+  e.uminv(SReg(3), VReg(3).s4);
+  e.fmov(e.w0, SReg(3));
+  if (cvars::a64_vmx_nan_fixup_out_of_line) {
+    auto& fixup =
+        e.AddToTail([&done](A64Emitter& e, Xbyak_aarch64::Label& lbl) {
+          EmitVmxNanLanes_V128_Fma(e);
+          e.b(done);
+        });
+    e.BranchIfZero(e.w0, fixup);
+  } else {
+    e.cbnz(e.w0, done);
+    EmitVmxNanLanes_V128_Fma(e);
+  }
   e.L(done);
 }
 

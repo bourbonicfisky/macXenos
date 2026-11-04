@@ -20,8 +20,10 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace xe;
@@ -497,6 +499,209 @@ TEST_CASE("VMX_FMA_INPUT_FLUSH_SKIP_LARGE_FUNCTION", "[vector]") {
     CHECK(software == skipped);
   }
   cvars::a64_skip_fma_input_denorm_flush = true;
+}
+
+DECLARE_bool(a64_fma_njm_check_per_op);
+DECLARE_bool(a64_vmx_nan_fixup_out_of_line);
+
+// Every combination of the vector-float switches against the original
+// sequences (software flush per input, inline NaN fix-up, sources stashed on
+// every FMA), bit for bit, with NJM on and off.
+struct VmxFloatConfig {
+  bool skip_flush;
+  bool njm_check_per_op;
+  bool nan_out_of_line;
+};
+constexpr VmxFloatConfig kVmxFloatReference = {false, false, false};
+constexpr VmxFloatConfig kVmxFloatConfigs[] = {
+    {true, false, false}, {true, true, false},  {true, false, true},
+    {true, true, true},   {false, false, true}, {false, true, true},
+};
+
+static void SetVmxFloatConfig(const VmxFloatConfig& config) {
+  cvars::a64_skip_fma_input_denorm_flush = config.skip_flush;
+  cvars::a64_fma_njm_check_per_op = config.njm_check_per_op;
+  cvars::a64_vmx_nan_fixup_out_of_line = config.nan_out_of_line;
+}
+
+// Lanes biased to the cases the sequences treat specially: denormals of both
+// signs, quiet and signalling NaNs with payloads, infinities, zeros.
+static std::vector<uint32_t> VmxFloatInputs(size_t count, uint32_t seed) {
+  static constexpr uint32_t kSpecial[] = {
+      0x00000000, 0x80000000, 0x00000001, 0x807FFFFF, 0x00400000, 0x80000010,
+      0x7F800000, 0xFF800000, 0x7FC00000, 0xFFC00000, 0x7FC12345, 0xFFC00001,
+      0x7F800001, 0xFF800001, 0x7FBFFFFF, 0xFFA00000, 0x3F800000, 0xBF800000,
+      0x00800000, 0x80800000, 0x7F7FFFFF, 0x0DA24260, 0x8DA24260, 0x40490FDB,
+  };
+  std::vector<uint32_t> out;
+  out.reserve(count);
+  while (out.size() < count) {
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    switch (seed & 3) {
+      case 0:
+        out.push_back(kSpecial[(seed >> 8) % (sizeof(kSpecial) / 4)]);
+        break;
+      case 1:
+        out.push_back(seed & 0x807FFFFFu);  // denormal or zero
+        break;
+      default:
+        out.push_back(seed);
+        break;
+    }
+  }
+  return out;
+}
+
+// Runs build (which reads v4-v6 and writes v3 and v7) over the inputs and
+// returns v3 and v7 per run.
+static std::vector<uint32_t> RunVmxFloatCase(
+    const VmxFloatConfig& config, bool njm,
+    const std::function<void(HIRBuilder&)>& build,
+    const std::vector<uint32_t>& inputs) {
+  SetVmxFloatConfig(config);
+  TestFunction test([njm, &build](HIRBuilder& b) {
+    b.SetNJM(b.LoadConstantInt8(njm ? 1 : 0));
+    build(b);
+    b.Return();
+  });
+  std::vector<uint32_t> out;
+  for (size_t k = 0; k + 12 <= inputs.size(); k += 12) {
+    test.Run(
+        [&](PPCContext* ctx) {
+          ctx->v[4] =
+              vec128i(inputs[k], inputs[k + 1], inputs[k + 2], inputs[k + 3]);
+          ctx->v[5] = vec128i(inputs[k + 4], inputs[k + 5], inputs[k + 6],
+                              inputs[k + 7]);
+          ctx->v[6] = vec128i(inputs[k + 8], inputs[k + 9], inputs[k + 10],
+                              inputs[k + 11]);
+          ctx->v[3] = vec128i(0);
+          ctx->v[7] = vec128i(0);
+        },
+        [&](PPCContext* ctx) {
+          for (int lane = 0; lane < 4; ++lane) {
+            out.push_back(ctx->v[3].u32[lane]);
+            out.push_back(ctx->v[7].u32[lane]);
+          }
+        });
+  }
+  return out;
+}
+
+TEST_CASE("VMX_FLOAT_SWITCHES_MATCH_ORIGINAL_SEQUENCES", "[vector]") {
+  const vec128_t kConstant =
+      vec128i(0x3F800000u, 0x00000003u, 0x7FA00001u, 0xFF800000u);
+  using Build = std::function<void(HIRBuilder&)>;
+  const std::pair<const char*, Build> cases[] = {
+      {"vmaddfp",
+       [](HIRBuilder& b) {
+         StoreVR(b, 3,
+                 b.MulAdd(b.VectorDenormFlush(LoadVR(b, 4)),
+                          b.VectorDenormFlush(LoadVR(b, 5)),
+                          b.VectorDenormFlush(LoadVR(b, 6))));
+       }},
+      {"vnmsubfp",
+       [](HIRBuilder& b) {
+         StoreVR(b, 3,
+                 b.Neg(b.MulSub(b.VectorDenormFlush(LoadVR(b, 4)),
+                                b.VectorDenormFlush(LoadVR(b, 5)),
+                                b.VectorDenormFlush(LoadVR(b, 6)))));
+       }},
+      // One flushed value feeding two FMAs in two operand positions, and an
+      // FMA mixing flushed and unflushed inputs.
+      {"shared flushed input",
+       [](HIRBuilder& b) {
+         auto a = b.VectorDenormFlush(LoadVR(b, 4));
+         auto r = b.MulAdd(a, b.VectorDenormFlush(LoadVR(b, 5)), a);
+         StoreVR(b, 7, r);
+         StoreVR(b, 3, b.MulSub(a, a, r));
+       }},
+      {"unflushed inputs",
+       [](HIRBuilder& b) {
+         StoreVR(b, 3, b.MulAdd(LoadVR(b, 4), LoadVR(b, 5), LoadVR(b, 6)));
+         StoreVR(b, 7, b.MulSub(LoadVR(b, 6), LoadVR(b, 4), LoadVR(b, 5)));
+       }},
+      {"constant sources",
+       [kConstant](HIRBuilder& b) {
+         StoreVR(b, 3,
+                 b.MulAdd(b.VectorDenormFlush(LoadVR(b, 4)),
+                          b.LoadConstantVec128(kConstant),
+                          b.VectorDenormFlush(LoadVR(b, 6))));
+         StoreVR(b, 7,
+                 b.MulSub(b.LoadConstantVec128(kConstant),
+                          b.VectorDenormFlush(LoadVR(b, 5)),
+                          b.LoadConstantVec128(kConstant)));
+       }},
+      {"binary ops",
+       [](HIRBuilder& b) {
+         StoreVR(b, 3, b.Sub(b.Add(LoadVR(b, 4), LoadVR(b, 5)), LoadVR(b, 6)));
+         StoreVR(b, 7, b.Div(b.Mul(LoadVR(b, 5), LoadVR(b, 6)), LoadVR(b, 4)));
+       }},
+  };
+  const std::vector<uint32_t> inputs = VmxFloatInputs(12 * 600, 0x1234567u);
+  for (const auto& [name, build] : cases) {
+    for (const bool njm : {true, false}) {
+      const std::vector<uint32_t> reference =
+          RunVmxFloatCase(kVmxFloatReference, njm, build, inputs);
+      for (const VmxFloatConfig& config : kVmxFloatConfigs) {
+        const std::vector<uint32_t> out =
+            RunVmxFloatCase(config, njm, build, inputs);
+        size_t mismatches = 0;
+        for (size_t k = 0; k < out.size(); ++k) {
+          if (out[k] != reference[k]) {
+            if (!mismatches) {
+              UNSCOPED_INFO(name << " njm " << njm << " config "
+                                 << config.skip_flush << config.njm_check_per_op
+                                 << config.nan_out_of_line << " first at " << k
+                                 << std::hex << " reference " << reference[k]
+                                 << " got " << out[k]);
+            }
+            ++mismatches;
+          }
+        }
+        CHECK(mismatches == 0);
+      }
+    }
+  }
+  SetVmxFloatConfig({true, true, true});
+}
+
+// Out-of-line NJM flushes and NaN fix-ups in a function far beyond a short
+// branch's reach, with a NaN lane so every fix-up runs.
+TEST_CASE("VMX_FLOAT_SWITCHES_LARGE_FUNCTION", "[vector]") {
+  auto run = [](const VmxFloatConfig& config, bool njm) {
+    SetVmxFloatConfig(config);
+    TestFunction test([njm](HIRBuilder& b) {
+      b.SetNJM(b.LoadConstantInt8(njm ? 1 : 0));
+      auto v = LoadVR(b, 4);
+      for (int k = 0; k < 400; ++k) {
+        v = b.MulAdd(b.VectorDenormFlush(v), b.VectorDenormFlush(LoadVR(b, 5)),
+                     b.VectorDenormFlush(LoadVR(b, 6)));
+        v = b.Add(v, LoadVR(b, 6));
+      }
+      StoreVR(b, 3, v);
+      b.Return();
+    });
+    vec128_t out;
+    test.Run(
+        [](PPCContext* ctx) {
+          ctx->v[4] = vec128i(0x00000001, 0x3F800000, 0x807FFFFF, 0x00400000);
+          ctx->v[5] = vec128i(0x3F800000, 0x00000010, 0x7FA00002, 0x3F800000);
+          ctx->v[6] = vec128i(0x00000002, 0x80000003, 0x00000000, 0xFF900001);
+        },
+        [&](PPCContext* ctx) { out = ctx->v[3]; });
+    return out;
+  };
+  for (const bool njm : {true, false}) {
+    const vec128_t reference = run(kVmxFloatReference, njm);
+    for (const VmxFloatConfig& config : kVmxFloatConfigs) {
+      INFO("njm " << njm << " config " << config.skip_flush
+                  << config.njm_check_per_op << config.nan_out_of_line);
+      CHECK(run(config, njm) == reference);
+    }
+  }
+  SetVmxFloatConfig({true, true, true});
 }
 #endif  // XE_ARCH_ARM64
 

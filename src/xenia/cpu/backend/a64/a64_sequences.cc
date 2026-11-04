@@ -4095,6 +4095,102 @@ struct MUL_ADD_F64
     EmitFmaWithPpcNan_F64(e, i.dest, s1, s2, s3, /*is_sub=*/false);
   }
 };
+// Vector FMA pieces shared by MUL_ADD_V128 and MUL_SUB_V128.
+//
+// Inputs whose VECTOR_DENORMFLUSH was left to this FMA
+// (IsFmaDeferredInputFlush) share one VSCR[NJM] test. NJM on: FPCR.FZ flushes
+// them inside the fmla. NJM off: they are flushed in place, out of line,
+// before anything reads them; the value is by definition the flushed one and
+// every use is a flushing FMA, so flushing the register itself is exact.
+template <typename T>
+static void EmitVmxFmaDeferredInputFlushes(A64Emitter& e, const T& i) {
+  int regs[3];
+  int count = 0;
+  auto add = [&](const auto& op) {
+    if (op.is_constant || !IsFmaDeferredInputFlush(e, op.value->def)) {
+      return;
+    }
+    int reg = op.reg().getIdx();
+    for (int k = 0; k < count; ++k) {
+      if (regs[k] == reg) {
+        return;
+      }
+    }
+    regs[count++] = reg;
+  };
+  add(i.src1);
+  add(i.src2);
+  add(i.src3);
+  if (!count) {
+    return;
+  }
+  auto& resume = e.NewCachedLabel();
+  auto& flush = e.AddToTail(
+      [regs, count, &resume](A64Emitter& e, Xbyak_aarch64::Label& lbl) {
+        for (int k = 0; k < count; ++k) {
+          FlushDenormals_V128(e, regs[k], 0, 1);
+        }
+        e.b(resume);
+      });
+  e.ldr(e.w0, ptr(e.GetBackendCtxReg(),
+                  static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
+  e.tst(e.w0, 1u << kA64BackendNJMOn);
+  e.BranchIf(Xbyak_aarch64::EQ, flush);
+  e.L(resume);
+}
+
+// a64_vmx_nan_fixup_out_of_line, on cores whose FZ flushes inputs (no
+// software input flush to copy for): fmla straight from the source registers
+// into v2, test for a NaN lane, and only on that path stash the sources and
+// run the PPC NaN fix-up in tail code. The old sequence copied all three
+// sources and stored them on every FMA. Returns false (nothing emitted) when
+// it can't apply.
+template <typename T>
+static bool EmitVmxFmaLean(A64Emitter& e, const T& i, bool subtract) {
+  if (!cvars::a64_vmx_nan_fixup_out_of_line ||
+      !e.IsFeatureEnabled(xe::arm64::kA64FZFlushesInputs)) {
+    return false;
+  }
+  // A scratch for the NaN test that holds no constant source.
+  int check = !i.src3.is_constant   ? 3
+              : !i.src1.is_constant ? 0
+              : !i.src2.is_constant ? 1
+                                    : -1;
+  if (check < 0) {
+    return false;
+  }
+  EmitWithVmxFpcr(e, [&] {
+    EmitVmxFmaDeferredInputFlushes(e, i);
+    int d = i.dest.reg().getIdx();
+    int s1 = SrcVReg(e, i.src1, 0);
+    int s2 = SrcVReg(e, i.src2, 1);
+    int s3 = SrcVReg(e, i.src3, 3);
+    if (subtract) {
+      e.fneg(VReg(2).s4, VReg(s3).s4);
+    } else {
+      e.mov(VReg(2).b16, VReg(s3).b16);
+    }
+    e.fmla(VReg(2).s4, VReg(s1).s4, VReg(s2).s4);
+    e.fcmeq(VReg(check).s4, VReg(2).s4, VReg(2).s4);
+    e.uminv(SReg(check), VReg(check).s4);
+    e.fmov(e.w0, SReg(check));
+    auto& done = e.NewCachedLabel();
+    auto& fixup = e.AddToTail([s1, s2, s3, &done](A64Emitter& e,
+                                                  Xbyak_aarch64::Label& lbl) {
+      const int32_t scratch = static_cast<int32_t>(StackLayout::GUEST_SCRATCH);
+      e.str(QReg(s1), Xbyak_aarch64::ptr(e.sp, scratch));
+      e.str(QReg(s2), Xbyak_aarch64::ptr(e.sp, scratch + 16));
+      e.str(QReg(s3), Xbyak_aarch64::ptr(e.sp, scratch + 32));
+      EmitVmxNanLanes_V128_Fma(e);
+      e.b(done);
+    });
+    e.BranchIfZero(e.w0, fixup);
+    e.L(done);
+    e.mov(VReg(d).b16, VReg(2).b16);
+  });
+  return true;
+}
+
 struct MUL_ADD_V128
     : Sequence<MUL_ADD_V128,
                I<OPCODE_MUL_ADD, V128Op, V128Op, V128Op, V128Op>> {
@@ -4104,7 +4200,11 @@ struct MUL_ADD_V128
     //   1. Flush s3 into v3, save to stack[32].
     //   2. Flush s1/s2 into v0/v1, save to stack[0]/stack[16].
     //   3. Restore s3 into v3, fmla into v2, NaN fixup, flush output.
+    if (EmitVmxFmaLean(e, i, /*subtract=*/false)) {
+      return;
+    }
     EmitWithVmxFpcr(e, [&] {
+      EmitVmxFmaDeferredInputFlushes(e, i);
       int d = i.dest.reg().getIdx();
 
       // Flush s3 → v3, save to stack slot 2.
@@ -4194,7 +4294,11 @@ struct MUL_SUB_V128
   static void Emit(A64Emitter& e, const EmitArgType& i) {
     // dest = s1*s2 - s3 with VMX denormal flushing + PPC NaN propagation.
     // Same as MUL_ADD but negate s3 before the fmla.
+    if (EmitVmxFmaLean(e, i, /*subtract=*/true)) {
+      return;
+    }
     EmitWithVmxFpcr(e, [&] {
+      EmitVmxFmaDeferredInputFlushes(e, i);
       int d = i.dest.reg().getIdx();
 
       // Flush s3 → v3, save un-negated for NaN fixup.
