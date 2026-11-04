@@ -7390,6 +7390,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
   ServiceLazyCommitRequest();
+  // ArenaAllocate can only wait for committed submissions, so one open
+  // submission that fills the upload arena drops every later draw in it
+  // (Dishonored's ~17k-draw loading frame lost 16-41k draws on sysconst-alloc
+  // once its count-only occlusion draws ran). Commit at a draw boundary, before
+  // this draw allocates anything, once the open submission holds a quarter of
+  // the ring. XE_METAL_ARENA_SPLIT_BYTES=<bytes> moves the threshold; 0 turns
+  // the split off.
+  {
+    static const uint64_t s_arena_split_bytes = [this]() -> uint64_t {
+      const char* v = std::getenv("XE_METAL_ARENA_SPLIT_BYTES");
+      if (v) {
+        return std::strtoull(v, nullptr, 10);
+      }
+      return upload_arena_ ? upload_arena_->size() / 4 : 0;
+    }();
+    if (s_arena_split_bytes && upload_arena_ && draws_since_commit_ > 0 &&
+        upload_arena_->open_bytes() >= s_arena_split_bytes) {
+      EndFrameEncoder(metal::SeamBoundaryReason::kArenaSplit);
+    }
+  }
   const bool state_dedupe = StateDedupeEnabled();
   // Diagnostic (XE_METAL_DRAW_TRACE=<draw>): log entry into IssueDraw for one
   // trace draw, with the primitive and index count, before any early exit.

@@ -60,6 +60,13 @@ class MetalUploadArena {
   // Ring capacity in bytes (diagnostic: ring-end proximity checks).
   uint32_t size() const { return size_; }
 
+  // Bytes allocated since the last MarkSubmission (the open submission's
+  // share of the ring, alignment and wrap waste included).
+  uint64_t open_bytes() const {
+    return total_allocated_ -
+           (marks_.empty() ? total_reclaimed_ : marks_.back().second);
+  }
+
  private:
   void* device_;   // id<MTLDevice>, not owned.
   uint32_t size_;
