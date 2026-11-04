@@ -8536,8 +8536,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return !value || std::strcmp(value, "0") != 0;
   }();
   // Geometry-emulation draws keep theirs (that route was selected above with
-  // the pixel shader present).
+  // the pixel shader present), and so do rectangle lists expanded in the
+  // vertex shader in its place: the MSAA clear fold matches the clear's
+  // shader pair, and without the pixel shader no clear folded on the 580X
+  // (Gears 3 19.4 fps there vs 30 on the RX 6900 XT, 2026-11-03).
   if (s_ps_drop && pixel_shader && !use_geometry_emulation &&
+      !rect_strip_route &&
       !draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) {
     pixel_shader = nullptr;
   }
@@ -8772,6 +8776,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         fold = metal::QualifyMsaaClearFold(regs, fold_vs_hash, fold_ps_hash,
                                            prim_type, index_count, norm_depth,
                                            normalized_color_mask);
+      }
+      if (s_fold_log &&
+          fold.refusal == metal::MsaaClearFoldRefusal::kShaderPair &&
+          prim_type == xenos::PrimitiveType::kRectangleList &&
+          index_count == 3) {
+        static uint32_t s_pair_logs = 0;
+        if (s_pair_logs < 24) {
+          ++s_pair_logs;
+          XELOGI("MetalMsaaClearFold shader-pair rect draw={} vs={:016X} "
+                 "ps={:016X} msaa={}",
+                 trace_draw_index_, fold_vs_hash, fold_ps_hash,
+                 uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples));
+        }
       }
       // Value invariance, edge alignment and the depth the transfer path
       // would leave (design D3): evaluate the clear's vertices on the CPU.
