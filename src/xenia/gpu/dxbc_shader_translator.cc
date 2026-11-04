@@ -1249,18 +1249,31 @@ void DxbcShaderTranslator::CompleteVertexOrDomainShader() {
       shader_modification.vertex.user_clip_plane_cull
           ? cull_distance_next_component
           : clip_distance_next_component;
+  // Cull distances emitted as clip distances (hosts without SV_CullDistance):
+  // see Modification::vertex.cull_distances_as_clip.
+  const bool cull_distances_as_clip =
+      shader_modification.vertex.cull_distances_as_clip != 0;
   for (uint32_t i = 0; i < shader_modification.vertex.user_clip_plane_count;
        ++i) {
-    a_.OpDP4(
-        dxbc::Dest::O(out_reg_vs_clip_cull_distances_ +
-                          (ucp_clip_cull_distance_next_component_ref >> 2),
-                      UINT32_C(1)
-                          << (ucp_clip_cull_distance_next_component_ref & 3)),
-        dxbc::Src::R(system_temp_position_),
-        LoadSystemConstant(
-            SystemConstants::Index::kUserClipPlanes,
-            offsetof(SystemConstants, user_clip_planes) + sizeof(float) * 4 * i,
-            dxbc::Src::kXYZW));
+    dxbc::Dest ucp_distance_dest(dxbc::Dest::O(
+        out_reg_vs_clip_cull_distances_ +
+            (ucp_clip_cull_distance_next_component_ref >> 2),
+        UINT32_C(1) << (ucp_clip_cull_distance_next_component_ref & 3)));
+    dxbc::Src ucp_plane_src(LoadSystemConstant(
+        SystemConstants::Index::kUserClipPlanes,
+        offsetof(SystemConstants, user_clip_planes) + sizeof(float) * 4 * i,
+        dxbc::Src::kXYZW));
+    if (shader_modification.vertex.user_clip_plane_cull &&
+        cull_distances_as_clip) {
+      a_.OpDP4(temp_x_dest, dxbc::Src::R(system_temp_position_),
+               ucp_plane_src);
+      a_.OpLT(temp_x_dest, temp_x_src, dxbc::Src::LF(0.0f));
+      a_.OpMovC(ucp_distance_dest, temp_x_src, dxbc::Src::LF(-1.0f),
+                dxbc::Src::LF(kCullDistanceAsClipKeep));
+    } else {
+      a_.OpDP4(ucp_distance_dest, dxbc::Src::R(system_temp_position_),
+               ucp_plane_src);
+    }
     ++ucp_clip_cull_distance_next_component_ref;
   }
 
@@ -1362,15 +1375,18 @@ void DxbcShaderTranslator::CompleteVertexOrDomainShader() {
              dxbc::Src::LU(UINT32_C(0x7FFFFFFF)));
   }
   if (shader_modification.vertex.vertex_kill_and) {
-    // AND operator - write an SV_CullDistance.
+    // AND operator - write an SV_CullDistance (or, with
+    // cull_distances_as_clip, the SV_ClipDistance encoding of one).
     dxbc::Dest vertex_kill_dest(dxbc::Dest::O(
         out_reg_vs_clip_cull_distances_ + (cull_distance_next_component >> 2),
         UINT32_C(1) << (cull_distance_next_component & 3)));
+    const float vertex_kept_distance =
+        cull_distances_as_clip ? kCullDistanceAsClipKeep : 0.0f;
     if (shader_writes_vertex_kill) {
       a_.OpMovC(vertex_kill_dest, temp_x_src, dxbc::Src::LF(-1.0f),
-                dxbc::Src::LF(0.0f));
+                dxbc::Src::LF(vertex_kept_distance));
     } else {
-      a_.OpMov(vertex_kill_dest, dxbc::Src::LF(0.0f));
+      a_.OpMov(vertex_kill_dest, dxbc::Src::LF(vertex_kept_distance));
     }
     ++cull_distance_next_component;
   } else {
@@ -3635,6 +3651,11 @@ void DxbcShaderTranslator::WriteOutputSignature() {
         shader_modification.GetVertexClipDistanceCount();
     uint32_t cull_distance_count =
         shader_modification.GetVertexCullDistanceCount();
+    if (shader_modification.vertex.cull_distances_as_clip) {
+      // Same registers and components, all declared as clip distances.
+      clip_distance_count += cull_distance_count;
+      cull_distance_count = 0;
+    }
     uint32_t clip_and_cull_distance_count =
         clip_distance_count + cull_distance_count;
     uint32_t clip_distance_parameter_count = 0;
@@ -4147,6 +4168,11 @@ void DxbcShaderTranslator::WriteShaderCode() {
         shader_modification.GetVertexClipDistanceCount();
     uint32_t cull_distance_count =
         shader_modification.GetVertexCullDistanceCount();
+    if (shader_modification.vertex.cull_distances_as_clip) {
+      // Must match the output signature above.
+      clip_distance_count += cull_distance_count;
+      cull_distance_count = 0;
+    }
     uint32_t clip_and_cull_distance_count =
         clip_distance_count + cull_distance_count;
     for (uint32_t i = 0; i < clip_and_cull_distance_count; i += 4) {

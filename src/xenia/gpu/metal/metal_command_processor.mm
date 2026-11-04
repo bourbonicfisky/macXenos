@@ -9892,6 +9892,44 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     vs_mod_decoded.vertex.vertex_kill_and = uint32_t(
         (vertex_shader->writes_point_size_edge_flag_kill_vertex() & 0b100) &&
         !pa_cl_clip_cntl.vtx_kill_or);
+    // Metal has no cull distances: the Metal Shader Converter output never
+    // culls on SV_CullDistance, so AND-mode vertex kill (and cull-only user
+    // clip planes) culled nothing. Banjo-Kazooie: Nuts & Bolts kills each
+    // grass tuft whose density-map texel is below its threshold this way;
+    // without it every tuft drew, covering Spiral Mountain's dirt path and
+    // its flowers. Emit them as clip distances instead. The geometry shader
+    // path culls in its generated shader already. XE_METAL_CULL_AS_CLIP=0
+    // restores the old, non-culling output; =2 is a diagnostic arm that kills
+    // AND-mode vertices with the OR operator instead (a NaN position: any
+    // killed vertex drops the primitive).
+    static const uint32_t s_cull_as_clip = [] {
+      const char* v = std::getenv("XE_METAL_CULL_AS_CLIP");
+      if (v && !v[1] && (v[0] == '0' || v[0] == '2')) {
+        return uint32_t(v[0] - '0');
+      }
+      return 1u;
+    }();
+    if (s_cull_as_clip == 2 && !use_geometry_emulation) {
+      vs_mod_decoded.vertex.vertex_kill_and = 0;
+    }
+    vs_mod_decoded.vertex.cull_distances_as_clip =
+        uint32_t(s_cull_as_clip == 1 && !use_geometry_emulation &&
+                 vs_mod_decoded.GetVertexCullDistanceCount() != 0);
+    if (vs_mod_decoded.vertex.cull_distances_as_clip) {
+      // Engagement evidence (bounded): which vertex shaders take the route.
+      static uint32_t s_cull_as_clip_logs = 0;
+      if (s_cull_as_clip_logs < 8) {
+        ++s_cull_as_clip_logs;
+        XELOGI(
+            "MetalCullAsClip: vs={:016X} vertex_kill_and={} ucp_cull={} "
+            "planes={} at draw {}",
+            vertex_shader->ucode_data_hash(),
+            uint32_t(vs_mod_decoded.vertex.vertex_kill_and),
+            uint32_t(vs_mod_decoded.vertex.user_clip_plane_cull),
+            uint32_t(vs_mod_decoded.vertex.user_clip_plane_count),
+            trace_draw_index_);
+      }
+    }
     // XEPSIZE feeds the geometry-emulation mesh stage only; the vertex-shader
     // point expansion consumes the size inside the vertex shader and writes
     // the sprite coordinates the pixel shader's point PsParamGen reads.

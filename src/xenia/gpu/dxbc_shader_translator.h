@@ -210,6 +210,16 @@ class DxbcShaderTranslator : public ShaderTranslator {
       // shader's point PsParamGen reads. Was zero padding, so every existing
       // value keeps its meaning.
       uint32_t output_point_coordinates : 1;
+      // For hosts without SV_CullDistance (the Metal backend: the Metal Shader
+      // Converter output never culls on it): declare the cull distances (the
+      // vertex_kill_and one and cull-only user clip planes) as SV_ClipDistance
+      // instead, written as -1 where the cull distance is negative and
+      // kCullDistanceAsClipKeep where it isn't. Clipping then removes a
+      // primitive whose vertices are all negative, like culling, and takes at
+      // most a sub-pixel sliver at the negative corners of any other one. Not
+      // for the geometry shader path, which culls in the generated geometry
+      // shader. Was zero padding, so every existing value keeps its meaning.
+      uint32_t cull_distances_as_clip : 1;
     } vertex;
     struct PixelShaderModification {
       // uint32_t 0.
@@ -260,6 +270,12 @@ class DxbcShaderTranslator : public ShaderTranslator {
              vertex.vertex_kill_and;
     }
   };
+
+  // The clip distance written for a vertex that is not culled when
+  // Modification::vertex.cull_distances_as_clip is set. A primitive with at
+  // least one such vertex is clipped only where this value's barycentric
+  // weight is below 1 / (kCullDistanceAsClipKeep + 1).
+  static constexpr float kCullDistanceAsClipKeep = 1048576.0f;
 
   // Constant buffer bindings in space 0.
   enum class CbufferRegister {
