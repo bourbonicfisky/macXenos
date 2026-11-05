@@ -6273,19 +6273,27 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
 }
 
 bool MetalCommandProcessor::DeferredPassLifecycle() const {
-  // XE_METAL_ENCODE_PASSES=0 keeps render pass begin/end on the command
-  // processor. Needs the encoder thread, and no per-encoder residency sweep
-  // (it runs on the encoder object at creation): Apple GPUs use the residency
-  // set instead, AMD (no residency set) never sweeps.
-  static const bool s_enabled = [] {
+  // Render pass begin/end on the encoder thread: discrete AMD only by default.
+  // Needs the encoder thread, and no per-encoder residency sweep (it runs on
+  // the encoder object at creation). Apple GPUs (residency set) keep pass
+  // begin/end on the command processor: there it measured no gain (M1 Max
+  // Mafia II 81.4 vs 81.3) and Judgment's command buffers failed with
+  // IOGPUCommandQueueErrorDomain 256 "Internal Error" every run on the M1 Max
+  // (35-55 faults a route, ~20% of draws lost), 0 with it off.
+  // XE_METAL_ENCODE_PASSES=0 keeps it off everywhere, =1 also enables it on
+  // Apple GPUs.
+  static const int s_mode = [] {
     const char* v = std::getenv("XE_METAL_ENCODE_PASSES");
-    return !(v && v[0] == '0' && !v[1]);
+    if (v && !v[1] && (v[0] == '0' || v[0] == '1')) {
+      return v[0] - '0';
+    }
+    return -1;
   }();
-  if (!s_enabled || !encode_stream_ || !encode_stream_->deferred()) {
+  if (!s_mode || !encode_stream_ || !encode_stream_->deferred()) {
     return false;
   }
   if (residency_set_) {
-    return true;
+    return s_mode == 1;
   }
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
