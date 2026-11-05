@@ -1762,6 +1762,9 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   // other guest threads for the dialog below).
   Pause();
   XELOGE("Emulator paused after the guest crash.");
+  // Where every other guest thread stood: a crash on an object another
+  // thread had not set up yet (Fallout: New Vegas) shows that thread's wait.
+  LogGuestThreadStates("guest crash");
   xe::FlushLog();
 
   std::string crash_dlg = fmt::format(
