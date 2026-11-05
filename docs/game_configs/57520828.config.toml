@@ -1,0 +1,8 @@
+# macXenos built-in per-title config: Batman: Arkham Origins (57520828).
+# The title writes data through vertex shaders that also rasterize (memory
+# export from a draw with a render target bound). That export class is off by
+# default; without it the scene is covered in magenta/white garbage and the
+# structures show colour noise (Metal only). Same 30 fps with it
+# (2026-11-05, routes-20261105/rmx-ab, M1 Max).
+[GPU]
+metal_memexport_raster = true
