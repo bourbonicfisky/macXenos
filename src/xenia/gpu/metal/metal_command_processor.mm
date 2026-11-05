@@ -20029,6 +20029,105 @@ bool MetalCommandProcessor::ResolveRamConsumerDependencies(
   return true;
 }
 
+// Lazy memexport backlog bound. A routed memexport is armed for demand-driven
+// RAM publication (a CPU read of its pages publishes it) and otherwise stays
+// pending until a newer export covers its whole range. Call of Duty MW2/MW3/
+// BO2 copy streamed texture data into their image pool through rasterizing
+// memexport draws, the CPU never reads the pool back, and the copies rarely
+// cover each other: MW3 kept ~17,000 pending records, MW2 ~4,300, and every
+// texture, vertex and fence-packet consumer decision walked them (M1 Max MW3
+// 27 fps, CP thread 99% busy, half of it in DecideConsumerIndexedImpl).
+// Above the limit, the swap publishes the completed armed records to RAM (a
+// memcpy from the shared buffer, the same convergence a ranged CPU read
+// performs) and retires them. Only the completed prefix of the selection in
+// authority order is drained, so there is no commit and no wait, and older
+// overlapping producers still land first. Titles below the limit (every other
+// title seen: at most a few pending exports) are untouched.
+// XE_METAL_LAZY_MEMEXPORT_LIMIT=<n> sets the limit (default 256); 0 is the
+// exact rollback.
+void MetalCommandProcessor::TrimLazyMemexportBacklog() {
+  static const uint32_t s_limit = [] {
+    constexpr uint32_t kDefault = 256;
+    const char* v = std::getenv("XE_METAL_LAZY_MEMEXPORT_LIMIT");
+    if (!v || !v[0]) {
+      return kDefault;
+    }
+    char* end = nullptr;
+    const unsigned long n = std::strtoul(v, &end, 10);
+    if (end == v || *end) {
+      XELOGW(
+          "XE_METAL_LAZY_MEMEXPORT_LIMIT='{}' is malformed; using the default "
+          "{}",
+          v, kDefault);
+      return kDefault;
+    }
+    return uint32_t(std::min<unsigned long>(n, UINT32_MAX));
+  }();
+  if (!s_limit || pending_memexports_.size() <= s_limit) {
+    return;
+  }
+  // Only armed records are the backlog; without lazy publication (rollback,
+  // trace capture or playback) the boundaries publish exports eagerly.
+  if (!lazy_read_callback_handle_ || trace_writer_.is_open() ||
+      trace_playback_context()) {
+    return;
+  }
+  const uint64_t completed =
+      completed_submission_.load(std::memory_order_acquire);
+  metal::GuestRangeSet ranges;
+  uint32_t candidates = 0;
+  for (const PendingMemexport& me : pending_memexports_) {
+    if (me.lazy_armed && me.submission && me.submission <= completed) {
+      if (ranges.Add(metal::GuestRange::FromBaseLength(me.base_address,
+                                                       me.size_bytes))) {
+        ++candidates;
+      }
+    }
+  }
+  if (ranges.empty()) {
+    return;
+  }
+  ranges.Normalize();
+  metal::ConsumerDecision decision = QueryPendingProducerDependencies(
+      metal::ConsumerKind::kHostCpuRead,
+      metal::ConsumerRequest::Uniform(ranges));
+  // The selection is in authority (registration) order and closed over older
+  // overlapping producers. It can also hold newer, still running producers
+  // that overlap a candidate: stop at the first incomplete record so nothing
+  // waits and nothing newer than it is published ahead of it.
+  size_t prefix = 0;
+  while (prefix < decision.selected.size() &&
+         metal::ProducerComplete(decision.selected[prefix], completed)) {
+    ++prefix;
+  }
+  decision.selected.erase(decision.selected.begin() + ptrdiff_t(prefix),
+                          decision.selected.end());
+  if (decision.selected.empty()) {
+    return;
+  }
+  decision.await = false;
+  decision.max_wait_submission = 0;
+  decision.requires_gpu_ordering = false;
+  decision.max_order_submission = 0;
+  decision.drain = true;
+  decision.action = metal::AuthorityAction::kDrainMatchingRecords;
+  const size_t pending_before = pending_memexports_.size();
+  const metal::ProducerDrainOutcome drained = DrainSelectedPendingProducers(
+      decision, metal::MemexportBoundaryEvidence::kNone);
+  static uint32_t s_trims = 0;
+  ++s_trims;
+  if (s_trims <= 8 || (s_trims & 255) == 0) {
+    XELOGI(
+        "MetalLazyMemexportTrim #{} swap#{}: pending exports {} -> {} (limit "
+        "{}, {} completed armed), drained {} records ({} exports, {} bytes "
+        "copied, {} texture entries invalidated)",
+        s_trims, swap_count_, pending_before, pending_memexports_.size(),
+        s_limit, candidates, drained.drained_records,
+        drained.memexport_records, drained.memexport_bytes_copied,
+        drained.invalidated_entries);
+  }
+}
+
 bool MetalCommandProcessor::PrepareGuestMemoryForHostRead(
     uint32_t guest_address, uint32_t length) {
   if (!length) {
@@ -20756,6 +20855,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     FinalizeSwapFrame();
     return;
   }
+  TrimLazyMemexportBacklog();
 
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {
