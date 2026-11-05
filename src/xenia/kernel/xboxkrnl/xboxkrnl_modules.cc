@@ -29,16 +29,17 @@ dword_result_t XexCheckExecutablePrivilege_entry(dword_t privilege) {
   // Privilege=6 -> 0x00000040 -> XEX_SYSTEM_INSECURE_SOCKETS
   uint32_t mask = 1 << privilege;
 
-  // XEX_SYSTEM_INSECURE_UTILITY_DRIVE (bit 11): answering true makes the
-  // cache-partition code statically linked into titles skip its STFC device
-  // registration and use the cache symlinks directly — the 2020 canary trick
-  // that let Halo 3 use cache0/cache1 with the null raw-partition device
-  // (commit d47f2a6ef), later dropped upstream. Halo 3 otherwise formats the
-  // raw partitions and reports a disc error. XE_INSECURE_UTILITY_DRIVE=0
-  // restores the pure header answer.
+  // XEX_SYSTEM_INSECURE_UTILITY_DRIVE (bit 11) is answered from the header.
+  // Forcing it true (the 2020 canary trick, d47f2a6ef, later dropped
+  // upstream) made the cache-partition code in titles skip its STFC device
+  // registration; Halo 3 needed it until the STFC cache format on the raw
+  // partitions was fixed (2026-09-17), and it hung BioShock at boot (no
+  // frame ever: the main thread waits on an event that path never sets).
+  // Halo 3, ODST, Reach and Halo 4 run their routes unchanged without it.
+  // XE_INSECURE_UTILITY_DRIVE=1 forces it again.
   static const bool s_insecure_utility_drive = [] {
     const char* v = std::getenv("XE_INSECURE_UTILITY_DRIVE");
-    return !v || v[0] != '0';
+    return v && v[0] == '1';
   }();
   if (s_insecure_utility_drive && privilege == 11) {
     return 1;
