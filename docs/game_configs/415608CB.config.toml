@@ -1,0 +1,9 @@
+# macXenos built-in per-title config: Call of Duty: Modern Warfare 3 (415608CB).
+# The IW engine copies streamed texture data into its texture pool through
+# vertex shaders that also rasterize (memory export from a draw with a render
+# target bound). That export class is off by default for its cost elsewhere;
+# without it the pool keeps stale bytes and most world, character and weapon
+# textures render as colour noise and stripes that change from frame to frame.
+# (xenia-mac-evidence codtex-20261105)
+[GPU]
+metal_memexport_raster = true
