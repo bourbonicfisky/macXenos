@@ -109,6 +109,9 @@ bool Entry::Delete(Entry* entry) {
   if (is_read_only()) {
     return false;
   }
+  if (entry->has_open_files()) {
+    return false;
+  }
   if (entry->parent() != this) {
     return false;
   }
