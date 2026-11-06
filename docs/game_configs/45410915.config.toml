@@ -1,0 +1,12 @@
+# macXenos built-in per-title config: Fight Night Champion (45410915).
+# The title crashed ~10 s after boot on every launch, on the EA logo: its
+# FGGameSim thread calls a virtual method (slot 0x4c) on a member object
+# (this+0x14, function 82E3E5A0) that another thread has not created yet, so
+# it reads a null pointer and branches to 0 (PC 0, LR 82E3E5C8). Like Fallout:
+# New Vegas, the creating thread loses a race it wins on hardware because its
+# functions are JIT-compiled on first call; compiling them when the module
+# loads closes it. (xenia-mac-evidence crashes-20261106/fnc, M1 Max: 2 of 2
+# crashes without it, 0 of 2 with it; the title then reaches PRESS START and
+# its attract sequence.)
+[CPU]
+enable_early_precompilation = true
