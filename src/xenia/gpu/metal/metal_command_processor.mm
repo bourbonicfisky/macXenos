@@ -6708,19 +6708,27 @@ void MetalCommandProcessor::EndRenderEncoder(metal::MetalPassEndReason reason,
 }
 
 bool MetalCommandProcessor::DeferredPassLifecycle() const {
-  // XE_METAL_ENCODE_PASSES=0 keeps render pass begin/end on the command
-  // processor. Needs the encoder thread, and no per-encoder residency sweep
-  // (it runs on the encoder object at creation): Apple GPUs use the residency
-  // set instead, AMD (no residency set) never sweeps.
-  static const bool s_enabled = [] {
+  // Render pass begin/end on the encoder thread: discrete AMD only by default.
+  // Needs the encoder thread, and no per-encoder residency sweep (it runs on
+  // the encoder object at creation). Apple GPUs (residency set) keep pass
+  // begin/end on the command processor: there it measured no gain (M1 Max
+  // Mafia II 81.4 vs 81.3) and Judgment's command buffers failed with
+  // IOGPUCommandQueueErrorDomain 256 "Internal Error" every run on the M1 Max
+  // (35-55 faults a route, ~20% of draws lost), 0 with it off.
+  // XE_METAL_ENCODE_PASSES=0 keeps it off everywhere, =1 also enables it on
+  // Apple GPUs.
+  static const int s_mode = [] {
     const char* v = std::getenv("XE_METAL_ENCODE_PASSES");
-    return !(v && v[0] == '0' && !v[1]);
+    if (v && !v[1] && (v[0] == '0' || v[0] == '1')) {
+      return v[0] - '0';
+    }
+    return -1;
   }();
-  if (!s_enabled || !encode_stream_ || !encode_stream_->deferred()) {
+  if (!s_mode || !encode_stream_ || !encode_stream_->deferred()) {
     return false;
   }
   if (residency_set_) {
-    return true;
+    return s_mode == 1;
   }
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
@@ -7835,6 +7843,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }();
     if (s_commit_every && draws_since_commit_ >= s_commit_every) {
       EndFrameEncoder(metal::SeamBoundaryReason::kDebugProbe);
+    }
+  }
+  // ArenaAllocate can only wait for committed submissions, so one open
+  // submission that fills the upload arena drops every later draw in it
+  // (Dishonored's ~17k-draw loading frame lost 16-41k draws on sysconst-alloc
+  // once its count-only occlusion draws ran). Commit at a draw boundary, before
+  // this draw allocates anything, once the open submission holds a quarter of
+  // the ring. XE_METAL_ARENA_SPLIT_BYTES=<bytes> moves the threshold; 0 turns
+  // the split off.
+  {
+    static const uint64_t s_arena_split_bytes = [this]() -> uint64_t {
+      const char* v = std::getenv("XE_METAL_ARENA_SPLIT_BYTES");
+      if (v) {
+        return std::strtoull(v, nullptr, 10);
+      }
+      return upload_arena_ ? upload_arena_->size() / 4 : 0;
+    }();
+    if (s_arena_split_bytes && upload_arena_ && draws_since_commit_ > 0 &&
+        upload_arena_->open_bytes() >= s_arena_split_bytes) {
+      EndFrameEncoder(metal::SeamBoundaryReason::kArenaSplit);
     }
   }
   const bool state_dedupe = StateDedupeEnabled();
@@ -10374,6 +10402,44 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     vs_mod_decoded.vertex.vertex_kill_and = uint32_t(
         (vertex_shader->writes_point_size_edge_flag_kill_vertex() & 0b100) &&
         !pa_cl_clip_cntl.vtx_kill_or);
+    // Metal has no cull distances: the Metal Shader Converter output never
+    // culls on SV_CullDistance, so AND-mode vertex kill (and cull-only user
+    // clip planes) culled nothing. Banjo-Kazooie: Nuts & Bolts kills each
+    // grass tuft whose density-map texel is below its threshold this way;
+    // without it every tuft drew, covering Spiral Mountain's dirt path and
+    // its flowers. Emit them as clip distances instead. The geometry shader
+    // path culls in its generated shader already. XE_METAL_CULL_AS_CLIP=0
+    // restores the old, non-culling output; =2 is a diagnostic arm that kills
+    // AND-mode vertices with the OR operator instead (a NaN position: any
+    // killed vertex drops the primitive).
+    static const uint32_t s_cull_as_clip = [] {
+      const char* v = std::getenv("XE_METAL_CULL_AS_CLIP");
+      if (v && !v[1] && (v[0] == '0' || v[0] == '2')) {
+        return uint32_t(v[0] - '0');
+      }
+      return 1u;
+    }();
+    if (s_cull_as_clip == 2 && !use_geometry_emulation) {
+      vs_mod_decoded.vertex.vertex_kill_and = 0;
+    }
+    vs_mod_decoded.vertex.cull_distances_as_clip =
+        uint32_t(s_cull_as_clip == 1 && !use_geometry_emulation &&
+                 vs_mod_decoded.GetVertexCullDistanceCount() != 0);
+    if (vs_mod_decoded.vertex.cull_distances_as_clip) {
+      // Engagement evidence (bounded): which vertex shaders take the route.
+      static uint32_t s_cull_as_clip_logs = 0;
+      if (s_cull_as_clip_logs < 8) {
+        ++s_cull_as_clip_logs;
+        XELOGI(
+            "MetalCullAsClip: vs={:016X} vertex_kill_and={} ucp_cull={} "
+            "planes={} at draw {}",
+            vertex_shader->ucode_data_hash(),
+            uint32_t(vs_mod_decoded.vertex.vertex_kill_and),
+            uint32_t(vs_mod_decoded.vertex.user_clip_plane_cull),
+            uint32_t(vs_mod_decoded.vertex.user_clip_plane_count),
+            trace_draw_index_);
+      }
+    }
     // XEPSIZE feeds the geometry-emulation mesh stage only; the vertex-shader
     // point expansion consumes the size inside the vertex shader and writes
     // the sprite coordinates the pixel shader's point PsParamGen reads.
@@ -20487,6 +20553,105 @@ bool MetalCommandProcessor::ResolveRamConsumerDependencies(
   return true;
 }
 
+// Lazy memexport backlog bound. A routed memexport is armed for demand-driven
+// RAM publication (a CPU read of its pages publishes it) and otherwise stays
+// pending until a newer export covers its whole range. Call of Duty MW2/MW3/
+// BO2 copy streamed texture data into their image pool through rasterizing
+// memexport draws, the CPU never reads the pool back, and the copies rarely
+// cover each other: MW3 kept ~17,000 pending records, MW2 ~4,300, and every
+// texture, vertex and fence-packet consumer decision walked them (M1 Max MW3
+// 27 fps, CP thread 99% busy, half of it in DecideConsumerIndexedImpl).
+// Above the limit, the swap publishes the completed armed records to RAM (a
+// memcpy from the shared buffer, the same convergence a ranged CPU read
+// performs) and retires them. Only the completed prefix of the selection in
+// authority order is drained, so there is no commit and no wait, and older
+// overlapping producers still land first. Titles below the limit (every other
+// title seen: at most a few pending exports) are untouched.
+// XE_METAL_LAZY_MEMEXPORT_LIMIT=<n> sets the limit (default 256); 0 is the
+// exact rollback.
+void MetalCommandProcessor::TrimLazyMemexportBacklog() {
+  static const uint32_t s_limit = [] {
+    constexpr uint32_t kDefault = 256;
+    const char* v = std::getenv("XE_METAL_LAZY_MEMEXPORT_LIMIT");
+    if (!v || !v[0]) {
+      return kDefault;
+    }
+    char* end = nullptr;
+    const unsigned long n = std::strtoul(v, &end, 10);
+    if (end == v || *end) {
+      XELOGW(
+          "XE_METAL_LAZY_MEMEXPORT_LIMIT='{}' is malformed; using the default "
+          "{}",
+          v, kDefault);
+      return kDefault;
+    }
+    return uint32_t(std::min<unsigned long>(n, UINT32_MAX));
+  }();
+  if (!s_limit || pending_memexports_.size() <= s_limit) {
+    return;
+  }
+  // Only armed records are the backlog; without lazy publication (rollback,
+  // trace capture or playback) the boundaries publish exports eagerly.
+  if (!lazy_read_callback_handle_ || trace_writer_.is_open() ||
+      trace_playback_context()) {
+    return;
+  }
+  const uint64_t completed =
+      completed_submission_.load(std::memory_order_acquire);
+  metal::GuestRangeSet ranges;
+  uint32_t candidates = 0;
+  for (const PendingMemexport& me : pending_memexports_) {
+    if (me.lazy_armed && me.submission && me.submission <= completed) {
+      if (ranges.Add(metal::GuestRange::FromBaseLength(me.base_address,
+                                                       me.size_bytes))) {
+        ++candidates;
+      }
+    }
+  }
+  if (ranges.empty()) {
+    return;
+  }
+  ranges.Normalize();
+  metal::ConsumerDecision decision = QueryPendingProducerDependencies(
+      metal::ConsumerKind::kHostCpuRead,
+      metal::ConsumerRequest::Uniform(ranges));
+  // The selection is in authority (registration) order and closed over older
+  // overlapping producers. It can also hold newer, still running producers
+  // that overlap a candidate: stop at the first incomplete record so nothing
+  // waits and nothing newer than it is published ahead of it.
+  size_t prefix = 0;
+  while (prefix < decision.selected.size() &&
+         metal::ProducerComplete(decision.selected[prefix], completed)) {
+    ++prefix;
+  }
+  decision.selected.erase(decision.selected.begin() + ptrdiff_t(prefix),
+                          decision.selected.end());
+  if (decision.selected.empty()) {
+    return;
+  }
+  decision.await = false;
+  decision.max_wait_submission = 0;
+  decision.requires_gpu_ordering = false;
+  decision.max_order_submission = 0;
+  decision.drain = true;
+  decision.action = metal::AuthorityAction::kDrainMatchingRecords;
+  const size_t pending_before = pending_memexports_.size();
+  const metal::ProducerDrainOutcome drained = DrainSelectedPendingProducers(
+      decision, metal::MemexportBoundaryEvidence::kNone);
+  static uint32_t s_trims = 0;
+  ++s_trims;
+  if (s_trims <= 8 || (s_trims & 255) == 0) {
+    XELOGI(
+        "MetalLazyMemexportTrim #{} swap#{}: pending exports {} -> {} (limit "
+        "{}, {} completed armed), drained {} records ({} exports, {} bytes "
+        "copied, {} texture entries invalidated)",
+        s_trims, swap_count_, pending_before, pending_memexports_.size(),
+        s_limit, candidates, drained.drained_records,
+        drained.memexport_records, drained.memexport_bytes_copied,
+        drained.invalidated_entries);
+  }
+}
+
 bool MetalCommandProcessor::PrepareGuestMemoryForHostRead(
     uint32_t guest_address, uint32_t length) {
   if (!length) {
@@ -21214,6 +21379,7 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     FinalizeSwapFrame();
     return;
   }
+  TrimLazyMemexportBacklog();
 
   ui::Presenter* presenter = graphics_system_->presenter();
   if (!presenter) {

@@ -1154,6 +1154,13 @@ void EmulatorWindow::AutoScreenshotLoop() {
   uint64_t stall_count = 0;
   auto stall_since = clock::now();
   bool stall_logged = false;
+  // XE_GUEST_STATE_DUMP_EVERY_S=N: the same dump every N s once a title is
+  // running, for stalls that keep presenting (a splash screen that never
+  // advances never trips the no-swap dump).
+  const char* every_env = std::getenv("XE_GUEST_STATE_DUMP_EVERY_S");
+  const auto dump_every =
+      std::chrono::seconds(every_env ? std::max(std::atoi(every_env), 0) : 0);
+  auto next_dump = clock::now() + dump_every;
   uint64_t burst_sequence = 0;
   while (!auto_screenshot_stop_.load()) {
     xe::threading::Sleep(poll_interval);
@@ -1162,6 +1169,11 @@ void EmulatorWindow::AutoScreenshotLoop() {
       gpu::GraphicsSystem* graphics = emulator_->graphics_system();
       gpu::CommandProcessor* command_processor =
           graphics ? graphics->command_processor() : nullptr;
+      if (dump_every.count() && now >= next_dump) {
+        next_dump = now + dump_every;
+        emulator_->LogGuestThreadStates(
+            fmt::format("periodic, every {} s", dump_every.count()));
+      }
       if (command_processor) {
         const uint64_t count = command_processor->guest_swap_count();
         if (count != stall_count) {

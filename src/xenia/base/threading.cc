@@ -9,6 +9,9 @@
 
 #include "xenia/base/threading.h"
 
+#include <cstdlib>
+#include <cstring>
+
 namespace xe {
 namespace threading {
 
@@ -28,6 +31,14 @@ uint32_t current_thread_id() {
 }
 
 void set_current_thread_id(uint32_t id) { current_thread_id_ = id; }
+
+bool ThreadLifecycleLogEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("XE_THREAD_LIFECYCLE_LOG");
+    return value && *value && std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
 
 }  // namespace threading
 }  // namespace xe

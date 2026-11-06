@@ -9,6 +9,8 @@
 
 #include "xenia/vfs/devices/host_path_entry.h"
 
+#include <algorithm>
+
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mapped_memory.h"
@@ -28,6 +30,22 @@ HostPathEntry::HostPathEntry(Device* device, Entry* parent,
     : Entry(device, parent, path), host_path_(host_path) {}
 
 HostPathEntry::~HostPathEntry() = default;
+
+bool HostPathEntry::has_open_files() const {
+  auto global_lock = global_critical_region_.Acquire();
+  // Deleting a directory frees its children, so their handles count too.
+  return open_files_.load() != 0 ||
+         std::ranges::any_of(children_, [](const auto& child) {
+           return child->has_open_files();
+         });
+}
+
+void HostPathEntry::ReleaseFile() {
+  auto global_lock = global_critical_region_.Acquire();
+  if (open_files_.fetch_sub(1) == 1 && delete_on_close() && parent()) {
+    Delete();
+  }
+}
 
 HostPathEntry* HostPathEntry::Create(Device* device, Entry* parent,
                                      const std::filesystem::path& full_path,
@@ -122,21 +140,21 @@ bool HostPathEntry::DeleteEntryInternal(Entry* entry) {
   }
 }
 
-void HostPathEntry::RenameEntryInternal(
-    const std::vector<std::string_view>& path_parts) {
-  const std::string relative_path = xe::utf8::join_paths(path_parts);
-  const std::string new_host_path_ = xe::utf8::join_paths(
-      xe::path_to_utf8(static_cast<HostPathDevice*>(device_)->host_path()),
-      relative_path);
+bool HostPathEntry::RenameEntryInternal(Entry* new_parent,
+                                        const std::string_view name) {
+  const std::filesystem::path new_host_path =
+      static_cast<HostPathEntry*>(new_parent)->host_path_ / xe::to_path(name);
 
   std::error_code ec;
-  std::filesystem::rename(host_path_, new_host_path_, ec);
+  std::filesystem::rename(host_path_, new_host_path, ec);
   if (ec) {
     XELOGE("RenameEntryInternal: Failed to rename '{}' to '{}': {}",
-           xe::path_to_utf8(host_path_), new_host_path_, ec.message());
-    return;
+           xe::path_to_utf8(host_path_), xe::path_to_utf8(new_host_path),
+           ec.message());
+    return false;
   }
-  host_path_ = new_host_path_;
+  host_path_ = new_host_path;
+  return true;
 }
 
 void HostPathEntry::update() {

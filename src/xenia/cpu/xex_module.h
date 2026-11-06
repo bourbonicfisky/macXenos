@@ -233,6 +233,9 @@ class XexModule : public xe::cpu::Module {
   InfoCacheFlags* GetInstructionAddressFlags(uint32_t guest_addr);
 
   virtual void Precompile() override;
+  // The heuristic precompile Precompile() runs when enable_early_precompilation
+  // is set, for a per-title config that sets it after the module has loaded.
+  void PrecompileDiscovered() { PrecompileDiscoveredFunctions(); }
 
  protected:
   std::unique_ptr<Function> CreateFunction(uint32_t address) override;

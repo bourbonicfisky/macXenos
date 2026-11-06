@@ -2242,10 +2242,11 @@ X_STATUS xeProcessUserApcs(PPCContext* ctx) {
   ctx->r[1] = old_stack_pointer - 32;
 
   while (!user_apc_queue.empty(ctx)) {
-    uint32_t apc_ptr = user_apc_queue.flink_ptr;
-
+    // The queue's flink points at the APC's list entry, 8 bytes in; the
+    // kernel routine and the heap free need the APC itself.
     XAPC* apc = user_apc_queue.ListEntryObject(
-        ctx->TranslateVirtual<X_LIST_ENTRY*>(apc_ptr));
+        ctx->TranslateVirtual<X_LIST_ENTRY*>(user_apc_queue.flink_ptr));
+    uint32_t apc_ptr = ctx->HostToGuestVirtual(apc);
 
     uint8_t* scratch_ptr = ctx->TranslateVirtual(scratch_address);
     xe::store_and_swap<uint32_t>(scratch_ptr + 0, apc->normal_routine);

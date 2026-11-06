@@ -94,6 +94,9 @@ class Entry {
   uint64_t access_timestamp() const { return access_timestamp_; }
   uint64_t write_timestamp() const { return write_timestamp_; }
   bool delete_on_close() const { return delete_on_close_; }
+  virtual bool has_open_files() const { return false; }
+  virtual void RetainFile() {}
+  virtual void ReleaseFile() {}
 
   virtual bool SetAttributes(uint64_t attributes) { return false; }
   virtual bool SetCreateTimestamp(uint64_t timestamp) { return false; }
@@ -120,7 +123,8 @@ class Entry {
   bool Delete();
   void Touch();
 
-  void Rename(const std::filesystem::path file_path);
+  X_STATUS Rename(const std::filesystem::path file_path,
+                  bool replace_existing = false);
   // If successful, out_file points to a new file. When finished, call
   // file->Destroy()
   virtual X_STATUS Open(uint32_t desired_access, File** out_file) = 0;
@@ -141,8 +145,10 @@ class Entry {
     return nullptr;
   }
   virtual bool DeleteEntryInternal(Entry* entry) = 0;
-  virtual void RenameEntryInternal(
-      const std::vector<std::string_view>& path_parts) {}
+  virtual bool RenameEntryInternal(Entry* new_parent,
+                                   const std::string_view name) {
+    return true;
+  }
 
   xe::global_critical_region global_critical_region_;
   Device* device_;

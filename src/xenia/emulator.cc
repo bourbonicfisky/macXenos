@@ -79,6 +79,7 @@
 #endif  // XE_PLATFORM_MAC
 
 DECLARE_bool(headless);
+DECLARE_bool(enable_early_precompilation);
 
 DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
 UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
@@ -1445,6 +1446,10 @@ void Emulator::LogGuestThreadStates(std::string_view reason) {
                  *memory()->TranslateVirtualBE<uint32_t>(array + i * 4));
       }
     }
+    // Why a thread is not running: guest suspend count and creation flags,
+    // whether guest code ever began, and the host thread's suspend state
+    // (start_wait=1 = still parked before its first guest instruction).
+    msg.append(fmt::format("\n    sched {}", thread->DebugSuspendState()));
     // Spinning threads keep their loop state in callee-saved registers and
     // the frame; r31 is usually the object being spun on.
     msg.append(fmt::format("\n    r28={:08X} r29={:08X} r30={:08X} r31={:08X}",
@@ -1758,6 +1763,9 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   // other guest threads for the dialog below).
   Pause();
   XELOGE("Emulator paused after the guest crash.");
+  // Where every other guest thread stood: a crash on an object another
+  // thread had not set up yet (Fallout: New Vegas) shows that thread's wait.
+  LogGuestThreadStates("guest crash");
   xe::FlushLog();
 
   std::string crash_dlg = fmt::format(
@@ -1969,6 +1977,8 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
 
     // Load the per-game configuration file and make sure updates are handled
     // by the callbacks.
+    const bool early_precompilation_at_load =
+        cvars::enable_early_precompilation;
     config::LoadGameConfig(title_id);
     assert_true(game_config_load_callback_loop_next_index_ == SIZE_MAX);
     game_config_load_callback_loop_next_index_ = 0;
@@ -1997,6 +2007,18 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
       XELOGI("jit_precompile_functions: compiled {} of {} for title {}",
              compiled, requested, title_id);
+    }
+    // enable_early_precompilation from the title's config: the module already
+    // loaded without it, so run its precompile now, still before the first
+    // guest thread (Fallout: New Vegas's boot race).
+    if (cvars::enable_early_precompilation && !early_precompilation_at_load &&
+        module->xex_module()) {
+      const auto start = std::chrono::steady_clock::now();
+      module->xex_module()->PrecompileDiscovered();
+      XELOGI("enable_early_precompilation (game config): precompiled in {} ms",
+             std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - start)
+                 .count());
     }
 
     // Per-title cache mount policy. The cache devices are mounted before the

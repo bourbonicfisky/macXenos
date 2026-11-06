@@ -1,0 +1,18 @@
+# macXenos built-in per-title config: Dishonored (425307E3).
+# The title hides objects on occlusion query results and, like Mafia II, takes
+# its query records from a ring, so fast mode's guess (a record's previous
+# count) belongs to another object: lamp glows, the figures in the far doorway
+# and the character beside the player flash in and out on the Dunwall Tower
+# boat. Strict queries wait for the real result.
+# (xenia-mac-evidence user-reports-20261103/dish1103c, M4 Pro, still camera,
+# 1 shot/s: median pixels changed between consecutive shots fast 7025, fast
+# with count-only draws skipped 7042, strict 4198; the flashing regions are
+# gone with strict. 30.0 fps in all three, the title's cap.)
+# The title also writes data through vertex shaders that rasterize (memory
+# export from a draw with a render target bound); without that export class
+# the far doorway, lamp glows, the guard's visor and the machinery render
+# with magenta/green garbage (Metal only; same 30 fps with it, 2026-11-05,
+# routes-20261105/rmx-ab).
+[GPU]
+occlusion_query = "strict"
+metal_memexport_raster = true

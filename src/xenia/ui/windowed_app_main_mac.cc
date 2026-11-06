@@ -101,9 +101,25 @@ bool RelaunchWithTarget(const std::string& target_path,
   // on a re-exec-of-a-re-exec that stale registration leaves the new Cocoa app
   // unable to take foreground - the window launches but stays unfocused and
   // unrendered until the user clicks it. A fresh PID activates cleanly.
+  // Only stdin/stdout/stderr cross over: by default the child inherits every
+  // descriptor, and the guest's bound sockets then stay open in it (unused),
+  // so its own bind of the same port fails with EADDRINUSE. Modern Warfare 2
+  // relaunches itself at boot and looped until the hop cap on "Failed to
+  // bind socket".
+  posix_spawnattr_t spawn_attr;
+  posix_spawnattr_init(&spawn_attr);
+  posix_spawnattr_setflags(&spawn_attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
+  posix_spawn_file_actions_t spawn_actions;
+  posix_spawn_file_actions_init(&spawn_actions);
+  for (int fd = 0; fd <= 2; ++fd) {
+    posix_spawn_file_actions_addinherit_np(&spawn_actions, fd);
+  }
   pid_t child_pid = 0;
-  int spawn_result = posix_spawn(&child_pid, spawn_path, nullptr, nullptr,
-                                 new_argv.data(), *_NSGetEnviron());
+  int spawn_result =
+      posix_spawn(&child_pid, spawn_path, &spawn_actions, &spawn_attr,
+                  new_argv.data(), *_NSGetEnviron());
+  posix_spawn_file_actions_destroy(&spawn_actions);
+  posix_spawnattr_destroy(&spawn_attr);
   if (spawn_result != 0) {
     XELOGE("RelaunchWithTarget: posix_spawn failed: {}",
            std::strerror(spawn_result));

@@ -52,6 +52,7 @@ enum class SeamBoundaryReason : uint32_t {
   kConsumerDependency,  // ResolvePendingProducerDependencies boundary
   kSwapPacing,          // the swap's one synchronous point (S8)
   kResolveSizeSplit,    // >= 1 MiB resolve commit split
+  kArenaSplit,          // open submission holds a quarter of the upload arena
   kHazardFlush,         // shared-memory hazard flush callback
   kQueryAdmission,      // ZPD admission kDeferAfterClosingSubmission
   kQueryAwait,          // AwaitQueryResolve open-segment commit
@@ -71,6 +72,8 @@ inline const char* SeamBoundaryReasonName(SeamBoundaryReason reason) {
       return "swap-pacing";
     case SeamBoundaryReason::kResolveSizeSplit:
       return "resolve-size-split";
+    case SeamBoundaryReason::kArenaSplit:
+      return "arena-split";
     case SeamBoundaryReason::kHazardFlush:
       return "hazard-flush";
     case SeamBoundaryReason::kQueryAdmission:

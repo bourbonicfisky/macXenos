@@ -29,6 +29,9 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <array>
 #include <cstddef>
 #include <ctime>
@@ -188,6 +191,10 @@ std::array<std::atomic<bool>, static_cast<size_t>(SignalType::k_Count)>
 
 static void signal_handler(int signal, siginfo_t* info, void* context);
 
+// XE_THREAD_SUSPEND_DEFER=0: park in the handler at once (the old behaviour).
+// Read before the first suspend signal handler is installed.
+static bool suspend_deferral_enabled_ = true;
+
 // The semaphore a suspended thread parks on inside the suspend signal handler.
 // macOS does not implement unnamed POSIX semaphores: sem_init fails with
 // ENOSYS and every sem_wait on the result fails at once, so a "suspended"
@@ -215,21 +222,19 @@ class SuspendSemaphore {
     sem_post(&sem_);
 #endif
   }
-  // False when the semaphore is gone or broken; interruptions are retried.
+  // False when the semaphore is gone or broken. An interruption returns true
+  // like a wakeup, so the caller re-checks its condition: a suspend signal
+  // that lands in a wait outside the handler (a self-suspend, or a deferred
+  // suspend being served) runs a nested wait that takes the resume's post,
+  // and retrying here would then wait for a post that never comes.
   bool Wait() {
     if (!valid_) return false;
 #if XE_PLATFORM_MAC
-    kern_return_t kr;
-    do {
-      kr = semaphore_wait(sem_);
-    } while (kr == KERN_ABORTED);
-    return kr == KERN_SUCCESS;
+    kern_return_t kr = semaphore_wait(sem_);
+    return kr == KERN_SUCCESS || kr == KERN_ABORTED;
 #else
-    int ret;
-    do {
-      ret = sem_wait(&sem_);
-    } while (ret == -1 && errno == EINTR);
-    return ret == 0;
+    int ret = sem_wait(&sem_);
+    return ret == 0 || errno == EINTR;
 #endif
   }
   void Destroy() {
@@ -253,6 +258,13 @@ class SuspendSemaphore {
 
 
 void install_signal_handler(SignalType type) {
+  if (type == SignalType::kThreadSuspend) {
+    static const bool defer = [] {
+      const char* value = std::getenv("XE_THREAD_SUSPEND_DEFER");
+      return !(value && std::strcmp(value, "0") == 0);
+    }();
+    suspend_deferral_enabled_ = defer;
+  }
   bool expected = false;
   if (!signal_handler_installed[static_cast<size_t>(type)]
            .compare_exchange_strong(expected, true)) {
@@ -270,6 +282,18 @@ void install_signal_handler(SignalType type) {
 
 // TODO(dougvj)
 void EnableAffinityConfiguration() {}
+
+// The calling thread's id as system_id() reports it, for lifecycle logs
+// (SYS_gettid is not a thread id on macOS).
+static uint32_t LifecycleSelfId() {
+#if XE_PLATFORM_MAC
+  uint64_t tid = 0;
+  pthread_threadid_np(nullptr, &tid);
+  return static_cast<uint32_t>(tid);
+#else
+  return static_cast<uint32_t>(syscall(SYS_gettid));
+#endif
+}
 
 // uint64_t ticks() { return mach_absolute_time(); }
 
@@ -1084,6 +1108,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   std::string name() const {
     WaitStarted();
     auto result = std::array<char, 17>{'\0'};
+    SuspendDeferralScope suspend_deferral;
     std::unique_lock lock(state_mutex_);
     if (state_ != State::kUninitialized && state_ != State::kFinished) {
 #if XE_PLATFORM_ANDROID
@@ -1110,6 +1135,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   void set_name(const std::string& name) const {
     WaitStarted();
+    SuspendDeferralScope suspend_deferral;
     std::unique_lock<std::mutex> lock(state_mutex_);
     if (state_ != State::kUninitialized && state_ != State::kFinished) {
 #if XE_PLATFORM_MAC
@@ -1298,7 +1324,13 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       *out_previous_suspend_count = 0;
     }
     WaitStarted();
+    SuspendDeferralScope suspend_deferral;
     std::unique_lock lock(state_mutex_);
+    if (ThreadLifecycleLogEnabled()) {
+      XELOGI("ThreadLifecycle host-resume tid={:X} by={:X} count={} state={}",
+             system_id(), LifecycleSelfId(), suspend_count_.load(),
+             StateName(state_));
+    }
     // Check if thread has any suspend count (Windows allows resume even if
     // running)
     if (suspend_count_ == 0) {
@@ -1331,6 +1363,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     bool already_suspended = false;
 
     {
+      SuspendDeferralScope suspend_deferral;
       std::unique_lock lock(state_mutex_);
       if (out_previous_suspend_count) {
         *out_previous_suspend_count = suspend_count_;
@@ -1338,6 +1371,13 @@ class PosixCondition<Thread> final : public PosixConditionBase {
       already_suspended = (state_ == State::kSuspended);
       state_ = State::kSuspended;
       ++suspend_count_;
+      if (ThreadLifecycleLogEnabled()) {
+        XELOGI(
+            "ThreadLifecycle host-suspend tid={:X} by={:X} count={} "
+            "already={} self={} start_wait={}",
+            system_id(), LifecycleSelfId(), suspend_count_.load(),
+            already_suspended, is_current_thread, in_start_wait_.load());
+      }
     }
 
     // If already suspended, just increment the count — don't send another
@@ -1373,6 +1413,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 #endif
 #endif
     {
+      SuspendDeferralScope suspend_deferral;
       std::unique_lock lock(state_mutex_);
 #if 0  // [thread-diag] Re-enable for self/external termination probes.
 #if XE_PLATFORM_MAC
@@ -1421,6 +1462,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   }
 
   void WaitStarted() const {
+    SuspendDeferralScope suspend_deferral;
     std::unique_lock lock(state_mutex_);
     state_signal_.wait(lock,
                        [this] { return state_ != State::kUninitialized; });
@@ -1436,12 +1478,41 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     // before the signal is delivered leaves a token behind. Re-check the
     // count rather than trusting one token, or that stale post releases the
     // next suspend immediately.
+    parked_.fetch_add(1, std::memory_order_relaxed);
     while (suspend_count_.load(std::memory_order_acquire) > 0) {
       if (!suspend_sem_.Wait()) {
         // The semaphore is gone (the thread has been joined). Do not spin.
         break;
       }
     }
+    parked_.fetch_sub(1, std::memory_order_relaxed);
+  }
+
+  // Never blocks: the dump that calls this may run while a thread holds
+  // state_mutex_.
+  std::string DebugState() const {
+    std::unique_lock lock(state_mutex_, std::try_to_lock);
+    return fmt::format(
+        "host[{} count={} start_wait={} body={} parked={}]",
+        lock.owns_lock() ? StateName(state_) : "locked",
+        suspend_count_.load(std::memory_order_relaxed),
+        in_start_wait_.load(std::memory_order_relaxed),
+        body_started_.load(std::memory_order_relaxed),
+        parked_.load(std::memory_order_relaxed));
+  }
+
+  static const char* StateName(State state) {
+    switch (state) {
+      case State::kUninitialized:
+        return "uninit";
+      case State::kRunning:
+        return "running";
+      case State::kSuspended:
+        return "suspended";
+      case State::kFinished:
+        return "finished";
+    }
+    return "?";
   }
 
   void* native_handle() const override {
@@ -1473,6 +1544,11 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   // Written under state_mutex_, but read from the suspend signal handler.
   std::atomic<uint32_t> suspend_count_;
   std::atomic<bool> joined_{false};  // Prevents a second pthread_join
+  // Hang diagnostics (DebugState): parked before the start routine, start
+  // routine entered, parked in WaitSuspended.
+  std::atomic<bool> in_start_wait_{false};
+  std::atomic<bool> body_started_{false};
+  std::atomic<int32_t> parked_{0};
   SuspendSemaphore suspend_sem_;  // Async-signal-safe suspend/resume
   mutable std::mutex state_mutex_;
   mutable std::mutex callback_mutex_;
@@ -1737,6 +1813,8 @@ class PosixThread final : public PosixConditionHandle<Thread> {
   }
 
   void set_name(std::string name) override {
+    // Covers name_mutex_ as well as the state lock inside handle_.set_name().
+    SuspendDeferralScope suspend_deferral;
     handle_.WaitStarted();
 #if XE_PLATFORM_MAC
     // Serialize concurrent renames of the same thread object. The base
@@ -1781,6 +1859,8 @@ class PosixThread final : public PosixConditionHandle<Thread> {
 
   void WaitSuspended() { handle_.WaitSuspended(); }
 
+  std::string DebugState() const override { return handle_.DebugState(); }
+
 #if XE_PLATFORM_MAC
  private:
   // Guards set_name() against concurrent renames of this thread object.
@@ -1789,6 +1869,34 @@ class PosixThread final : public PosixConditionHandle<Thread> {
 };
 
 thread_local PosixThread* current_thread_ = nullptr;
+
+// SuspendDeferralScope state. Only the owning thread and its own signal
+// handler touch these; the handler reads the depth and sets the flag.
+thread_local volatile sig_atomic_t suspend_deferral_depth_ = 0;
+thread_local volatile sig_atomic_t suspend_deferred_ = 0;
+
+SuspendDeferralScope::SuspendDeferralScope() {
+  suspend_deferral_depth_ = suspend_deferral_depth_ + 1;
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+}
+
+SuspendDeferralScope::~SuspendDeferralScope() {
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+  suspend_deferral_depth_ = suspend_deferral_depth_ - 1;
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+  // A request that arrived after the decrement saw depth 0 and parked in the
+  // handler; one before it set the flag, read here.
+  if (suspend_deferral_depth_ == 0 && suspend_deferred_) {
+    suspend_deferred_ = 0;
+    if (current_thread_) {
+      if (ThreadLifecycleLogEnabled()) {
+        XELOGI("ThreadLifecycle deferred suspend served tid={:X}",
+               LifecycleSelfId());
+      }
+      current_thread_->WaitSuspended();
+    }
+  }
+}
 
 void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
 #if !XE_PLATFORM_ANDROID
@@ -1831,6 +1939,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
     // parked the thread forever. Every guest thread is created suspended and
     // resumed by its creator, so this hit at random (Gears of War 3 stuck on
     // "Loading profile": the loader thread never started).
+    SuspendDeferralScope suspend_deferral;
     std::unique_lock lock(thread->handle_.state_mutex_);
     thread->handle_.state_ =
         create_suspended ? State::kSuspended : State::kRunning;
@@ -1841,14 +1950,23 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
   }
 
   if (create_suspended) {
+    thread->handle_.in_start_wait_ = true;
+    SuspendDeferralScope suspend_deferral;
     std::unique_lock lock(thread->handle_.state_mutex_);
     thread->handle_.state_signal_.wait(
         lock, [thread] { return thread->handle_.suspend_count_ == 0; });
+    thread->handle_.in_start_wait_ = false;
   }
 
+  thread->handle_.body_started_ = true;
+  if (ThreadLifecycleLogEnabled()) {
+    XELOGI("ThreadLifecycle host-start tid={:X} create_suspended={}",
+           LifecycleSelfId(), create_suspended);
+  }
   start_routine();
 
   {
+    SuspendDeferralScope suspend_deferral;
     std::unique_lock lock(thread->handle_.state_mutex_);
     thread->handle_.state_ = State::kFinished;
   }
@@ -1928,6 +2046,11 @@ static void signal_handler(int signal, siginfo_t* info, void* context) {
       if (!current_thread_) {
         // current_thread_ is NULL - this can happen if the signal arrives
         // before the thread has initialized or after it has exited
+        return;
+      }
+      if (suspend_deferral_depth_ > 0 && suspend_deferral_enabled_) {
+        // Holding a lock a resumer may need: park when the scope ends.
+        suspend_deferred_ = 1;
         return;
       }
       current_thread_->WaitSuspended();

@@ -1,0 +1,16 @@
+# macXenos built-in per-title config: Fallout: New Vegas (425307E0).
+# The title crashed at boot on almost every launch (a call through a null
+# pointer on its music thread, PC 825E2790 / LR 825E2794): the music thread
+# opens Data\Music\Special\MainTitle.xma and uses an object that the main
+# thread only sets later in its static initialization (store at 822A8280).
+# Before main() the main thread runs thousands of initializers, each one
+# compiled by the JIT on its first call (~27k functions in the first 5 s), so
+# it loses a race it wins on hardware. Compiling the known functions when the
+# module loads takes that cost out of the race; it costs about 5 s of
+# precompiling before the title starts (M1 Max: 5266 ms).
+# (xenia-mac-evidence routes-20261104/fnv-pre, M1 Max: 6 of 6 boots ran 60 s
+# at 30 fps with it, 3 of them on empty cache roots; ~25 boots in a row
+# crashed without it, including 3 on empty cache roots. First frame 0.5-0.6 s
+# with it, 1.3-1.9 s in the old good boots.)
+[CPU]
+enable_early_precompilation = true

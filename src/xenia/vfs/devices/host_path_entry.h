@@ -10,6 +10,7 @@
 #ifndef XENIA_VFS_DEVICES_HOST_PATH_ENTRY_H_
 #define XENIA_VFS_DEVICES_HOST_PATH_ENTRY_H_
 
+#include <atomic>
 #include <string>
 
 #include "xenia/base/filesystem.h"
@@ -39,6 +40,9 @@ class HostPathEntry : public Entry {
                                            size_t offset,
                                            size_t length) override;
   void update() override;
+  bool has_open_files() const override;
+  void RetainFile() override { open_files_.fetch_add(1); }
+  void ReleaseFile() override;
 
   bool SetAttributes(uint64_t attributes) override;
   bool SetCreateTimestamp(uint64_t timestamp) override;
@@ -51,10 +55,11 @@ class HostPathEntry : public Entry {
   std::unique_ptr<Entry> CreateEntryInternal(const std::string_view name,
                                              uint32_t attributes) override;
   bool DeleteEntryInternal(Entry* entry) override;
-  void RenameEntryInternal(
-      const std::vector<std::string_view>& path_parts) override;
+  bool RenameEntryInternal(Entry* new_parent,
+                           const std::string_view name) override;
 
   std::filesystem::path host_path_;
+  std::atomic<size_t> open_files_{0};
 };
 
 }  // namespace vfs

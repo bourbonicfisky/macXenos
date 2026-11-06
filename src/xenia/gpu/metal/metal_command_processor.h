@@ -321,6 +321,10 @@ class MetalCommandProcessor : public CommandProcessor {
   };
   ProducerDependencyOutcome ResolvePendingProducerDependencies(
       const metal::ConsumerDecision& decision);
+  // Bounds the lazily armed memexport backlog (XE_METAL_LAZY_MEMEXPORT_LIMIT):
+  // above the limit, publishes the completed armed records to RAM at the swap
+  // instead of leaving them for a CPU read that may never come.
+  void TrimLazyMemexportBacklog();
   bool PrepareGuestMemoryForHostRead(uint32_t guest_address,
                                      uint32_t length) override;
   bool PrepareGuestMemoryForCompletionExposure() override;

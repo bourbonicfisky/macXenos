@@ -286,11 +286,13 @@ dword_result_t XamLoaderGetLaunchDataSize_entry(lpdword_t size_ptr) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
   auto& loader_data = xam->loader_data();
   if (loader_data.launch_data.empty()) {
+    XELOGI("XamLoaderGetLaunchDataSize: no launch data");
     *size_ptr = 0;
     return X_ERROR_NOT_FOUND;
   }
 
   *size_ptr = uint32_t(xam->loader_data().launch_data.size());
+  XELOGI("XamLoaderGetLaunchDataSize: {} bytes", uint32_t(*size_ptr));
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamLoaderGetLaunchDataSize, kNone, kSketchy);
@@ -299,13 +301,20 @@ dword_result_t XamLoaderGetLaunchData_entry(lpvoid_t buffer_ptr,
                                             dword_t buffer_size) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
   auto& loader_data = xam->loader_data();
-  if (!buffer_size) {
+  // No launch data is "not found", as XamLoaderGetLaunchDataSize reports it.
+  // Success with nothing copied made Modern Warfare 2 treat its zeroed buffer
+  // as launch data and relaunch itself in a loop.
+  if (!buffer_size || loader_data.launch_data.empty()) {
+    XELOGI("XamLoaderGetLaunchData: no launch data");
     return X_ERROR_NOT_FOUND;
   }
 
   uint32_t copy_size =
       std::min(uint32_t(loader_data.launch_data.size()), uint32_t(buffer_size));
   std::memcpy(buffer_ptr, loader_data.launch_data.data(), copy_size);
+  XELOGI("XamLoaderGetLaunchData: copied {} of {} bytes (buffer {})",
+         copy_size, uint32_t(loader_data.launch_data.size()),
+         uint32_t(buffer_size));
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamLoaderGetLaunchData, kNone, kSketchy);
@@ -356,6 +365,9 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
           "data={} bytes",
           xe::path_to_utf8(host_path), launch_module, loader_data.launch_flags,
           loader_data.launch_data.size());
+      // Why the title relaunches is often only in its own state (Modern
+      // Warfare 2 keeps an error string in the main thread's r31 buffer).
+      kernel_state()->emulator()->LogGuestThreadStates("XamLoaderLaunchTitle");
       // The handler terminates the title (every guest thread, this one
       // included), so it must run on a host thread while this thread parks.
       std::thread([launch_new_title, host = xe::path_to_utf8(host_path),

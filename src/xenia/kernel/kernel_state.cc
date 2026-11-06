@@ -1447,7 +1447,31 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
   // Games seem to expect a few notifications on startup, only for the first
   // listener.
   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=resident+evil+5&start=375
-  if (!has_notified_startup_ && listener->mask() & kXNotifySystem) {
+  // XE_NOTIFY_STARTUP_ALL=1 (A/B): every listener with the system mask gets
+  // them. The EA SPORTS BIG splash stall (NBA Street Homecourt, FIFA Street
+  // 3) leaves the main thread waiting on its listener; with several
+  // listeners on several threads, which one is first varies by boot.
+  static const bool s_startup_all = [] {
+    const char* v = std::getenv("XE_NOTIFY_STARTUP_ALL");
+    return v && v[0] == '1' && !v[1];
+  }();
+  {
+    auto* creator = XThread::IsInThread() ? XThread::GetCurrentThread()
+                                          : nullptr;
+    XELOGI(
+        "NotifyListener: register {:08X} mask={:016X} system={} creator={:08X} "
+        "lr={:08X} startup_system={} startup_live={}",
+        listener->handle(), listener->mask(), listener->is_system(),
+        creator ? creator->handle() : 0u,
+        creator && creator->thread_state()
+            ? uint32_t(creator->thread_state()->context()->lr)
+            : 0u,
+        (listener->mask() & kXNotifySystem) &&
+            (!has_notified_startup_ || s_startup_all),
+        (listener->mask() & kXNotifyLive) && !has_notified_live_startup_);
+  }
+  if ((!has_notified_startup_ || s_startup_all) &&
+      listener->mask() & kXNotifySystem) {
     has_notified_startup_ = true;
     listener->EnqueueNotification(kXNotificationSystemUI,
                                   xam_state()->IsUIActive());
