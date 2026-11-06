@@ -1,0 +1,15 @@
+# macXenos built-in per-title config: Infinite Undiscovery (535107DB).
+# A worker crashed on a garbage branch (PC 0 or ASCII, LR 82204B14) in about
+# 2 of 5 boots, during the intro movie or the first load. The title passes
+# work through a lock-free ring (0x2000 16-byte entries): the producer
+# (821443D0) stores an entry's fields and then the write index with no
+# barrier between them, and the consumer (82204990) loads the write index and
+# then the entry. The Xbox 360's in-order cores keep both in order; on ARM
+# the consumer saw the new index before the entry and called through a null
+# or stale object pointer. Ordered loads in both functions put a barrier
+# between the producer's stores (it reloads the indices before publishing)
+# and between the consumer's loads.
+# (xenia-mac-evidence crashes-20261106/iu, M1 Max: 8 of 8 boots clean with
+# both; consumer alone 5 of 12 crashed, neither 7 of 18.)
+[CPU]
+jit_ordered_load_functions = "82204990,821443D0"
