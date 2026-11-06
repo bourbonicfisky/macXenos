@@ -1261,6 +1261,13 @@ Value* HIRBuilder::LoadOffset(Value* address, Value* offset, TypeName type,
   i->set_src1(address);
   i->set_src2(offset);
   i->src3.value = NULL;
+  // Displacement loads (lwz rt, d(ra)) come here, not through Load: without
+  // the barrier jit_ordered_load_functions left most of a function's loads
+  // free to reorder (Infinite Undiscovery's queue consumer still read stale
+  // entries with it set).
+  if (ordered_loads_) {
+    MemoryBarrier();
+  }
   return i->dest;
 }
 
