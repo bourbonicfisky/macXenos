@@ -890,6 +890,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     // Valid texture rows [valid_start, valid_end).
     uint32_t valid_start = 0, valid_end = 0;
     bool valid = false;
+    // A pack since the last invalidation already grew the valid range.
+    bool extended = false;
     // MsaaStencilInvalidation: what last invalidated it (rebuild census).
     uint8_t why = 0;
   };
