@@ -1523,9 +1523,15 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
   *pixel_out = nullptr;
   deferred_out->reset();
   DrainAsyncPipelines();
-  static const bool s_memo_enabled = [] {
+  // Default on Intel/AMD only until it is measured on Apple GPUs;
+  // XE_METAL_PIPELINE_MEMO=0/1 forces it either way.
+  static const bool s_memo_enabled = [this] {
     const char* v = std::getenv("XE_METAL_PIPELINE_MEMO");
-    return !(v && v[0] == '0');
+    if (v && v[0]) {
+      return v[0] != '0';
+    }
+    id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+    return !(device && [device supportsFamily:MTLGPUFamilyApple7]);
   }();
   AsyncPipelineMemo& memo = async_memo_;
   const uint32_t sample_count = raster_key.raster_sample_count;
@@ -1570,7 +1576,7 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
       }
       AsyncPipelineStatus status =
           from_key(it->second.key, it->second.pixel_used);
-      if (status == AsyncPipelineStatus::kReady) {
+      if (s_memo_enabled && status == AsyncPipelineStatus::kReady) {
         remember();
       }
       return status;
@@ -1582,7 +1588,7 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
   // three maps (GTA IV on the Mac Pro: ~0.3 ms/frame of the CP thread).
   auto ready = [&](uint64_t key, MetalShader::MetalTranslation* pixel_used) {
     AsyncPipelineStatus status = from_key(key, pixel_used);
-    if (status == AsyncPipelineStatus::kReady) {
+    if (s_memo_enabled && status == AsyncPipelineStatus::kReady) {
       async_results_.emplace(async_key, AsyncPipelineResult{key, pixel_used});
       remember();
     }
@@ -1724,14 +1730,16 @@ MetalPipelineCache::GetRenderPipelineStateAsync(
   }
   *pipeline_out = state;
   *pixel_out = pixel_used;
-  const uint64_t key =
-      RenderPipelineKey(vertex, pixel_used, color_pixel_formats,
-                        depth_pixel_format, raster_key, blend_controls,
-                        color_write_mask);
-  auto it = render_pipeline_states_.find(key);
-  if (it != render_pipeline_states_.end() && it->second == state) {
-    async_results_.emplace(async_key, AsyncPipelineResult{key, pixel_used});
-    remember();
+  if (s_memo_enabled) {
+    const uint64_t key =
+        RenderPipelineKey(vertex, pixel_used, color_pixel_formats,
+                          depth_pixel_format, raster_key, blend_controls,
+                          color_write_mask);
+    auto it = render_pipeline_states_.find(key);
+    if (it != render_pipeline_states_.end() && it->second == state) {
+      async_results_.emplace(async_key, AsyncPipelineResult{key, pixel_used});
+      remember();
+    }
   }
   return AsyncPipelineStatus::kReady;
 }

@@ -2759,6 +2759,10 @@ fragment DepthStencilFragOut materialize_depth_sten_range_fs(
   o.stencil = xe_stencil(w);
   return o;
 }
+)MSL";
+    // Only GPUs on the bit-plane pack compile this part; Apple GPUs never
+    // build its pipelines.
+    static const char* kShadowStencilExtractMsl = R"MSL(
 // 2x/4x depth pack without the X32_Stencil8 view (MsaaStencilExtract): the
 // target's stencil is cached per pixel (byte n = sample n) by one draw per
 // stencil bit -- stencil EQUAL on that bit, early tests, at sample rate,
@@ -2849,6 +2853,9 @@ XE_PACK_CACHED_STENCIL_KERNELS(, XE_NO_VERIFY_ARGS, XE_NO_VERIFY)
 XE_PACK_CACHED_STENCIL_KERNELS(_verify, XE_VERIFY_ARGS, XE_VERIFY)
 )MSL";
     std::string src = std::string(kEdramMsl) + kShadowAdapterMsl;
+    if (MsaaStencilExtract(device)) {
+      src += kShadowStencilExtractMsl;
+    }
     id<MTLLibrary> lib = [device
         newLibraryWithSource:[NSString stringWithUTF8String:src.c_str()]
                      options:EdramMslCompileOptions(
@@ -3525,7 +3532,9 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaPack(
     const void* command_buffer, RenderTarget* render_target,
     uint32_t start_tiles, uint32_t end_tiles) {
   ++msaa_stencil_census_[3];
-  if (render_target) {
+  static const bool s_census =
+      std::getenv("XE_METAL_MSAA_STENCIL_CENSUS") != nullptr;
+  if (s_census && render_target) {
     const uint32_t key = render_target->key().key;
     const uint64_t last_draw = msaa_census_last_draw_[key];
     auto& last = msaa_census_last_pack_[key];
