@@ -232,6 +232,7 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
     if (handle_entry != object->handles().end()) {
       object->handles().erase(handle_entry);
     }
+    object->OnHandleRemoved(handle);
 
     XELOGD("Removed handle:{:08X} for {}", handle, typeid(*object).name());
 

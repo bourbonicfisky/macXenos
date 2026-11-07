@@ -105,6 +105,24 @@ bool XObject::ReleaseHandle() {
          X_STATUS_SUCCESS;
 }
 
+// GetNativeObject finds a kernel-created object from its guest header through
+// the handle stashed there, so closing that handle while another stays open
+// would leave the header pointing at a free (or reused) slot. Battlefield 3
+// closes a thread's creation handle and keeps a duplicate: every later
+// ObDereferenceObject on the KTHREAD failed and leaked the reference taken
+// through the duplicate.
+void XObject::OnHandleRemoved(X_HANDLE handle) {
+  if (!guest_object_ptr_ || handles_.empty()) {
+    return;
+  }
+  auto header =
+      memory()->TranslateVirtual<X_DISPATCH_HEADER*>(guest_object_ptr_);
+  if (header->wait_list.flink_ptr == kXObjSignature &&
+      header->wait_list.blink_ptr == handle) {
+    StashHandle(header, handles_[0]);
+  }
+}
+
 void XObject::Retain() { ++pointer_ref_count_; }
 
 void XObject::Release() {

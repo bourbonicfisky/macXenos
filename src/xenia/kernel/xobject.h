@@ -191,6 +191,10 @@ class XObject {
   uint32_t guest_object() const { return guest_object_ptr_; }
   uint32_t guest_object_type() const { return guest_object_type_ptr_.load(); }
 
+  // The object table removed `handle`: if the guest header stashes it, stash
+  // a handle the object still has instead (see xobject.cc).
+  void OnHandleRemoved(X_HANDLE handle);
+
   // Has this object been created for use by the host?
   // Host objects are persisted through reloads/etc.
   bool is_host_object() const { return host_object_; }
