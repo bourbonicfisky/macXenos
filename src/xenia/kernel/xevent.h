@@ -10,6 +10,7 @@
 #ifndef XENIA_KERNEL_XEVENT_H_
 #define XENIA_KERNEL_XEVENT_H_
 
+#include <atomic>
 #include <mutex>
 
 #include "xenia/base/threading.h"
@@ -58,6 +59,9 @@ class XEvent : public XObject {
 
   bool manual_reset_ = false;
   uint32_t guest_header_ptr_ = 0;
+  // The header's signal_state as this event last stored or read it. A wait
+  // whose header still holds it has nothing to sync and skips the lock.
+  std::atomic<int32_t> header_state_seen_{0};
   // Orders header writes and host event changes against the wait-time sync,
   // so a sync never reads a header older than the host event.
   std::mutex header_mutex_;

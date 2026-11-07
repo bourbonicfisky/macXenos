@@ -9,6 +9,7 @@
 
 #include "xenia/kernel/xevent.h"
 
+#include <atomic>
 #include <cstdlib>
 
 #include "xenia/base/byte_stream.h"
@@ -58,6 +59,7 @@ void XEvent::InitializeNative(void* native_ptr, X_DISPATCH_HEADER* header) {
 
   if (manual_reset_) {
     guest_header_ptr_ = memory()->HostToGuestVirtual(native_ptr);
+    header_state_seen_.store(header->signal_state, std::memory_order_relaxed);
   }
   bool initial_state = header->signal_state ? true : false;
   if (manual_reset_) {
@@ -132,6 +134,7 @@ X_DISPATCH_HEADER* XEvent::guest_header() const {
 
 void XEvent::WriteGuestSignalState(uint32_t state) {
   guest_header()->signal_state = state;
+  header_state_seen_.store(int32_t(state), std::memory_order_release);
 }
 
 // A notification KEVENT's state is its header, and titles clear one by
@@ -152,8 +155,46 @@ void XEvent::SyncGuestStateBeforeWait() {
   if (!enabled || !guest_header_ptr_) {
     return;
   }
+  // Only a title's own store (the inlined clear) moves the header off the
+  // value this event last wrote; otherwise the host event already matches.
+  // Skyrim never moves it, and the lock and redundant Set/Reset on every wait
+  // shifted its thread timing into a pure-virtual-call race (M1 2 of 6
+  // boots, mini 5 of 16, against 0 of 14 without the sync).
+  if (int32_t(guest_header()->signal_state) ==
+      header_state_seen_.load(std::memory_order_acquire)) {
+    return;
+  }
   std::lock_guard<std::mutex> lock(header_mutex_);
-  if (guest_header()->signal_state) {
+  const int32_t header_state = guest_header()->signal_state;
+  const int32_t seen = header_state_seen_.load(std::memory_order_relaxed);
+  header_state_seen_.store(header_state, std::memory_order_relaxed);
+  static const bool log_changes = [] {
+    const char* v = std::getenv("XE_EVENT_HEADER_SYNC_LOG");
+    return v && v[0] == '1';
+  }();
+  if (log_changes) {
+    // Every wait that finds the header moved by the title, and whether the
+    // host event disagreed with it.
+    const bool host_signaled =
+        xe::threading::Wait(event_.get(), false,
+                            std::chrono::milliseconds(0)) ==
+        xe::threading::WaitResult::kSuccess;
+    {
+      static std::atomic<uint32_t> changes{0};
+      const uint32_t n = ++changes;
+      if (n <= 256 || n % 1024 == 0) {
+        auto* ts = cpu::ThreadState::Get();
+        XELOGW(
+            "XEvent header sync #{}: {:08X} header {:08X} (was {:08X}) "
+            "host {} -> {} (thread {:X}, lr {:08X})",
+            n, guest_header_ptr_, uint32_t(header_state), uint32_t(seen),
+            host_signaled ? "set" : "clear", header_state ? "set" : "clear",
+            ts ? ts->thread_id() : 0u,
+            ts ? uint32_t(ts->context()->lr) : 0u);
+      }
+    }
+  }
+  if (header_state) {
     event_->Set();
   } else {
     event_->Reset();
