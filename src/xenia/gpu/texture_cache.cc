@@ -92,6 +92,7 @@ const TextureCache::LoadShaderInfo
         {2, 4},   // kRGBA4ToARGB4
         {4, 4},   // kRGBA4ToRGBA8
         {4, 4},   // kR5G6B5ToRGBA8
+        {4, 4},   // kR5G5B5A1ToRGBA8
         {4, 3},   // kGBGR8ToGRGB8
         {8, 3},   // kGBGR8ToRGB8
         {4, 3},   // kBGRG8ToRGBG8

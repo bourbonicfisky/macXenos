@@ -1343,6 +1343,10 @@ bool MetalSharedTextureCache::LoadLevelsFamily(
         wanted = "texture_load_r5g6b5_r8g8b8a8_cs";
         load_shader_index = kLoadShaderIndexR5G6B5ToRGBA8;
         break;
+      case SharedLoadFamily::k16bpbR5G5B5A1ToRgba8:
+        wanted = "texture_load_r5g5b5a1_r8g8b8a8_cs";
+        load_shader_index = kLoadShaderIndexR5G5B5A1ToRGBA8;
+        break;
       case SharedLoadFamily::kCtx1ToRg8:
         wanted = "texture_load_ctx1_cs";
         load_shader_index = kLoadShaderIndexCTX1;

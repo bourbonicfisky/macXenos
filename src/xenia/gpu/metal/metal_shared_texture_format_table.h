@@ -43,6 +43,9 @@ enum class SharedLoadFamily : uint32_t {
   // 16bpp 5:6:5 expanded to opaque RGBA8 (texture_load_r5g6b5_r8g8b8a8), for
   // GPUs without B5G6R5Unorm. Apple GPUs keep 5:6:5 on the legacy cache.
   k16bpbR5G6B5ToRgba8,
+  // 16bpp 1:5:5:5 expanded to RGBA8 (texture_load_r5g5b5a1_r8g8b8a8), for
+  // GPUs without BGR5A1Unorm.
+  k16bpbR5G5B5A1ToRgba8,
   // CTX1 (Xenos two-channel normal-map compression, 8-byte 4x4 blocks)
   // decoded to RG8 texels (texture_load_ctx1). The legacy cache decodes it on
   // the CPU at the base level only.
@@ -253,6 +256,14 @@ inline const SharedTextureFormatEntry* SharedTextureFormatTable(
       {xenos::TextureFormat::k_1_5_5_5, SharedLoadFamily::k16bpb,
        kMtlPixelFormatBGR5A1Unorm, kMtlPixelFormatBGR5A1Unorm,
        XE_GPU_MAKE_TEXTURE_SWIZZLE(B, G, R, A), 2, false},
+      // The same texels expanded to RGBA8 on the GPU where BGR5A1Unorm does
+      // not exist (Intel/AMD), in guest channel order, so the host swizzle is
+      // the identity. Without it the format was unserved there and Fable II
+      // ran 20.7 fps on the Radeon Pro 580X, as the M1 Max did before
+      // BGR5A1Unorm (2026-11-06). Selected only without packed16.
+      {xenos::TextureFormat::k_1_5_5_5, SharedLoadFamily::k16bpbR5G5B5A1ToRgba8,
+       kMtlPixelFormatRGBA8Unorm, kMtlPixelFormatRGBA8Unorm,
+       xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA, 2, false},
       // CTX1 decoded to RG8 on the GPU, mips included (Halo 3 materials: 134
       // mipped uploads in a 40 s sweep served base-only by the legacy CPU
       // decode, on every GPU). RGGG like the legacy plan; no snorm sibling,
@@ -372,6 +383,7 @@ inline uint32_t SharedTextureHostBytesPerBlock(
   switch (entry.load_shader) {
     case SharedLoadFamily::k16bpbRgba4ToRgba8:
     case SharedLoadFamily::k16bpbR5G6B5ToRgba8:
+    case SharedLoadFamily::k16bpbR5G5B5A1ToRgba8:
       return 4u;
     case SharedLoadFamily::kR11G11B10ToRgba16:
     case SharedLoadFamily::kR10G11B11ToRgba16:
@@ -550,9 +562,15 @@ inline const SharedTextureFormatEntry* FindSharedTextureFormatUncached(
         const char* v = std::getenv("XE_METAL_TEX_1555");
         return !(v && v[0] == '0' && !v[1]);
       }();
-      if (!s_1555 ||
-          !SharedTexturePacked16Supported().load(std::memory_order_relaxed)) {
+      if (!s_1555) {
         return nullptr;
+      }
+      // BGR5A1Unorm with packed16, the RGBA8 expansion entry without.
+      const bool packed16 =
+          SharedTexturePacked16Supported().load(std::memory_order_relaxed);
+      const bool native = table[i].load_shader == SharedLoadFamily::k16bpb;
+      if (packed16 != native) {
+        continue;
       }
     }
     if (table[i].format == xenos::TextureFormat::k_6_5_5) {

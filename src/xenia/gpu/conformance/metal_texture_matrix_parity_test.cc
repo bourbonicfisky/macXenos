@@ -153,14 +153,17 @@ TEST_CASE("Apple-only host formats drop out without packed 16-bit support",
   // them without an expanding sibling are unavailable on Intel/AMD Macs.
   CHECK(FindSharedTextureFormat(F::k_6_5_5) == nullptr);
   CHECK(FindSharedTextureFormat(F::k_DXT3A_AS_1_1_1_1) == nullptr);
-  CHECK(FindSharedTextureFormat(F::k_1_5_5_5) == nullptr);
-  // 4:4:4:4 and 5:6:5 keep their RGBA8 expansions.
+  // 4:4:4:4, 5:6:5 and 1:5:5:5 keep their RGBA8 expansions.
   const SharedTextureFormatEntry* rgba4 = FindSharedTextureFormat(F::k_4_4_4_4);
   REQUIRE(rgba4 != nullptr);
   CHECK(rgba4->load_shader == SharedLoadFamily::k16bpbRgba4ToRgba8);
   const SharedTextureFormatEntry* r565 = FindSharedTextureFormat(F::k_5_6_5);
   REQUIRE(r565 != nullptr);
   CHECK(r565->load_shader == SharedLoadFamily::k16bpbR5G6B5ToRgba8);
+  const SharedTextureFormatEntry* r1555 = FindSharedTextureFormat(F::k_1_5_5_5);
+  REQUIRE(r1555 != nullptr);
+  CHECK(r1555->load_shader == SharedLoadFamily::k16bpbR5G5B5A1ToRgba8);
+  CHECK(r1555->host_swizzle == xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA);
   // Formats needing no Apple-only host format are unaffected.
   CHECK(FindSharedTextureFormat(F::k_Cr_Y1_Cb_Y0_REP) != nullptr);
   CHECK(FindSharedTextureFormat(F::k_32_32_32_32_FLOAT) != nullptr);

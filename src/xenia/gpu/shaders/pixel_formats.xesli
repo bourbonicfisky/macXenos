@@ -557,6 +557,26 @@ void XeR5G6B5ToR8G8B8A8(uint4_xe packed_texels,
   out_23 = XeR5G6B5ToR8G8B8A8(packed_texels.zw);
 }
 
+// Expansion of two packed 16-bit 1:5:5:5 texels (R in bits 0-4, G in 5-9, B in
+// 10-14, A in 15) to two R8G8B8A8 texels, each color channel rounded to the
+// nearest 8-bit unorm and alpha 0 or 255 (for hosts without B5G5R5A1, such as
+// Metal on non-Apple GPUs).
+uint4_xe XeR5G5B5A1ToR8G8B8A8(uint2_xe packed_texels) {
+  uint4_xe texels =
+      (packed_texels.xxyy >> uint4_xe(0u, 16u, 0u, 16u)) & 0xFFFFu;
+  uint4_xe r = ((texels & 0x1Fu) * 255u + 15u) / 31u;
+  uint4_xe g = (((texels >> 5u) & 0x1Fu) * 255u + 15u) / 31u;
+  uint4_xe b = (((texels >> 10u) & 0x1Fu) * 255u + 15u) / 31u;
+  uint4_xe a = ((texels >> 15u) & 1u) * 0xFF000000u;
+  return r | (g << 8u) | (b << 16u) | a;
+}
+void XeR5G5B5A1ToR8G8B8A8(uint4_xe packed_texels,
+                          out_param_xe(uint4_xe, out_01),
+                          out_param_xe(uint4_xe, out_23)) {
+  out_01 = XeR5G5B5A1ToR8G8B8A8(packed_texels.xy);
+  out_23 = XeR5G5B5A1ToR8G8B8A8(packed_texels.zw);
+}
+
 // RRRRR GGGGG BBBBBB to GGGGG BBBBBB RRRRR (use RBGA swizzle when reading).
 uint4_xe XeR5G5B6ToB5G6R5WithRBGASwizzle(uint4_xe packed_texels) {
   return ((packed_texels & 0x001F001Fu) << 11u) |
