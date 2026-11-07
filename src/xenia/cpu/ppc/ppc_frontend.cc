@@ -115,9 +115,11 @@ void GuestProbe(PPCContext* ppc_context, void* arg0, void* arg1) {
   r.r31 = uint32_t(ppc_context->r[31]);
   r.w0 = r.w1 = 0;
   if (r.r31 >= 0x10000 && r.r31 < 0xF0000000 && !(r.r31 & 3)) {
-    r.w0 = xe::load_and_swap<uint32_t>(ppc_context->virtual_membase + r.r31);
-    r.w1 =
-        xe::load_and_swap<uint32_t>(ppc_context->virtual_membase + r.r31 + 4);
+    // TranslateVirtual, not membase + address: the E0000000+ physical views
+    // sit 0x1000 higher on 16 KB-page hosts.
+    const uint8_t* p = ppc_context->TranslateVirtual(r.r31);
+    r.w0 = xe::load_and_swap<uint32_t>(p);
+    r.w1 = xe::load_and_swap<uint32_t>(p + 4);
   }
   const uint64_t n = g_guest_probe_count.fetch_add(1, std::memory_order_relaxed);
   g_guest_probes[n % kGuestProbeRing] = r;
