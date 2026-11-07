@@ -284,6 +284,7 @@ void MetalSharedMemory::Shutdown() {
     std::lock_guard<std::mutex> lock(vram_mutex_);
     vram_newer_.clear();
     vram_hot_.clear();
+    vram_hot_level_.clear();
   }
   if (gpu_buffer_) {
     id<MTLBuffer> released_gpu = (__bridge_transfer id<MTLBuffer>)gpu_buffer_;
@@ -541,6 +542,20 @@ bool MetalSharedMemory::IsVramHot(uint32_t origin) const {
   return vram_overflowed_ || vram_hot_.count(origin) != 0;
 }
 
+size_t MetalSharedMemory::DecayVramHot() {
+  std::lock_guard<std::mutex> lock(vram_mutex_);
+  size_t left = 0;
+  for (auto it = vram_hot_.begin(); it != vram_hot_.end();) {
+    if (--it->second == 0) {
+      it = vram_hot_.erase(it);
+      ++left;
+    } else {
+      ++it;
+    }
+  }
+  return left;
+}
+
 bool MetalSharedMemory::EnsureCpuCurrent(uint32_t start, uint32_t length) {
   if (!gpu_buffer_ || !fetch_queue_ || !length) {
     return true;
@@ -655,7 +670,9 @@ bool MetalSharedMemory::EnsureCpuCurrent(uint32_t start, uint32_t length) {
         return !e.eager && e.submission == p.submission &&
                e.origin == p.origin;
       });
-      vram_hot_.insert(p.origin);
+      uint8_t& level = vram_hot_level_[p.origin];
+      vram_hot_[p.origin] = 1u << level;
+      level = std::min<uint8_t>(level + 1, 6);
     }
     ++vram_stats_.fetches;
     vram_stats_.bytes += copied;

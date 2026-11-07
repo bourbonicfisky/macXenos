@@ -139,6 +139,12 @@ class MetalSharedMemory : public SharedMemory {
   void MarkVramNewer(uint32_t start, uint32_t length, uint64_t submission,
                      bool eager);
   bool IsVramHot(uint32_t origin) const;
+  // Called once per decay window: every hot origin whose window count ran
+  // out returns to on-demand readback. An origin is hot for 1 window after
+  // its first fetch and twice as long after each re-fetch (up to 64), so an
+  // origin the CPU stopped reading leaves quickly and one it keeps reading
+  // is re-fetched rarely. Returns how many origins left.
+  size_t DecayVramHot();
   // False only when a producer could not be waited for or the fetch failed;
   // the mirror then still holds what it held.
   bool EnsureCpuCurrent(uint32_t start, uint32_t length);
@@ -465,7 +471,10 @@ class MetalSharedMemory : public SharedMemory {
   std::vector<VramNewer> vram_newer_;
   size_t vram_prune_at_ = 64;
   bool vram_overflowed_ = false;
-  std::unordered_set<uint32_t> vram_hot_;
+  // Hot origin -> decay windows left.
+  std::unordered_map<uint32_t, uint32_t> vram_hot_;
+  // Origin -> log2 of its next hot period, kept after it leaves vram_hot_.
+  std::unordered_map<uint32_t, uint8_t> vram_hot_level_;
   void* fetch_queue_ = nullptr;  // id<MTLCommandQueue>, retained (discrete).
   std::function<uint64_t()> vram_encoding_submission_;
   std::function<uint64_t()> vram_completed_submission_;

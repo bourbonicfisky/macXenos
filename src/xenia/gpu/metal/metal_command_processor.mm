@@ -22481,6 +22481,25 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                  double(fs.bytes) / 1024.0, double(fs.ns) / 1e6, fs.entries,
                  fs.hot);
           discrete_deferred_ranges_ = 0;
+          // A fetched origin is read back eagerly with every later write
+          // ("hot"), and used to stay hot forever: an origin the CPU read
+          // once, typically while loading, kept its frame readback for the
+          // session. Hot origins now return to on-demand readback after a
+          // number of these 128-swap windows that doubles with each re-fetch
+          // (1 to 64; DecayVramHot). Radeon Pro 580X, 2026-11-07: AC3
+          // 54.8 -> 56.6/57.0 fps (16 MB of readback a frame -> 0, no
+          // re-fetch), Mafia II 78.9 -> 80.7/81.2 (13.5 MB), Bully 7 MB -> 0
+          // at its 40 fps vsync step. Clearing every window instead re-fetched
+          // origins the CPU keeps reading (Crysis 2 18 ms of fetch stalls per
+          // 128 swaps vs 0.25). Discrete GPUs only (Apple has no mirror).
+          // XE_METAL_VRAM_HOT_DECAY=0 keeps origins hot.
+          static const bool s_hot_decay = [] {
+            const char* v = std::getenv("XE_METAL_VRAM_HOT_DECAY");
+            return !(v && v[0] == '0');
+          }();
+          if (s_hot_decay) {
+            shared_memory_->DecayVramHot();
+          }
         }
         if (texture_cache_ && texture_cache_->texture_heaps_enabled()) {
           XELOGI("MetalTextureHeaps swap#{}: {} heaps {} MiB, {} textures; "
