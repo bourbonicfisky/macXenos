@@ -65,6 +65,8 @@
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r5g6b5_r8g8b8a8_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r4g4b4a4_r8g8b8a8_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r5g6b5_r8g8b8a8_scaled_cs.h"
+#include "xenia/gpu/shaders/bytecode/metal/texture_load_r5g5b5a1_r8g8b8a8_cs.h"
+#include "xenia/gpu/shaders/bytecode/metal/texture_load_r5g5b5a1_r8g8b8a8_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r5g5b5a1_b5g5r5a1_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r5g5b5a1_b5g5r5a1_scaled_cs.h"
 #include "xenia/gpu/shaders/bytecode/metal/texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs.h"
@@ -137,6 +139,8 @@ const MetalLoadShaderPipelines::ShaderInfo kLoadShaders[] = {
     XE_LOAD_SHADER(texture_load_r5g6b5_r8g8b8a8_cs),
     XE_LOAD_SHADER(texture_load_r4g4b4a4_r8g8b8a8_scaled_cs),
     XE_LOAD_SHADER(texture_load_r5g6b5_r8g8b8a8_scaled_cs),
+    XE_LOAD_SHADER(texture_load_r5g5b5a1_r8g8b8a8_cs),
+    XE_LOAD_SHADER(texture_load_r5g5b5a1_r8g8b8a8_scaled_cs),
     XE_LOAD_SHADER(texture_load_r5g5b5a1_b5g5r5a1_cs),
     XE_LOAD_SHADER(texture_load_r5g5b5a1_b5g5r5a1_scaled_cs),
     XE_LOAD_SHADER(texture_load_r5g5b6_b5g6r5_swizzle_rbga_cs),

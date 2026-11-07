@@ -863,8 +863,8 @@ class DxbcShaderTranslator : public ShaderTranslator {
   }
   // Rectangle list drawn as two-triangle strips expanded in the vertex shader
   // (4 host vertices per guest rectangle; SV_VertexID >> 2 is the rectangle,
-  // the low 2 bits the corner). The guest program runs once per rectangle
-  // vertex inside an outer loop, its outputs are captured, and the corner is
+  // the low 2 bits the corner). The guest program is emitted once per
+  // rectangle vertex (unrolled), its outputs are captured, and the corner is
   // then selected or synthesized like the geometry shader's kRectangleList
   // expansion. The rectangle's 3 guest vertex indices come from the raw SRV
   // in the xe_tessellation_vertices register, 3 dwords per rectangle,
@@ -874,11 +874,9 @@ class DxbcShaderTranslator : public ShaderTranslator {
            GetDxbcShaderModification().vertex.host_vertex_shader_type ==
                Shader::HostVertexShaderType::kRectangleListAsTriangleStrip;
   }
-  // Indexable temp of the rectangle expansion's captured outputs:
-  // x1[guest_vertex * (1 + interpolators) + 0] = position, + 1 + i =
-  // interpolator i.
-  static constexpr uint32_t kRectangleCaptureIndexableTemp = 1;
-  void CaptureRectangleVertex();
+  // Stores the position and interpolators of guest vertex `vertex` in
+  // system_temp_rect_capture_ and advances to the next vertex.
+  void CaptureRectangleVertex(uint32_t vertex);
   void CompleteRectangleVertex();
   bool IsDxbcVertexShader() const {
     return is_vertex_shader() &&
@@ -1333,12 +1331,21 @@ class DxbcShaderTranslator : public ShaderTranslator {
   uint32_t system_temp_position_;
   // Special exports in vertex shaders.
   uint32_t system_temp_point_size_edge_flag_kill_vertex_;
-  // Rectangle VS expansion: X = the guest vertex (0..2) the outer loop is on,
-  // Y = whether any vertex wrote a kill, Z = whether all of them did.
+  // Rectangle VS expansion: X = the guest vertex (0..2) the body is on, Y =
+  // whether any vertex wrote a kill, Z = whether all of them did.
   uint32_t system_temp_rect_loop_;
   // Rectangle VS expansion: the interpolators of the current guest vertex
   // (one temp each), written instead of the outputs.
   uint32_t system_temp_rect_interpolators_;
+  // Rectangle VS expansion: the captured outputs, plain temps rather than an
+  // indexable array (which AMD compilers may place in scratch memory):
+  // r[capture + guest_vertex * (1 + interpolators)] = position, + 1 + i =
+  // interpolator i.
+  uint32_t system_temp_rect_capture_;
+  // Rectangle VS expansion: where the per-guest-vertex body starts in
+  // shader_code_; it is emitted once and copied twice more (unrolled).
+  size_t rect_body_begin_dwords_ = 0;
+  dxbc::Statistics rect_body_statistics_begin_ = {};
   // ROV only - 4 persistent VGPRs when writing to color targets, 2 VGPRs when
   // not:
   // X - Bit masks:

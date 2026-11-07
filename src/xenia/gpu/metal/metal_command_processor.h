@@ -532,6 +532,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // HostVertexShaderType::kRectangleListAsTriangleStrip) instead of MSC
   // geometry emulation: GPUs other than Apple's (metal_rect_vs_expansion).
   bool rect_vs_expansion_ = false;
+  // XE_METAL_RECT_VS=1: expand even for titles whose config sets
+  // metal_rect_vs_title_off.
+  bool rect_vs_env_forced_ = false;
   // Auto-indexed quad lists become triangle lists through the shared
   // primitive processor instead of MSC geometry emulation: the mesh-shader
   // quad expansion streaks Red Dead's foliage on AMD (RX 6900 XT, 2026-10-10).
@@ -1207,6 +1210,33 @@ class MetalCommandProcessor : public CommandProcessor {
   // Seam boundary reason of the last 64 submissions, by submission serial
   // (fault attribution: why the faulted command buffer was committed).
   uint8_t submission_reason_ring_[64] = {};
+  // Shader pairs of the last 8192 draws, by submission serial (consecutive
+  // repeats counted): names what a faulted command buffer was running.
+  struct DrawPairNote {
+    uint64_t submission;
+    uint64_t vs, ps;
+    uint32_t count;
+    uint32_t prim;
+    // draw_count_ when the first of the run was issued (encoder labels
+    // carry the same counter as draws@).
+    uint32_t first_draw;
+  };
+  DrawPairNote draw_pair_ring_[8192] = {};
+  // Rectangle-VS-route draws, for the fault report: which pipeline each used.
+  struct RectDrawNote {
+    uint64_t submission;
+    uint64_t ps;
+    void* pipeline;
+    uint32_t draw;
+    uint32_t index_count;
+    uint32_t color_format;
+    uint32_t depth_format;
+  };
+  RectDrawNote rect_draw_ring_[256] = {};
+  uint32_t rect_draw_next_ = 0;
+  // XE_METAL_SLOT_AUDIT: the current draw's texture slots.
+  std::vector<uint32_t> audit_draw_slots_;
+  uint32_t draw_pair_next_ = 0;
   // Draws by guest primitive type and the path that issued them (census):
   // 0 native, 1 auto quad->tri, 2 DMA quad->tri, 3 auto line loop,
   // 4 geometry emulation, 5 tessellation, 6 unmappable (skipped).

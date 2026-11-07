@@ -50,10 +50,21 @@ DEFINE_bool(ignore_thread_affinities, true,
 // configs had it set), and a fresh M4 Pro with 'off' ran Mafia II at 35.6 fps
 // vs 150.6 and GTA IV at 39.8 vs 60.0. Titles that measure better with 'off'
 // get it from their built-in game config.
+// Intel Macs have no efficiency cores, so the class only raises priority, and
+// there 'all' cost the titles that wait on their own worker threads: Mac Pro
+// (Xeon W-3245M, Radeon Pro 580X) Just Cause 2 26.7 -> 29.7 fps and Resident
+// Evil 5 26.2 -> 30.0 with 'off', Skate 2 29.5 -> 30.0, GTA IV 42.2 -> 43.2,
+// no title slower over 19 (2026-11-03). x86_64 builds default to 'off'.
+#if XE_ARCH_AMD64
+#define XE_GUEST_THREAD_QOS_DEFAULT "off"
+#else
+#define XE_GUEST_THREAD_QOS_DEFAULT "all"
+#endif
 DEFINE_string(
-    guest_thread_qos, "all",
+    guest_thread_qos, XE_GUEST_THREAD_QOS_DEFAULT,
     "macOS only: Apple QoS scheduling policy for guest CPU threads. "
-    "'off' (no QoS calls) | 'all' (default, every guest XThread) | 'main' "
+    "'off' (no QoS calls; default on Intel Macs) | 'all' (default on Apple "
+    "silicon, every guest XThread) | 'main' "
     "(entry-point thread only) | 'priority' (guest priority >= "
     "guest_thread_qos_priority_threshold). 'hot' (hot-after-warmup) is reserved "
     "but not yet implemented.",
@@ -68,6 +79,9 @@ DEFINE_string(guest_thread_qos_class, "user_interactive",
               "CPU");
 UPDATE_from_string(guest_thread_qos_class, 2026, 10, 16, 0, "user_initiated");
 UPDATE_from_string(guest_thread_qos, 2026, 10, 23, 8, "off");
+#if XE_ARCH_AMD64
+UPDATE_from_string(guest_thread_qos, 2026, 11, 6, 0, "all");
+#endif
 DEFINE_int32(guest_thread_qos_priority_threshold, 1,
              "macOS only: with guest_thread_qos=priority, tag guest threads "
              "whose guest priority is >= this value.",

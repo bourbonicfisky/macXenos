@@ -316,6 +316,22 @@ class MetalPipelineCache {
   std::unordered_map<uint64_t, std::shared_ptr<AsyncPipelineJob>>
       async_pending_;
   std::unordered_map<uint64_t, AsyncPipelineResult> async_results_;
+  // The last ready async_results_ lookup, by raw inputs: consecutive draws
+  // mostly repeat the pipeline, and this skips the key hash and both map
+  // lookups (~0.3 ms/frame of the CP thread in GTA IV on the Mac Pro).
+  // Translations live until Shutdown, so their pointers identify them.
+  struct AsyncPipelineMemo {
+    MetalShader::MetalTranslation* vertex = nullptr;
+    MetalShader::MetalTranslation* pixel = nullptr;
+    uint64_t colors[xenos::kMaxColorRenderTargets] = {};
+    uint64_t depth = 0;
+    uint32_t sample_count = 0;
+    uint32_t blends[xenos::kMaxColorRenderTargets] = {};
+    uint32_t write_mask = 0;
+    void* pipeline = nullptr;
+    MetalShader::MetalTranslation* pixel_used = nullptr;
+  };
+  AsyncPipelineMemo async_memo_;
   std::vector<std::unique_ptr<xe::threading::Thread>> async_workers_;
 
   ShaderStorageWriter<PipelineStoredDescription> shader_storage_;

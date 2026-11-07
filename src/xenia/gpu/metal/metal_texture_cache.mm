@@ -18,7 +18,10 @@
 
 #import <Metal/Metal.h>
 
+#include <dlfcn.h>
+
 #include <algorithm>
+#include <string>
 #include <vector>
 
 #include "third_party/xxhash/xxhash.h"
@@ -88,6 +91,9 @@ struct FormatPlan {
   // If true, the untiled 16bpp k_5_6_5 texels are CPU-expanded to RGBA8
   // (host_format RGBA8Unorm): the fallback where B5G6R5Unorm is unavailable.
   bool decode_565 = false;
+  // If true, the untiled 16bpp k_1_5_5_5 texels are CPU-expanded to RGBA8
+  // (host_format RGBA8Unorm): the fallback where BGR5A1Unorm is unavailable.
+  bool decode_1555 = false;
 };
 
 // Shared-table channel replication for host formats narrower than RGBA. The
@@ -218,14 +224,24 @@ FormatPlan PlanForFormat(xenos::TextureFormat format, bool bc_supported,
       // and blue back, as for 5:6:5. Until now this format had no plan and
       // every fetch was served null: Fable II's 256x256 mipped 1:5:5:5
       // textures, whose draws also waited on the GPU for them (2026-10-19).
-      // BGR5A1Unorm exists only on Apple GPU families; elsewhere the format
-      // stays unserved (XE_METAL_TEX_1555=0 restores that on Apple too).
+      // BGR5A1Unorm exists only on Apple GPU families; elsewhere the texels
+      // are expanded to RGBA8 on the CPU (decode_1555) in guest channel
+      // order, so the host swizzle is the identity (the shared route's GPU
+      // expansion takes the mipped ones). Unserved there until 2026-11-06:
+      // Fable II 20.7 fps on the Radeon Pro 580X. XE_METAL_TEX_1555=0
+      // restores the unserved plan on every GPU.
       static const bool s_1555 = [] {
         const char* v = std::getenv("XE_METAL_TEX_1555");
         return !(v && v[0] == '0' && !v[1]);
       }();
-      if (!packed16_supported || !s_1555) {
+      if (!s_1555) {
         return {false, false, 0, 0, 0, MTLPixelFormatInvalid};
+      }
+      if (!packed16_supported) {
+        FormatPlan plan = {true, false, 2, 1, 1, MTLPixelFormatRGBA8Unorm};
+        plan.decode_1555 = true;
+        return ReplicateNarrowHostChannels(plan,
+                                           xenos::XE_GPU_TEXTURE_SWIZZLE_RGBA);
       }
       return ReplicateNarrowHostChannels(
           {true, false, 2, 1, 1, MTLPixelFormatBGR5A1Unorm, false, false},
@@ -1791,7 +1807,8 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
     plan.host_format = plan.host_format_signed;
   }
   if ((is_3d || depth > 1) &&
-      (plan.decode_4444 || plan.decode_565 || plan.decode_r16 ||
+      (plan.decode_4444 || plan.decode_565 || plan.decode_1555 ||
+       plan.decode_r16 ||
        plan.decode_depth_unorm ||
        plan.decode_depth_float || plan.decode_ctx1 || plan.decode_dxt3a)) {
     // The CPU-decoded plans are written per 2D level; no 3D/stacked consumer
@@ -2339,7 +2356,8 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
   // The 16bpp CPU expansions (4:4:4:4, 5:6:5, k_16) to RGBA8, from one
   // untiled level/face in `src` (blocks_w texels per row) into `out`.
   const bool plan_decode16 =
-      plan.decode_4444 || plan.decode_565 || plan.decode_r16;
+      plan.decode_4444 || plan.decode_565 || plan.decode_1555 ||
+      plan.decode_r16;
   auto decode16 = [&](const uint8_t* src, std::vector<uint8_t>& out) {
     out.resize(size_t(width) * height * 4);
     for (uint32_t y = 0; y < height; ++y) {
@@ -2358,6 +2376,13 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
           o[1] = uint8_t((((v >> 5) & 0x3F) * 255 + 31) / 63);
           o[2] = uint8_t((((v >> 11) & 0x1F) * 255 + 15) / 31);
           o[3] = 255;
+        } else if (plan.decode_1555) {
+          // R5 (bits 0-4) G5 (5-9) B5 (10-14) A1 (15), as the GPU expansion
+          // (XeR5G5B5A1ToR8G8B8A8) rounds them.
+          o[0] = uint8_t((((v >> 0) & 0x1F) * 255 + 15) / 31);
+          o[1] = uint8_t((((v >> 5) & 0x1F) * 255 + 15) / 31);
+          o[2] = uint8_t((((v >> 10) & 0x1F) * 255 + 15) / 31);
+          o[3] = (v & 0x8000) ? 255 : 0;
         } else {  // decode_4444
           o[0] = uint8_t(((v >> 0) & 0xF) * 17);
           o[1] = uint8_t(((v >> 4) & 0xF) * 17);
@@ -2479,6 +2504,7 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
   // 2D texture sampled through an array read returns garbage (flat sampling).
   // Cubes likewise must be CUBE ARRAYS (texturecube_array in the MSL).
   const bool plan_cpu_decoded = plan.decode_4444 || plan.decode_565 ||
+                                plan.decode_1555 ||
                                 plan.decode_r16 ||
                                 plan.decode_depth_unorm ||
                                 plan.decode_depth_float || plan.decode_ctx1 ||
@@ -3306,6 +3332,26 @@ void MetalTextureCache::WriteSlotDescriptor(uint32_t slot,
   if (!entries || !slot || slot >= view_heap_slots_) {
     return;
   }
+  if (SlotAuditEnabled()) {
+    if (audit_slot_texture_.size() < view_heap_slots_) {
+      audit_slot_texture_.resize(view_heap_slots_, nullptr);
+      audit_slot_last_ref_.resize(view_heap_slots_, 0);
+    }
+    void* old_texture = audit_slot_texture_[slot];
+    if (old_texture && old_texture != texture_bridge &&
+        audit_slot_last_ref_[slot] > audit_completed_) {
+      ++audit_live_rewrites_;
+      if (audit_live_rewrites_ <= 64 || !(audit_live_rewrites_ & 1023)) {
+        XELOGE("MetalSlotAudit: LIVE SLOT REWRITE #{} slot={} last_ref={} "
+               "completed={} old={} new={} caller={}",
+               audit_live_rewrites_, slot, audit_slot_last_ref_[slot],
+               audit_completed_, DescribeAuditTexture(old_texture),
+               DescribeAuditTexture(texture_bridge),
+               DescribeAuditCaller(__builtin_return_address(0)));
+      }
+    }
+    audit_slot_texture_[slot] = texture_bridge;
+  }
   IRDescriptorTableSetTexture(&entries[slot],
                               (__bridge id<MTLTexture>)texture_bridge, 0.0f, 0);
   if (residency_add_ && texture_bridge) {
@@ -3313,7 +3359,90 @@ void MetalTextureCache::WriteSlotDescriptor(uint32_t slot,
   }
 }
 
+bool MetalTextureCache::SlotAuditEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_SLOT_AUDIT");
+    return v && v[0] == '1';
+  }();
+  return s_enabled;
+}
+
+void MetalTextureCache::AuditDrawSlots(const uint32_t* slots, size_t count,
+                                       uint64_t submission) {
+  if (audit_slot_texture_.size() < view_heap_slots_) {
+    audit_slot_texture_.resize(view_heap_slots_, nullptr);
+    audit_slot_last_ref_.resize(view_heap_slots_, 0);
+  }
+  static uint64_t s_audited = 0;
+  if (!(s_audited & 0xFFFF) && count) {
+    XELOGI("MetalSlotAudit: {} slots audited, {} undeclared, {} live "
+           "rewrites, completed={}",
+           s_audited, audit_unresident_, audit_live_rewrites_,
+           audit_completed_);
+  }
+  s_audited += count;
+  for (size_t i = 0; i < count; ++i) {
+    const uint32_t slot = slots[i];
+    if (!slot || slot >= view_heap_slots_) {
+      continue;
+    }
+    audit_slot_last_ref_[slot] =
+        std::max(audit_slot_last_ref_[slot], submission);
+    void* texture = audit_slot_texture_[slot];
+    if (!texture ||
+        std::find(active_textures_.begin(), active_textures_.end(), texture) !=
+            active_textures_.end()) {
+      continue;
+    }
+    __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)texture;
+    bool heap_backed = false;
+    for (uint32_t depth = 0; t && depth < 4 && !heap_backed; ++depth) {
+      heap_backed = t.heap != nil;
+      t = t.parentTexture;
+    }
+    if (heap_backed && heaps_enabled_) {
+      continue;
+    }
+    ++audit_unresident_;
+    if (audit_unresident_ <= 64 || !(audit_unresident_ & 1023)) {
+      XELOGE("MetalSlotAudit: UNDECLARED #{} slot={} submission={} {} "
+             "(heap={}, {} active)",
+             audit_unresident_, slot, submission,
+             DescribeAuditTexture(texture), heap_backed,
+             active_textures_.size());
+    }
+  }
+}
+
+std::string MetalTextureCache::DescribeAuditTexture(void* texture_bridge) {
+  if (!texture_bridge) {
+    return "null";
+  }
+  __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)texture_bridge;
+  __unsafe_unretained id<MTLTexture> root = t;
+  while (root.parentTexture) {
+    root = root.parentTexture;
+  }
+  return fmt::format("{:p} {}x{}x{} L{} fmt={} type={} storage={} view={} "
+                     "heap={}",
+                     texture_bridge, uint32_t(t.width), uint32_t(t.height),
+                     uint32_t(t.depth > 1 ? t.depth : t.arrayLength),
+                     uint32_t(t.mipmapLevelCount), uint32_t(t.pixelFormat),
+                     uint32_t(t.textureType), uint32_t(root.storageMode),
+                     t.parentTexture != nil, root.heap != nil);
+}
+
+std::string MetalTextureCache::DescribeAuditCaller(void* address) {
+  Dl_info info;
+  if (dladdr(address, &info) && info.dli_fbase) {
+    return fmt::format("+0x{:x}", uintptr_t(address) -
+                                      uintptr_t(info.dli_fbase));
+  }
+  return fmt::format("{:p}", address);
+}
+
 void MetalTextureCache::ReclaimStaleSlots(uint64_t completed_submission) {
+  audit_completed_ = std::max(audit_completed_, completed_submission);
   // Free ONLY entries whose last-referencing submission has completed —
   // later in-flight submissions still read the rest (freeing them was the
   // async-S8 page-fault flicker). Descriptors are overwritten on the next

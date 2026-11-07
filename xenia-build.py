@@ -1239,14 +1239,17 @@ def build_shaders(targets=None):
             if result != 0:
                 return result
 
-    # Metal (Apple hosts only): the texture-load compute family's MSL branch.
-    # Scope matches the cmake rule (xe_shader_rules_metal); widen both
-    # together when more static shaders gain Metal consumers.
+    # Metal (Apple hosts only): the texture-load and resolve compute families'
+    # MSL branch. Scope matches the cmake rule's default globs
+    # (xe_shader_rules_metal: texture_load_*.cs.xesl, resolve_*.cs.xesl), and
+    # the clean above empties the whole directory, so a narrower scope here
+    # deletes headers it never regenerates; widen both together.
     if "metal" in targets and sys.platform == "darwin":
-        print("Building Metal texture-load shaders...")
+        print("Building Metal texture-load and resolve shaders...")
         for src_path in src_paths:
             src_name = os.path.basename(src_path)
-            if (not src_name.startswith("texture_load_") or
+            if (not (src_name.startswith("texture_load_") or
+                     src_name.startswith("resolve_")) or
                     not src_name.endswith(".cs.xesl")):
                 continue
             identifier = src_name[:-5].replace(".", "_")

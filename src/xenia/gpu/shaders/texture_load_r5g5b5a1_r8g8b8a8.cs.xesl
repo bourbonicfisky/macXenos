@@ -1,0 +1,12 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "pixel_formats.xesli"
+#define XE_TEXTURE_LOAD_16BPB_TO_32BPB XeR5G5B5A1ToR8G8B8A8
+#include "texture_load_16bpb_32bpb.xesli"

@@ -21,6 +21,8 @@
 
 #include <mach/mach.h>
 #include <objc/message.h>
+#include <dlfcn.h>
+#include <objc/runtime.h>
 #include <pthread.h>
 
 // Public ObjC ABI for manual autorelease-pool scopes that span calls (the
@@ -36,6 +38,7 @@ extern "C" void objc_autoreleasePoolPop(void*);
 #include <cstring>
 #include <exception>
 #include <iterator>
+#include <map>
 #include <set>
 #include <string>
 #include <string_view>
@@ -246,6 +249,13 @@ DEFINE_transient_bool(
     metal_completion_wait_title, false,
     "Per-title hint for metal_completion_wait = auto, set by the built-in "
     "config of titles that need it (Mass Effect).",
+    "GPU");
+DEFINE_transient_bool(
+    metal_rect_vs_title_off, false,
+    "Per-title hint: skip rectangle lists instead of expanding them in the "
+    "vertex shader on GPUs without Metal 3 (Radeon Pro 580X), for a title's "
+    "built-in config. No title sets it since the RDR 580X hang was fixed "
+    "(MSAA depth pack stencil). XE_METAL_RECT_VS=1 overrides.",
     "GPU");
 
 DEFINE_bool(
@@ -1935,9 +1945,249 @@ static void NoteGeometryEmulationDraw(uint32_t geometry_type,
 // FAULTED encoder lines, and 2 queue revokes -- most plausibly ~2 episodes
 // with a large collateral radius, certainly not 45 independent faults and not
 // necessarily 5 either. `grep -c` on any single one of these is misleading.
+// Diagnostic (XE_METAL_CB_ENCODER_RING=1): every encoder a command buffer
+// creates -- render, compute or blit, from any of the backend's call sites --
+// is recorded with its caller, and a faulted command buffer lists them (the
+// draw sequence names draws only; AMD reports no encoder status).
+namespace {
+struct CbEncoderNote {
+  void* command_buffer;
+  void* encoder;
+  void* caller;
+  uint32_t seq;
+  char kind;
+};
+struct CbDispatchNote {
+  void* encoder;
+  void* caller;
+  // g_cb_encoder_next when issued: after its encoder's own seq.
+  uint32_t seq;
+  uint32_t groups[3];
+  uint32_t threads[3];
+  // 'G' dispatchThreadgroups, 'T' dispatchThreads, 'I' indirect.
+  char kind;
+};
+constexpr uint32_t kCbEncoderRingSize = 16384;
+constexpr uint32_t kCbDispatchRingSize = 32768;
+CbEncoderNote g_cb_encoder_ring[kCbEncoderRingSize];
+CbDispatchNote g_cb_dispatch_ring[kCbDispatchRingSize];
+std::atomic<uint32_t> g_cb_encoder_next{0};
+std::atomic<uint32_t> g_cb_dispatch_next{0};
+IMP g_cb_render_imp, g_cb_compute_imp, g_cb_compute_type_imp, g_cb_blit_imp;
+IMP g_enc_groups_imp, g_enc_threads_imp, g_enc_indirect_imp;
+// XE_METAL_CB_BREADCRUMBS=1: before each encoder a one-byte blit marks its
+// seq in a shared buffer (cleared by the CPU first), so after a timeout the
+// encoders the GPU reached are known.
+id<MTLBuffer> g_breadcrumbs;
+uint8_t* g_breadcrumb_bytes;
+constexpr uint32_t kBreadcrumbCount = 65536;
+
+uint32_t BeginCbEncoder(id self) {
+  const uint32_t seq =
+      g_cb_encoder_next.fetch_add(1, std::memory_order_relaxed);
+  if (g_breadcrumbs) {
+    const uint32_t slot = seq % kBreadcrumbCount;
+    g_breadcrumb_bytes[slot] = 0;
+    id<MTLBlitCommandEncoder> blit =
+        reinterpret_cast<id (*)(id, SEL)>(g_cb_blit_imp)(
+            self, @selector(blitCommandEncoder));
+    [blit fillBuffer:g_breadcrumbs range:NSMakeRange(slot, 1) value:1];
+    [blit endEncoding];
+  }
+  return seq;
+}
+
+id NoteCbEncoder(id self, uint32_t seq, char kind, void* caller, id encoder) {
+  CbEncoderNote& note = g_cb_encoder_ring[seq % kCbEncoderRingSize];
+  note.seq = seq;
+  note.command_buffer = (__bridge void*)self;
+  note.encoder = (__bridge void*)encoder;
+  note.caller = caller;
+  note.kind = kind;
+  return encoder;
+}
+void NoteDispatch(id encoder, char kind, void* caller, MTLSize groups,
+                  MTLSize threads) {
+  CbDispatchNote& note =
+      g_cb_dispatch_ring[g_cb_dispatch_next.fetch_add(
+                             1, std::memory_order_relaxed) %
+                         kCbDispatchRingSize];
+  note.encoder = (__bridge void*)encoder;
+  note.caller = caller;
+  note.seq = g_cb_encoder_next.load(std::memory_order_relaxed);
+  note.groups[0] = uint32_t(groups.width);
+  note.groups[1] = uint32_t(groups.height);
+  note.groups[2] = uint32_t(groups.depth);
+  note.threads[0] = uint32_t(threads.width);
+  note.threads[1] = uint32_t(threads.height);
+  note.threads[2] = uint32_t(threads.depth);
+  note.kind = kind;
+}
+id CbRenderHook(id self, SEL sel, id desc) {
+  const uint32_t seq = BeginCbEncoder(self);
+  return NoteCbEncoder(
+      self, seq, 'R', __builtin_return_address(0),
+      reinterpret_cast<id (*)(id, SEL, id)>(g_cb_render_imp)(self, sel, desc));
+}
+id CbComputeHook(id self, SEL sel) {
+  const uint32_t seq = BeginCbEncoder(self);
+  return NoteCbEncoder(
+      self, seq, 'C', __builtin_return_address(0),
+      reinterpret_cast<id (*)(id, SEL)>(g_cb_compute_imp)(self, sel));
+}
+id CbComputeTypeHook(id self, SEL sel, NSUInteger type) {
+  const uint32_t seq = BeginCbEncoder(self);
+  return NoteCbEncoder(self, seq, 'C', __builtin_return_address(0),
+                       reinterpret_cast<id (*)(id, SEL, NSUInteger)>(
+                           g_cb_compute_type_imp)(self, sel, type));
+}
+id CbBlitHook(id self, SEL sel) {
+  const uint32_t seq = BeginCbEncoder(self);
+  return NoteCbEncoder(
+      self, seq, 'B', __builtin_return_address(0),
+      reinterpret_cast<id (*)(id, SEL)>(g_cb_blit_imp)(self, sel));
+}
+void EncGroupsHook(id self, SEL sel, MTLSize groups, MTLSize threads) {
+  NoteDispatch(self, 'G', __builtin_return_address(0), groups, threads);
+  reinterpret_cast<void (*)(id, SEL, MTLSize, MTLSize)>(g_enc_groups_imp)(
+      self, sel, groups, threads);
+}
+void EncThreadsHook(id self, SEL sel, MTLSize grid, MTLSize threads) {
+  NoteDispatch(self, 'T', __builtin_return_address(0), grid, threads);
+  reinterpret_cast<void (*)(id, SEL, MTLSize, MTLSize)>(g_enc_threads_imp)(
+      self, sel, grid, threads);
+}
+void EncIndirectHook(id self, SEL sel, id buffer, NSUInteger offset,
+                     MTLSize threads) {
+  NoteDispatch(self, 'I', __builtin_return_address(0),
+               MTLSizeMake(NSUInteger(offset), 0, 0), threads);
+  reinterpret_cast<void (*)(id, SEL, id, NSUInteger, MTLSize)>(
+      g_enc_indirect_imp)(self, sel, buffer, offset, threads);
+}
+
+bool CbEncoderRingEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_CB_ENCODER_RING");
+    return v && v[0] == '1';
+  }();
+  return s_enabled;
+}
+
+void HookMethod(Class cls, SEL sel, IMP imp, const char* types,
+                IMP* original) {
+  Method m = class_getInstanceMethod(cls, sel);
+  if (!m) {
+    return;
+  }
+  *original = method_getImplementation(m);
+  class_replaceMethod(cls, sel, imp, types);
+}
+
+void InstallCbEncoderRing(id<MTLCommandQueue> queue) {
+  if (!CbEncoderRingEnabled() || !queue || g_cb_blit_imp) {
+    return;
+  }
+  id<MTLCommandBuffer> probe = [queue commandBuffer];
+  Class cls = object_getClass(probe);
+  id<MTLComputeCommandEncoder> probe_encoder = [probe computeCommandEncoder];
+  Class encoder_cls = object_getClass(probe_encoder);
+  [probe_encoder endEncoding];
+  HookMethod(cls, @selector(renderCommandEncoderWithDescriptor:),
+             IMP(CbRenderHook), "@@:@", &g_cb_render_imp);
+  HookMethod(cls, @selector(computeCommandEncoder), IMP(CbComputeHook), "@@:",
+             &g_cb_compute_imp);
+  HookMethod(cls, @selector(computeCommandEncoderWithDispatchType:),
+             IMP(CbComputeTypeHook), "@@:Q", &g_cb_compute_type_imp);
+  HookMethod(cls, @selector(blitCommandEncoder), IMP(CbBlitHook), "@@:",
+             &g_cb_blit_imp);
+  HookMethod(encoder_cls, @selector(dispatchThreadgroups:threadsPerThreadgroup:),
+             IMP(EncGroupsHook), "v@:{MTLSize=QQQ}{MTLSize=QQQ}",
+             &g_enc_groups_imp);
+  HookMethod(encoder_cls, @selector(dispatchThreads:threadsPerThreadgroup:),
+             IMP(EncThreadsHook), "v@:{MTLSize=QQQ}{MTLSize=QQQ}",
+             &g_enc_threads_imp);
+  HookMethod(encoder_cls,
+             @selector(dispatchThreadgroupsWithIndirectBuffer:
+                                          indirectBufferOffset:
+                                         threadsPerThreadgroup:),
+             IMP(EncIndirectHook), "v@:@Q{MTLSize=QQQ}", &g_enc_indirect_imp);
+  if (const char* v = std::getenv("XE_METAL_CB_BREADCRUMBS");
+      v && v[0] == '1') {
+    g_breadcrumbs = [queue.device newBufferWithLength:kBreadcrumbCount
+                                              options:MTLResourceStorageModeShared];
+    g_breadcrumb_bytes = static_cast<uint8_t*>(g_breadcrumbs.contents);
+  }
+  Dl_info info = {};
+  dladdr(reinterpret_cast<void*>(&InstallCbEncoderRing), &info);
+  XELOGW("MetalCbEncoderRing: hooked {} + {} (image base {})",
+         class_getName(cls), class_getName(encoder_cls), info.dli_fbase);
+}
+
+void LogCbEncoders(id<MTLCommandBuffer> command_buffer) {
+  if (!CbEncoderRingEnabled()) {
+    return;
+  }
+  void* cb = (__bridge void*)command_buffer;
+  const uint32_t next = g_cb_encoder_next.load(std::memory_order_relaxed);
+  const uint32_t dispatch_next =
+      g_cb_dispatch_next.load(std::memory_order_relaxed);
+  std::string line;
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < kCbEncoderRingSize; ++i) {
+    const CbEncoderNote& note =
+        g_cb_encoder_ring[(next + i) % kCbEncoderRingSize];
+    if (note.command_buffer != cb) {
+      continue;
+    }
+    if (++n > 300) {
+      line += " ...";
+      break;
+    }
+    line += fmt::format(" {}{}{}", note.kind, note.caller,
+                        !g_breadcrumbs ? ""
+                        : g_breadcrumb_bytes[note.seq % kBreadcrumbCount]
+                            ? "+"
+                            : "-");
+    if (note.kind != 'C' || !note.encoder) {
+      continue;
+    }
+    // This encoder's dispatches: encoder objects are recycled, so only
+    // those after its creation and before the pointer's next creation.
+    uint32_t reuse_seq = UINT32_MAX;
+    for (uint32_t j = 0; j < kCbEncoderRingSize; ++j) {
+      const CbEncoderNote& other = g_cb_encoder_ring[j];
+      if (other.encoder == note.encoder && other.seq > note.seq &&
+          other.seq < reuse_seq) {
+        reuse_seq = other.seq;
+      }
+    }
+    uint32_t dispatches = 0;
+    for (uint32_t j = 0; j < kCbDispatchRingSize; ++j) {
+      const CbDispatchNote& d =
+          g_cb_dispatch_ring[(dispatch_next + j) % kCbDispatchRingSize];
+      if (d.encoder != note.encoder || d.seq <= note.seq ||
+          d.seq > reuse_seq) {
+        continue;
+      }
+      if (++dispatches > 4) {
+        continue;
+      }
+      line += fmt::format("[{}{} {}x{}x{}/{}x{}x{}]", d.kind, d.caller,
+                          d.groups[0], d.groups[1], d.groups[2], d.threads[0],
+                          d.threads[1], d.threads[2]);
+    }
+    if (dispatches > 4) {
+      line += fmt::format("[+{}]", dispatches - 4);
+    }
+  }
+  XELOGE("  encoders ({}):{}", n, line);
+}
+}  // namespace
+
 static void LogCommandBufferFault(id<MTLCommandBuffer> command_buffer,
                                   const char* site, uint32_t swap_count,
                                   uint64_t submission, uint64_t episode) {
+  LogCbEncoders(command_buffer);
   NSError* err = command_buffer.error;
   XELOGE("Metal GPU FAULT ({}, swap#{}, episode={}, submission={}): {} "
          "(code {})", site,
@@ -2439,6 +2689,132 @@ bool TessDrawRangeAllows(uint32_t draw_index) {
 
 }  // namespace
 
+// XE_METAL_VALIDATION_OFF_OTHER=compute|render|all (diagnostic, with
+// MTL_SHADER_VALIDATION=1): pipelines other than the guest draw pipelines
+// (which XE_METAL_VALIDATION_OFF sets explicitly) are created without shader
+// validation, by hooking the device's pipeline-creation methods. Compute
+// pipelines here are built from bare functions, which carry no per-pipeline
+// validation setting, so the hook rebuilds them from a descriptor. Returns
+// pass through as raw pointers: these are "new" methods (+1 references).
+namespace {
+IMP g_validation_off_render = nullptr;
+IMP g_validation_off_render_options = nullptr;
+std::atomic<uint32_t> g_validation_off_logged{0};
+
+void LogValidationOffPipeline(const char* kind, void* state) {
+  if (!state ||
+      g_validation_off_logged.fetch_add(1, std::memory_order_relaxed) >= 32) {
+    return;
+  }
+  if (@available(macOS 15.0, *)) {
+    id object = (__bridge id)state;
+    MTLShaderValidation validation = MTLShaderValidationDefault;
+    if ([object conformsToProtocol:@protocol(MTLComputePipelineState)]) {
+      validation = ((id<MTLComputePipelineState>)object).shaderValidation;
+    } else if ([object conformsToProtocol:@protocol(MTLRenderPipelineState)]) {
+      validation = ((id<MTLRenderPipelineState>)object).shaderValidation;
+    }
+    XELOGI("MetalValidationOffOther: {} pipeline created, shaderValidation={}",
+           kind, int(validation));
+  }
+}
+
+void* ValidationOffComputeFromFunction(__unsafe_unretained id self, SEL,
+                                       __unsafe_unretained id function,
+                                       NSError* __autoreleasing* error) {
+  void* state = nullptr;
+  if (@available(macOS 15.0, *)) {
+    MTLComputePipelineDescriptor* descriptor =
+        [[MTLComputePipelineDescriptor alloc] init];
+    descriptor.computeFunction = function;
+    descriptor.shaderValidation = MTLShaderValidationDisabled;
+    state = ((void* (*)(id, SEL, id, NSUInteger, id*, NSError* __autoreleasing*))
+                 objc_msgSend)(
+        self,
+        @selector(newComputePipelineStateWithDescriptor:options:reflection:error:),
+        descriptor, MTLPipelineOptionNone, nullptr, error);
+  }
+  LogValidationOffPipeline("compute", state);
+  return state;
+}
+
+void* ValidationOffRender(__unsafe_unretained id self, SEL selector,
+                          __unsafe_unretained MTLRenderPipelineDescriptor* desc,
+                          NSError* __autoreleasing* error) {
+  if (@available(macOS 15.0, *)) {
+    if (desc.shaderValidation == MTLShaderValidationDefault) {
+      desc.shaderValidation = MTLShaderValidationDisabled;
+    }
+  }
+  void* state = ((void* (*)(id, SEL, id, NSError* __autoreleasing*))
+                     g_validation_off_render)(self, selector, desc, error);
+  LogValidationOffPipeline("render", state);
+  return state;
+}
+
+void* ValidationOffRenderOptions(
+    __unsafe_unretained id self, SEL selector,
+    __unsafe_unretained MTLRenderPipelineDescriptor* desc,
+    MTLPipelineOption options, id* reflection,
+    NSError* __autoreleasing* error) {
+  if (@available(macOS 15.0, *)) {
+    if (desc.shaderValidation == MTLShaderValidationDefault) {
+      desc.shaderValidation = MTLShaderValidationDisabled;
+    }
+  }
+  void* state =
+      ((void* (*)(id, SEL, id, MTLPipelineOption, id*,
+                  NSError* __autoreleasing*))g_validation_off_render_options)(
+          self, selector, desc, options, reflection, error);
+  LogValidationOffPipeline("render", state);
+  return state;
+}
+
+void InstallValidationOffHooks(id<MTLDevice> device) {
+  static bool s_installed = false;
+  const char* mode = std::getenv("XE_METAL_VALIDATION_OFF_OTHER");
+  if (s_installed || !mode || !device) {
+    return;
+  }
+  s_installed = true;
+  const bool compute = !std::strcmp(mode, "compute") || !std::strcmp(mode, "all");
+  const bool render = !std::strcmp(mode, "render") || !std::strcmp(mode, "all");
+  Class device_class = object_getClass(device);
+  if (compute) {
+    SEL selector = @selector(newComputePipelineStateWithFunction:error:);
+    Method method = class_getInstanceMethod(device_class, selector);
+    if (method) {
+      class_replaceMethod(device_class, selector,
+                          (IMP)ValidationOffComputeFromFunction,
+                          method_getTypeEncoding(method));
+    }
+  }
+  if (render) {
+    SEL selector = @selector(newRenderPipelineStateWithDescriptor:error:);
+    Method method = class_getInstanceMethod(device_class, selector);
+    if (method) {
+      g_validation_off_render =
+          class_getMethodImplementation(device_class, selector);
+      class_replaceMethod(device_class, selector, (IMP)ValidationOffRender,
+                          method_getTypeEncoding(method));
+    }
+    SEL options_selector =
+        @selector(newRenderPipelineStateWithDescriptor:options:reflection:error:);
+    Method options_method =
+        class_getInstanceMethod(device_class, options_selector);
+    if (options_method) {
+      g_validation_off_render_options =
+          class_getMethodImplementation(device_class, options_selector);
+      class_replaceMethod(device_class, options_selector,
+                          (IMP)ValidationOffRenderOptions,
+                          method_getTypeEncoding(options_method));
+    }
+  }
+  XELOGI("MetalValidationOffOther: {} on {} (compute={} render={})", mode,
+         class_getName(device_class), compute, render);
+}
+}  // namespace
+
 bool MetalCommandProcessor::SetupContext() {
   encode_stream_ = std::make_unique<MetalEncodeStream>();
   encode_stream_->Start(MetalEncodeStream::ModeFromEnvironment());
@@ -2487,6 +2863,11 @@ bool MetalCommandProcessor::SetupContext() {
   auto* provider =
       static_cast<xe::ui::metal::MetalProvider*>(graphics_system_->provider());
   void* device = provider ? provider->device() : nullptr;
+  InstallValidationOffHooks((__bridge id<MTLDevice>)device);
+  if (provider) {
+    InstallCbEncoderRing(
+        (__bridge id<MTLCommandQueue>)provider->command_queue());
+  }
   if (!device) {
     XELOGE("MetalCommandProcessor: no Metal device from provider");
     return false;
@@ -2792,6 +3173,7 @@ bool MetalCommandProcessor::InitializeDrawResources(void* device_ptr) {
       ![device supportsFamily:MTLGPUFamilyApple7] && !metal3;
   if (const char* v = std::getenv("XE_METAL_RECT_VS")) {
     rect_vs_expansion_ = v[0] == '1';
+    rect_vs_env_forced_ = rect_vs_expansion_;
   }
   if (rect_vs_expansion_) {
     XELOGI("MetalCommandProcessor: rectangle lists expand in the vertex "
@@ -5323,6 +5705,59 @@ void MetalCommandProcessor::DrainFaultedCommandBuffers() {
                  : "(unknown)",
              shared_texture_cache_ ? shared_texture_cache_->DescribeRecentLoads()
                                    : std::string("(no shared cache)"));
+      {
+        std::map<std::pair<uint64_t, uint64_t>, std::pair<uint32_t, uint32_t>>
+            pairs;
+        for (const DrawPairNote& note : draw_pair_ring_) {
+          if (note.submission == faulted_submission) {
+            auto& entry = pairs[{note.vs, note.ps}];
+            entry.first += note.count;
+            entry.second = note.prim;
+          }
+        }
+        std::string draws;
+        for (const auto& [pair, entry] : pairs) {
+          draws += fmt::format(" {:016X}/{:016X}:{}x{}", pair.first,
+                               pair.second, entry.second, entry.first);
+        }
+        XELOGE("  draws (vs/ps:prim x count):{}",
+               draws.empty() ? std::string(" (none recorded)") : draws);
+        // The same runs in issue order, by draw index, to place them in the
+        // encoders the execution status names (draws@ labels).
+        std::string sequence;
+        uint32_t runs = 0;
+        for (uint32_t i = 0; i < 8192; ++i) {
+          const DrawPairNote& note =
+              draw_pair_ring_[(draw_pair_next_ + i) % 8192];
+          if (note.submission != faulted_submission) {
+            continue;
+          }
+          if (++runs > 400) {
+            sequence += " ...";
+            break;
+          }
+          sequence += fmt::format(" @{}:{:08X}/{:08X}:{}x{}", note.first_draw,
+                                  uint32_t(note.vs), uint32_t(note.ps),
+                                  note.prim, note.count);
+        }
+        if (!sequence.empty()) {
+          XELOGE("  draw sequence:{}", sequence);
+        }
+        std::string rects;
+        for (uint32_t i = 0; i < 256; ++i) {
+          const RectDrawNote& note = rect_draw_ring_[(rect_draw_next_ + i) % 256];
+          if (note.submission != faulted_submission) {
+            continue;
+          }
+          rects += fmt::format(" @{}:ps={:08X} pso={} n={} fmt={}/{}", note.draw,
+                               uint32_t(note.ps), note.pipeline,
+                               note.index_count, note.color_format,
+                               note.depth_format);
+        }
+        if (!rects.empty()) {
+          XELOGE("  rect draws:{}", rects);
+        }
+      }
       if (s_cb_errors > 32) {
         XELOGE("Metal GPU FAULT: {} total this session", s_cb_errors);
       }
@@ -7398,6 +7833,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                                       IndexBufferInfo* index_buffer_info,
                                       bool major_mode_explicit) {
   ServiceLazyCommitRequest();
+  // Diagnostic (XE_METAL_COMMIT_EVERY_DRAWS=N): commit the frame's command
+  // buffer once N draws are encoded in it, so a GPU-timeout fault's draw
+  // sequence names at most N draws.
+  {
+    static const uint32_t s_commit_every = [] {
+      const char* v = std::getenv("XE_METAL_COMMIT_EVERY_DRAWS");
+      return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+    }();
+    if (s_commit_every && draws_since_commit_ >= s_commit_every) {
+      EndFrameEncoder(metal::SeamBoundaryReason::kDebugProbe);
+    }
+  }
   // ArenaAllocate can only wait for committed submissions, so one open
   // submission that fills the upload arena drops every later draw in it
   // (Dishonored's ~17k-draw loading frame lost 16-41k draws on sysconst-alloc
@@ -7773,7 +8220,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // guest rectangle, the vertex shader running the guest program for its 3
   // vertices. Cleared below for draws that only export memory.
   bool rect_strip_route =
-      prim_type == xenos::PrimitiveType::kRectangleList && rect_vs_expansion_;
+      prim_type == xenos::PrimitiveType::kRectangleList && rect_vs_expansion_ &&
+      (rect_vs_env_forced_ || !cvars::metal_rect_vs_title_off);
+  {
+    const uint64_t vs_hash = vertex_shader->ucode_data_hash();
+    const uint64_t ps_hash = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+    DrawPairNote& last = draw_pair_ring_[(draw_pair_next_ - 1) % 8192];
+    if (draw_pair_next_ && last.submission == submission_counter_ + 1 &&
+        last.vs == vs_hash && last.ps == ps_hash) {
+      ++last.count;
+    } else {
+      DrawPairNote& note = draw_pair_ring_[draw_pair_next_++ % 8192];
+      note.submission = submission_counter_ + 1;
+      note.vs = vs_hash;
+      note.ps = ps_hash;
+      note.count = 1;
+      note.prim = uint32_t(prim_type);
+      note.first_draw = draw_count_;
+    }
+  }
   if (prim_type == xenos::PrimitiveType::kRectangleList && !rect_strip_route) {
     geometry_type = PipelineGeometryShader::kRectangleList;
   } else if (prim_type == xenos::PrimitiveType::kPointList &&
@@ -8099,8 +8564,12 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     return !value || std::strcmp(value, "0") != 0;
   }();
   // Geometry-emulation draws keep theirs (that route was selected above with
-  // the pixel shader present).
+  // the pixel shader present), and so do rectangle lists expanded in the
+  // vertex shader in its place: the MSAA clear fold matches the clear's
+  // shader pair, and without the pixel shader no clear folded on the 580X
+  // (Gears 3 19.4 fps there vs 30 on the RX 6900 XT, 2026-11-03).
   if (s_ps_drop && pixel_shader && !use_geometry_emulation &&
+      !rect_strip_route &&
       !draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) {
     pixel_shader = nullptr;
   }
@@ -8335,6 +8804,19 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         fold = metal::QualifyMsaaClearFold(regs, fold_vs_hash, fold_ps_hash,
                                            prim_type, index_count, norm_depth,
                                            normalized_color_mask);
+      }
+      if (s_fold_log &&
+          fold.refusal == metal::MsaaClearFoldRefusal::kShaderPair &&
+          prim_type == xenos::PrimitiveType::kRectangleList &&
+          index_count == 3) {
+        static uint32_t s_pair_logs = 0;
+        if (s_pair_logs < 24) {
+          ++s_pair_logs;
+          XELOGI("MetalMsaaClearFold shader-pair rect draw={} vs={:016X} "
+                 "ps={:016X} msaa={}",
+                 trace_draw_index_, fold_vs_hash, fold_ps_hash,
+                 uint32_t(regs.Get<reg::RB_SURFACE_INFO>().msaa_samples));
+        }
       }
       // Value invariance, edge alignment and the depth the transfer path
       // would leave (design D3): evaluate the clear's vertices on the CPU.
@@ -12948,6 +13430,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 buf_words[0], buf_words[1]);
           }
           indices[binding.bindless_descriptor_index] = texture_slot;
+          if (MetalTextureCache::SlotAuditEnabled()) {
+            audit_draw_slots_.push_back(texture_slot);
+          }
           // The audit's ENCODED side: this is the slot the shader will index,
           // captured with the identity the descriptor holds right now. The
           // stage mask is the draw's own requirement, taken from the same
@@ -13257,7 +13742,9 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     }
     return 1u;
   }();
-  const bool bind_memo_on = s_bind_memo && !xe_lineage_base();
+  const bool bind_memo_on = s_bind_memo && !xe_lineage_base() &&
+                            !MetalTextureCache::SlotAuditEnabled();
+  audit_draw_slots_.clear();
   // The key: fixed state compared as one block, plus "no fetch constant the
   // shaders read was written since the memo was stored" (WriteRegister marks
   // written slots in bind_memo_fetch_written_; storing clears it).
@@ -13941,6 +14428,11 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       ++heap_declarations_;
     }
   }
+  if (MetalTextureCache::SlotAuditEnabled()) {
+    texture_cache_->AuditDrawSlots(audit_draw_slots_.data(),
+                                   audit_draw_slots_.size(),
+                                   CurrentEncodingSubmission());
+  }
   constexpr uint32_t kHeapBackedBit = 0x80000000u;
   for (void* tex : texture_cache_->active_textures()) {
     if (heaps_active) {
@@ -14341,6 +14833,16 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     use_resource(rect_table_buffer, MTLResourceUsageRead);
     use_resource(rect_indices_buffer, MTLResourceUsageRead);
     use_resource(rect_srv_table_buffer, MTLResourceUsageRead);
+    {
+      RectDrawNote& note = rect_draw_ring_[rect_draw_next_++ % 256];
+      note.submission = submission_counter_ + 1;
+      note.ps = pixel_shader ? pixel_shader->ucode_data_hash() : 0;
+      note.pipeline = pipeline;
+      note.draw = draw_count_;
+      note.index_count = index_count;
+      note.color_format = uint32_t(color_pixel_formats[0]);
+      note.depth_format = uint32_t(pipeline_depth_format);
+    }
     ir_draw_indexed(MTLPrimitiveTypeTriangleStrip, rect_host_index_count,
                     MTLIndexTypeUInt32, rect_indices_buffer,
                     rect_host_indices_alloc.offset, /*instanceCount=*/1,
@@ -15002,6 +15504,28 @@ bool MetalCommandProcessor::ConvertDepthToSnapshot(void* depth_texture,
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   [encoder endEncoding];
   return true;
+}
+
+// IssueCopy's diagnostic log switches, read once: getenv on every resolve
+// showed in the CP-thread profile (GTA IV on the Mac Pro).
+static bool IssueCopyWbGateLog() {
+  static const bool s_enabled = std::getenv("XE_METAL_WB_GATE_LOG") != nullptr;
+  return s_enabled;
+}
+static bool IssueCopyGpuResolveLog() {
+  static const bool s_enabled =
+      std::getenv("XE_METAL_GPU_RESOLVE_LOG") != nullptr;
+  return s_enabled;
+}
+static bool IssueCopyResolveForwardLog() {
+  static const bool s_enabled =
+      std::getenv("XE_METAL_RESOLVE_FORWARD_LOG") != nullptr;
+  return s_enabled;
+}
+static bool IssueCopyCanonicalSyncLog() {
+  static const bool s_enabled =
+      std::getenv("XE_METAL_CANONICAL_SYNC_LOG") != nullptr;
+  return s_enabled;
 }
 
 bool MetalCommandProcessor::IssueCopy() {
@@ -15739,7 +16263,7 @@ bool MetalCommandProcessor::IssueCopy() {
         // memory rather than correct output -- in which case the shared route
         // is not producing wrong pixels, it is producing pixels where the
         // incumbent produces none.
-        if (std::getenv("XE_METAL_WB_GATE_LOG")) {
+        if (IssueCopyWbGateLog()) {
           // Materialization coverage: what Metal PREPARED for this resolve
           // versus the source rect the shared shader will read. If the shader
           // reads tiles outside the prepared span, it reads whatever the
@@ -15756,7 +16280,7 @@ bool MetalCommandProcessor::IssueCopy() {
               uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) << 3,
               rw, rh);
         }
-        if (std::getenv("XE_METAL_WB_GATE_LOG")) {
+        if (IssueCopyWbGateLog()) {
           const uint64_t wb_bytes = uint64_t(rw) * rh * wb_bpp;
           XELOGW(
               "MetalWbGate dest={:08X} {}x{} bpp={} bytes={} cap={} "
@@ -15787,7 +16311,7 @@ bool MetalCommandProcessor::IssueCopy() {
           // uncommitted destination, pipelines unavailable) the existing paths
           // below run unchanged.
           bool shared_resolve_dispatched = false;
-          if (!canonical_packed && std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+          if (!canonical_packed && IssueCopyGpuResolveLog()) {
             // The legacy-blit writeback: never GPU-current, so every draw
             // sampling its range commits and waits (Tomb Raider: 32 a frame).
             XELOGW(
@@ -15930,7 +16454,7 @@ bool MetalCommandProcessor::IssueCopy() {
                 // 74-px route-only residual).
                 scatter_eligible = false;
               }
-              if (std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+              if (IssueCopyGpuResolveLog()) {
                 XELOGW(
                     "MetalGpuScatter draw={} base={:08X} {}x{} bpp={} "
                     "bpp_log2={} pitch_aligned={} off=({},{}) extent={} "
@@ -16114,7 +16638,7 @@ bool MetalCommandProcessor::IssueCopy() {
                   wb_bpp_log2, scatter_dest.dest_offset_x,
                   scatter_dest.dest_offset_y, rw, rh,
                   scatter_dest.dest_extent_bytes, &forward_target);
-          if (!forwarding && std::getenv("XE_METAL_RESOLVE_FORWARD_LOG")) {
+          if (!forwarding && IssueCopyResolveForwardLog()) {
             static uint32_t s_forward_logs = 0;
             if (s_forward_logs++ < 300 || (s_forward_logs & 31u) == 0) {
               XELOGI("MetalResolveForward path dest={:08X} {}x{} scatter={} "
@@ -16199,7 +16723,7 @@ bool MetalCommandProcessor::IssueCopy() {
                 !canonical_resolve &&
                 resolve_info.copy_dest_info.copy_dest_swap;
             if (writeback_encoded && !gpu_resident_resolve &&
-                std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+                IssueCopyGpuResolveLog()) {
               // A CPU-staged color writeback (never GPU-current): the draws
               // that sample its range commit and wait on it.
               XELOGW(
@@ -16633,7 +17157,7 @@ bool MetalCommandProcessor::IssueCopy() {
                 depth_scatter = false;
               }
             }
-            if (std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+            if (IssueCopyGpuResolveLog()) {
               // Same census as MetalGpuScatter for the depth path: which depth
               // resolves stay on the CPU writeback (their consumers then
               // commit and wait on the record instead of ordering after it).
@@ -16698,7 +17222,7 @@ bool MetalCommandProcessor::IssueCopy() {
                                   resolve_info.copy_dest_base +
                                   resolve_info.copy_dest_extent_length;
           if (writeback_encoded && !depth_scatter &&
-              std::getenv("XE_METAL_GPU_RESOLVE_LOG")) {
+              IssueCopyGpuResolveLog()) {
             // CPU-staged depth writeback (never GPU-current).
             XELOGW(
                 "MetalCpuWriteback draw={} base={:08X} {}x{} depth fmt={} "
@@ -16902,7 +17426,7 @@ bool MetalCommandProcessor::IssueCopy() {
                          clear_source_x, clear_source_y, clear_width,
                          clear_height, color_clear_lo, color_clear_hi));
       if (!cleared) {
-        if (std::getenv("XE_METAL_CANONICAL_SYNC_LOG")) {
+        if (IssueCopyCanonicalSyncLog()) {
           XELOGW("MetalCanonicalSync colour-clear FALLBACK draw={} canonical={} "
                  "base={} pitch={} msaa={} 64bpp={} span=[{},+{}x{}] "
                  "rect=({},{} {}x{})",
