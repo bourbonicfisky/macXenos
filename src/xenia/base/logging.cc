@@ -356,9 +356,10 @@ class Logger {
                     line_range.second_length);
             }
 
-            // Always ensure there is a newline.
+            // Always ensure there is a newline. A line ending exactly at the
+            // end of the ring has an empty second part at the buffer start.
             char last_char =
-                line_range.second
+                line_range.second_length
                     ? line_range.second[line_range.second_length - 1]
                     : line_range.first[line_range.first_length - 1];
             if (last_char != '\n') {
