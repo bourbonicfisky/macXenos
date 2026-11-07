@@ -71,6 +71,7 @@ HIRBuilder::~HIRBuilder() {
 void HIRBuilder::Reset() {
   attributes_ = 0;
   ordered_loads_ = false;
+  ordered_stores_ = false;
   next_label_id_ = 0;
   next_value_ordinal_ = 0;
   locals_.clear();
@@ -1274,6 +1275,9 @@ Value* HIRBuilder::LoadOffset(Value* address, Value* offset, TypeName type,
 void HIRBuilder::StoreOffset(Value* address, Value* offset, Value* value,
                              uint32_t store_flags) {
   ASSERT_ADDRESS_TYPE(address);
+  if (ordered_stores_) {
+    MemoryBarrier();
+  }
   Instr* i = AppendInstr(OPCODE_STORE_OFFSET_info, store_flags);
   i->set_src1(address);
   i->set_src2(offset);
@@ -1312,6 +1316,9 @@ Value* HIRBuilder::StoreWithReserve(Value* address, Value* value,
 }
 void HIRBuilder::Store(Value* address, Value* value, uint32_t store_flags) {
   ASSERT_ADDRESS_TYPE(address);
+  if (ordered_stores_) {
+    MemoryBarrier();
+  }
   Instr* i = AppendInstr(OPCODE_STORE_info, store_flags);
   i->set_src1(address);
   i->set_src2(value);

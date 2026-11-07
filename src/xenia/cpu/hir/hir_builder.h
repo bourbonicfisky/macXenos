@@ -325,6 +325,8 @@ class HIRBuilder {
   // performed before it (the in-order Xenon never reorders loads; ARM does).
   // Set per function by the frontend.
   bool ordered_loads_ = false;
+  // Also a barrier before each store (jit_ordered_load_functions = "all").
+  bool ordered_stores_ = false;
 
   uint32_t attributes_;
 

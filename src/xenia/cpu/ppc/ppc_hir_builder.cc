@@ -45,7 +45,8 @@ DEFINE_string(
     "in program order (a barrier after each load). The Xbox 360 CPU never "
     "performs a load before an earlier one; ARM hosts do, which breaks guest "
     "code that checks a ready flag and then reads the data it guards without "
-    "a barrier (Crysis 3's job workers read a stale job and livelock).",
+    "a barrier (Crysis 3's job workers read a stale job and livelock). "
+    "\"all\" orders every function's loads and stores (diagnostic, slow).",
     "CPU");
 
 namespace xe {
@@ -104,7 +105,17 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
   function_ = function;
   start_address_ = function_->address();
   ordered_loads_ = false;
-  if (!cvars::jit_ordered_load_functions.empty()) {
+  ordered_stores_ = false;
+  if (cvars::jit_ordered_load_functions == "all") {
+    // Diagnostic: every function's loads and stores in program order, to
+    // tell a host memory-ordering race from anything else. Slow.
+    ordered_loads_ = ordered_stores_ = true;
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      XELOGI("jit_ordered_load_functions: all functions ordered");
+    }
+  } else if (!cvars::jit_ordered_load_functions.empty()) {
     for (std::string_view entry :
          xe::utf8::split(cvars::jit_ordered_load_functions, ", ")) {
       if (!entry.empty() &&
