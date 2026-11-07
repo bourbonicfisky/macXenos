@@ -628,12 +628,14 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   if (!fn) {
     // Unresolvable — return 0, and the thunk traps (brk 0xF000). Name the
     // address and thread first: the crash reporter cannot walk JIT frames, so
-    // this line is the only attribution a release build leaves behind.
+    // this line is the only attribution a release build leaves behind. Flush
+    // it: the trap kills the process before the log thread writes it out.
     XELOGE(
         "A64 ResolveFunction: guest address {:08X} does not resolve to a "
         "function (thread {}, lr {:08X}); trapping",
         uint32_t(target_address), thread_state->thread_id(),
         uint32_t(guest_context->lr));
+    xe::FlushLog();
     return 0;
   }
 
@@ -644,6 +646,7 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
         "A64 ResolveFunction: guest address {:08X} resolved but has no "
         "machine code (thread {}); trapping",
         uint32_t(target_address), thread_state->thread_id());
+    xe::FlushLog();
     return 0;
   }
   return reinterpret_cast<uint64_t>(code);
