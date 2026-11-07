@@ -840,9 +840,10 @@ class RenderTargetCache {
 
   // Render targets actually used by the draw call with the last successful
   // update. 0 is depth, color starting from 1, nullptr if not bound.
-  // Only valid for non-pixel-shader-interlock paths.
+  // Only valid for non-pixel-shader-interlock paths. Zeroed before the first
+  // update: a resolve can come first (Dark Souls), and backends walk this.
   RenderTarget*
-      last_update_used_render_targets_[1 + xenos::kMaxColorRenderTargets];
+      last_update_used_render_targets_[1 + xenos::kMaxColorRenderTargets] = {};
   // See TrackLastUpdateDrawTarget.
   RenderTargetKey last_update_draw_target_;
   // The latest frame each render target was drawn in, and the one before it,
