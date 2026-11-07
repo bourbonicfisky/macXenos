@@ -88,7 +88,7 @@ void LeaveGlobalLock(PPCContext* ppc_context, void* arg0, void* arg1) {
 namespace {
 struct GuestProbeRecord {
   uint64_t ns;
-  uint32_t thread_id, pc, r3, r4, r30, r31, w0, w1;
+  uint32_t thread_id, pc, lr, r1, r3, r4, r5, r6, r7, r11, r30, r31, w0, w1;
 };
 constexpr size_t kGuestProbeRing = 65536;
 GuestProbeRecord g_guest_probes[kGuestProbeRing];
@@ -103,8 +103,14 @@ void GuestProbe(PPCContext* ppc_context, void* arg0, void* arg1) {
                       .count());
   r.thread_id = ppc_context->thread_id;
   r.pc = uint32_t(ppc_context->scratch);
+  r.lr = uint32_t(ppc_context->lr);
+  r.r1 = uint32_t(ppc_context->r[1]);
   r.r3 = uint32_t(ppc_context->r[3]);
   r.r4 = uint32_t(ppc_context->r[4]);
+  r.r5 = uint32_t(ppc_context->r[5]);
+  r.r6 = uint32_t(ppc_context->r[6]);
+  r.r7 = uint32_t(ppc_context->r[7]);
+  r.r11 = uint32_t(ppc_context->r[11]);
   r.r30 = uint32_t(ppc_context->r[30]);
   r.r31 = uint32_t(ppc_context->r[31]);
   r.w0 = r.w1 = 0;
@@ -124,9 +130,11 @@ std::string FormatGuestProbes(size_t max_records) {
   for (uint64_t i = n - count; i < n; ++i) {
     const GuestProbeRecord& r = g_guest_probes[i % kGuestProbeRing];
     out.append(fmt::format(
-        "  {} t={:08X} pc={:08X} r3={:08X} r4={:08X} r30={:08X} r31={:08X} "
+        "  {} t={:08X} pc={:08X} lr={:08X} r1={:08X} r3={:08X} r4={:08X} "
+        "r5={:08X} r6={:08X} r7={:08X} r11={:08X} r30={:08X} r31={:08X} "
         "[r31]={:08X} {:08X}\n",
-        r.ns, r.thread_id, r.pc, r.r3, r.r4, r.r30, r.r31, r.w0, r.w1));
+        r.ns, r.thread_id, r.pc, r.lr, r.r1, r.r3, r.r4, r.r5, r.r6, r.r7,
+        r.r11, r.r30, r.r31, r.w0, r.w1));
   }
   return out;
 }
@@ -139,6 +147,29 @@ void SyscallHandler(PPCContext* ppc_context, void* arg0, void* arg1) {
       XELOGE("Unhandled syscall {}!", syscall_number);
       break;
 #pragma warning(suppress : 4065)
+  }
+}
+
+// jit_mtmsrd_atomic_lock: guest code brackets its lwarx/stwcx. sequences with
+// mtmsrd r13 (interrupts off) ... mtmsrd rN (restore). Holding one host lock
+// over that bracket makes the sequences mutually exclusive, so the
+// value-compare stwcx. can't succeed where a real reservation would have been
+// lost. Diagnostic only: a thread suspended inside the bracket stalls every
+// other one.
+namespace {
+std::recursive_mutex g_atomic_section_mutex;
+thread_local int32_t g_atomic_section_depth = 0;
+}  // namespace
+
+void EnterAtomicSection(PPCContext* ppc_context, void* arg0, void* arg1) {
+  g_atomic_section_mutex.lock();
+  ++g_atomic_section_depth;
+}
+
+void LeaveAtomicSection(PPCContext* ppc_context, void* arg0, void* arg1) {
+  if (g_atomic_section_depth > 0) {
+    --g_atomic_section_depth;
+    g_atomic_section_mutex.unlock();
   }
 }
 
@@ -155,6 +186,10 @@ bool PPCFrontend::Initialize() {
       "SyscallHandler", SyscallHandler, nullptr, nullptr);
   builtins_.guest_probe =
       processor_->DefineBuiltin("GuestProbe", GuestProbe, nullptr, nullptr);
+  builtins_.enter_atomic_section = processor_->DefineBuiltin(
+      "EnterAtomicSection", EnterAtomicSection, nullptr, nullptr);
+  builtins_.leave_atomic_section = processor_->DefineBuiltin(
+      "LeaveAtomicSection", LeaveAtomicSection, nullptr, nullptr);
   return true;
 }
 

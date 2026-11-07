@@ -848,6 +848,12 @@ int InstrEmit_mtmsrd(PPCHIRBuilder& f, const InstrData& i) {
   Value* new_msr = f.Or(f.And(from, mtmsrd_mask), f.AndNot(msr, mtmsrd_mask));
 
   f.StoreContext(offsetof(PPCContext, msr), new_msr);
+  if (cvars::jit_mtmsrd_atomic_lock) {
+    f.MemoryBarrier();
+    f.CallExtern(i.X.RT == 13 ? f.builtins()->enter_atomic_section
+                              : f.builtins()->leave_atomic_section);
+    f.MemoryBarrier();
+  }
   return 0;
 }
 

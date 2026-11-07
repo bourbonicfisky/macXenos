@@ -62,11 +62,18 @@ DEFINE_string(break_condition_op, "eq", "comparison operator", "CPU");
 DEFINE_bool(break_condition_truncate, true, "truncate value to 32-bits", "CPU");
 
 // Probes (diagnostic): guest addresses whose execution is recorded in a ring
-// that the stall dump prints (thread, r3/r4/r30/r31, the two words at r31).
+// that the stall and crash dumps print (thread, lr, r1, r3-r7, r11, r30, r31,
+// the two words at r31).
 DEFINE_string(guest_probe_pcs, "",
               "Comma-separated hex guest addresses to record (diagnostic; "
               "printed by the stall dump).",
               "CPU");
+
+DEFINE_bool(jit_mtmsrd_atomic_lock, false,
+            "Hold one host lock from mtmsrd r13 to the next mtmsrd, making "
+            "guest lwarx/stwcx. sequences mutually exclusive (diagnostic; "
+            "functions translated before it is set keep their code).",
+            "CPU");
 
 DEFINE_bool(break_on_debugbreak, true, "int3 on JITed __debugbreak requests.",
             "CPU");

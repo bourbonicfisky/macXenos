@@ -36,6 +36,8 @@ struct PPCBuiltins {
   Function* leave_global_lock;
   Function* syscall_handler;
   Function* guest_probe;
+  Function* enter_atomic_section;
+  Function* leave_atomic_section;
 };
 
 // The last `max_records` guest probe records (--guest_probe_pcs), oldest

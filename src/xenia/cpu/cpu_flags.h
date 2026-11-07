@@ -30,6 +30,7 @@ DECLARE_uint64(pvr);
 // Breakpoints:
 DECLARE_uint64(break_on_instruction);
 DECLARE_string(guest_probe_pcs);
+DECLARE_bool(jit_mtmsrd_atomic_lock);
 DECLARE_int32(break_condition_gpr);
 DECLARE_uint64(break_condition_value);
 DECLARE_string(break_condition_op);
