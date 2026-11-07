@@ -236,6 +236,7 @@ uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
 
 X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
                        uint32_t alertable, uint64_t* opt_timeout) {
+  SyncGuestStateBeforeWait();
   auto wait_handle = GetWaitHandle();
   if (!wait_handle) {
     // Object doesn't support waiting.
@@ -295,6 +296,7 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
   const bool prof = cvars::guest_wait_profile;
   const auto wait_start = prof ? std::chrono::steady_clock::now()
                                : std::chrono::steady_clock::time_point{};
+  wait_object->SyncGuestStateBeforeWait();
   auto result = xe::threading::SignalAndWait(
       signal_object->GetWaitHandle(), wait_object->GetWaitHandle(),
       alertable ? true : false, timeout_ms);
@@ -337,6 +339,7 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
   xe::threading::WaitHandle* wait_handles[64];
 
   for (size_t i = 0; i < count; ++i) {
+    objects[i]->SyncGuestStateBeforeWait();
     wait_handles[i] = objects[i]->GetWaitHandle();
     assert_not_null(wait_handles[i]);
   }

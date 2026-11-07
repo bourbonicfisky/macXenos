@@ -253,6 +253,9 @@ class XObject {
   // Called on successful wait.
   virtual void WaitCallback() {}
   virtual xe::threading::WaitHandle* GetWaitHandle() { return nullptr; }
+  // Called before a wait on this object: brings the host wait handle in line
+  // with state the guest keeps in its own memory (see XEvent).
+  virtual void SyncGuestStateBeforeWait() {}
 
   // Creates the kernel object for guest code to use. Typically not needed.
   uint8_t* CreateNative(uint32_t size);
