@@ -4850,8 +4850,7 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   {
     // Owners of the touched pages, named in the XE_GPU_RAM_WATCH line.
     std::string owners_text;
-    static const bool s_watch = std::getenv("XE_GPU_RAM_WATCH") != nullptr;
-    if (s_watch) {
+    if (GuestRamWatchOverlaps(physical_address_start, length)) {
       const uint32_t first_page =
           physical_address_start >> metal::MetalLazyPublication::kPageShift;
       const uint32_t last_page =

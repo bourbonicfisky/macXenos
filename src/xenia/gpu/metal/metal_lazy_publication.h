@@ -23,6 +23,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
+#include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_tiled_publish_run.h"
 #include "xenia/gpu/texture_address.h"
 
@@ -500,8 +501,7 @@ class MetalLazyPublication {
         return 0;
       }
       if (o.pre_image) {
-        static const bool s_watch = std::getenv("XE_GPU_RAM_WATCH") != nullptr;
-        if (s_watch) {
+        if (GuestRamWatchOverlaps(c0, c1 - c0)) {
           // Diagnostic: which words this publication moves, and RAM's value.
           const uint8_t* pre = o.pre_image->data() + (c0 - o.guest_addr);
           const uint8_t* src = shared_contents + c0;

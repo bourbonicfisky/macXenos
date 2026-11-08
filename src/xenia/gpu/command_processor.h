@@ -132,7 +132,9 @@ enum class GammaRampType {
 // XE_GPU_RAM_WATCH=<physical hex>:<length hex>: logs every GPU-derived write
 // that overlaps the range, with the writer and a short host backtrace
 // (diagnostic; inert when unset).
-void GuestRamWatchNote(const char* writer, uint32_t base, uint32_t length);
+void GuestRamWatchNote(const char* writer, uint32_t base, uint32_t length,
+                       uint64_t value = UINT64_MAX);
+bool GuestRamWatchOverlaps(uint32_t base, uint32_t length);
 
 class CommandProcessor {
  protected:

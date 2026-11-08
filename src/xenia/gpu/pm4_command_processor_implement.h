@@ -694,6 +694,17 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_INTERRUPT(
     XELOGE("INTERRUPT: failed to publish deferred guest-memory producers");
     return false;
   }
+  // XE_CP_INTERRUPT_LOG=1 (diagnostic): command-stream interrupts, first 200
+  // then every 1024th.
+  static const bool s_interrupt_log =
+      std::getenv("XE_CP_INTERRUPT_LOG") != nullptr;
+  if (s_interrupt_log) {
+    static uint64_t s_interrupts = 0;
+    const uint64_t n_interrupt = ++s_interrupts;
+    if (n_interrupt <= 200 || (n_interrupt & 1023) == 0) {
+      XELOGI("CP INTERRUPT #{} cpu_mask={:02X}", n_interrupt, cpu_mask);
+    }
+  }
   for (int n = 0; n < 6; n++) {
     if (cpu_mask & (1 << n)) {
       graphics_system_->DispatchInterruptCallback(1, n);
@@ -850,6 +861,19 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
             "ref={:08X} cond={:X} wait={}",
             is_memory ? "mem" : "reg", poll_reg_addr, value, mask, ref,
             wait_info & 0x7, wait);
+        if (is_memory) {
+          // The words around the polled one (a handshake ring shows its
+          // completed slots), as stored in guest memory.
+          const uint32_t around = (poll_physical & ~uint32_t(0x7F)) - 0x40;
+          std::string words;
+          for (uint32_t i = 0; i < 64; ++i) {
+            const uint32_t* w = reinterpret_cast<const uint32_t*>(
+                memory_->TranslatePhysical(around + i * 4));
+            words += fmt::format("{}{:08X}", (i & 7) ? " " : "\n    ",
+                                 w ? xe::byte_swap(*w) : 0u);
+          }
+          XELOGW("WAIT_REG_MEM stuck: words from {:08X}:{}", around, words);
+        }
       }
       // Wait.
       if (wait >= 0x100) {
@@ -1033,6 +1057,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_MEM_WRITE(
     auto endianness = static_cast<xenos::Endian>(write_addr & 0x3);
     auto addr = write_addr & ~0x3;
     write_data = GpuSwap(write_data, endianness);
+    GuestRamWatchNote("cp_mem_write", addr, 4, write_data);
     xe::store(memory_->TranslatePhysical(addr), write_data);
     trace_writer_.WriteMemoryWrite(CpuToGpu(addr), 4);
     write_addr += 4;
@@ -1084,6 +1109,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_COND_WRITE(
       auto endianness = static_cast<xenos::Endian>(write_reg_addr & 0x3);
       write_reg_addr &= ~0x3;
       write_data = GpuSwap(write_data, endianness);
+      GuestRamWatchNote("cp_cond_write", write_reg_addr, 4, write_data);
       xe::store(memory_->TranslatePhysical(write_reg_addr), write_data);
       trace_writer_.WriteMemoryWrite(CpuToGpu(write_reg_addr), 4);
     } else {
@@ -1151,6 +1177,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_SHD(
           memory_->TranslateVirtual(0x7F000000 + writeback_offset);
     }
   }
+  GuestRamWatchNote("cp_event_write_shd", address, 4, data_value);
   xe::store(write_destination, data_value);
   trace_writer_.WriteMemoryWrite(CpuToGpu(address), 4);
   return true;

@@ -250,7 +250,7 @@ DEFINE_bool(
 namespace xe {
 namespace gpu {
 
-void GuestRamWatchNote(const char* writer, uint32_t base, uint32_t length) {
+static std::pair<uint32_t, uint32_t> GuestRamWatchRange() {
   static const std::pair<uint32_t, uint32_t> watch = [] {
     const char* v = std::getenv("XE_GPU_RAM_WATCH");
     if (!v) {
@@ -262,9 +262,19 @@ void GuestRamWatchNote(const char* writer, uint32_t base, uint32_t length) {
                                       : 0x1000u;
     return std::pair<uint32_t, uint32_t>(b, l);
   }();
-  if (!watch.second || !length ||
-      uint64_t(base) + length <= watch.first ||
-      base >= uint64_t(watch.first) + watch.second) {
+  return watch;
+}
+
+bool GuestRamWatchOverlaps(uint32_t base, uint32_t length) {
+  const std::pair<uint32_t, uint32_t> watch = GuestRamWatchRange();
+  return watch.second && length &&
+         uint64_t(base) + length > watch.first &&
+         base < uint64_t(watch.first) + watch.second;
+}
+
+void GuestRamWatchNote(const char* writer, uint32_t base, uint32_t length,
+                       uint64_t value) {
+  if (!GuestRamWatchOverlaps(base, length)) {
     return;
   }
   std::string trace;
@@ -280,7 +290,12 @@ void GuestRamWatchNote(const char* writer, uint32_t base, uint32_t length) {
     }
   }
 #endif
-  XELOGW("GuestRamWatch {} {:08X}+{:X}:{}", writer, base, length, trace);
+  if (value != UINT64_MAX) {
+    XELOGW("GuestRamWatch {} {:08X}+{:X} value={:08X}:{}", writer, base,
+           length, uint32_t(value), trace);
+  } else {
+    XELOGW("GuestRamWatch {} {:08X}+{:X}:{}", writer, base, length, trace);
+  }
 }
 
 namespace {
