@@ -1403,8 +1403,24 @@ class MetalCommandProcessor : public CommandProcessor {
     uint64_t authority_sequence;
     // Stage 2: read-watched; RAM gets the bytes on first CPU touch.
     uint32_t lazy_armed = 0;
+    // The range's shared-buffer bytes before the export ran, captured when it
+    // is armed at encode time; publication then copies only changed words.
+    std::shared_ptr<const std::vector<uint8_t>> pre_image;
   };
   std::vector<PendingMemexport> pending_memexports_;
+  // Bytes of staged hazard uploads (StageHazardUpload) whose blits may not
+  // have run yet: the shared buffer gets them on the GPU timeline, so a
+  // memexport pre-image taken on the CPU overlays them to see the buffer as
+  // the export will. Pruned once their submission completes.
+  struct StagedUploadImage {
+    uint32_t offset;
+    uint64_t submission;
+    std::shared_ptr<const std::vector<uint8_t>> bytes;
+  };
+  std::deque<StagedUploadImage> staged_upload_images_;
+  // Newest submission whose staged bytes were dropped for the cap; no
+  // pre-image is taken while it may still be pending.
+  uint64_t staged_upload_images_dropped_through_ = 0;
   // Trace playback only: guest ranges this frame's GPU resolves and memexports
   // wrote (kept over later trace restores; cleared at the frame's swap).
   std::vector<std::pair<uint32_t, uint32_t>> playback_gpu_written_;
@@ -1563,7 +1579,18 @@ class MetalCommandProcessor : public CommandProcessor {
   bool lazy_full_domain_request_ = false;
   void RegisterGpuResidentResolve(uint32_t base, uint32_t extent_bytes);
   void ArmLazyPublication(PendingWriteback& wb);
-  void ArmLazyMemexport(PendingMemexport& me);
+  // An older armed export a new one covers and replaces, with the pages it
+  // still owned (not yet published) when it was retired.
+  struct SupersededMemexport {
+    PendingMemexport record;
+    std::vector<std::pair<uint32_t, uint32_t>> owned;
+  };
+  // `capture_pre_image` only at encode time, before the GPU can have run the
+  // export; `superseded` seed the new pre-image on the pages they still owned,
+  // so their unpublished words still publish.
+  void ArmLazyMemexport(PendingMemexport& me, bool capture_pre_image = false,
+                        const std::vector<SupersededMemexport>* superseded =
+                            nullptr);
   void RearmLazyPublications();
   void OnLazyRead(uint32_t physical_address_start, uint32_t length,
                   Memory::PhysicalAccess access);

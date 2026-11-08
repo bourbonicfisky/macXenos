@@ -15,16 +15,54 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
 
+#include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/byte_order.h"
+#include "xenia/base/logging.h"
 #include "xenia/gpu/metal/metal_tiled_publish_run.h"
 #include "xenia/gpu/texture_address.h"
 
 namespace xe {
 namespace gpu {
 namespace metal {
+
+// Copies the 32-bit words of [src, src + length) that differ from `pre` into
+// dst and returns the bytes copied. A memexport writes whole words, and only
+// the elements it exports; the rest of its range in the shared buffer is what
+// the buffer held when the export was armed, which RAM may since have
+// overwritten with newer CPU data. Battlefield 3 keeps its job queues in the
+// block its pixel shader exports into, and whole-page copies rolled the
+// queues back (a request completed twice, call through a null callback).
+inline uint64_t CopyChangedWords(uint8_t* dst, const uint8_t* src,
+                                 const uint8_t* pre, uint32_t length) {
+  uint64_t copied = 0;
+  uint32_t i = 0;
+  for (; i + 8 <= length; i += 8) {
+    uint64_t s8, p8;
+    std::memcpy(&s8, src + i, 8);
+    std::memcpy(&p8, pre + i, 8);
+    if (s8 == p8) {
+      continue;
+    }
+    for (uint32_t w = i; w < i + 8; w += 4) {
+      if (std::memcmp(src + w, pre + w, 4)) {
+        std::memcpy(dst + w, src + w, 4);
+        copied += 4;
+      }
+    }
+  }
+  for (; i < length; ++i) {
+    if (src[i] != pre[i]) {
+      dst[i] = src[i];
+      ++copied;
+    }
+  }
+  return copied;
+}
 
 // Stage 2 of optimize-metal-gpu-resident-resolve-coherence: demand-driven RAM
 // publication of GPU-resident resolve output.
@@ -79,6 +117,10 @@ class MetalLazyPublication {
     uint32_t range_bytes = 0;
     // Memexport output: a plain linear range in the shared buffer.
     bool linear = false;
+    // Linear only: the shared buffer's [guest_addr, guest_addr + range_bytes)
+    // before the export ran. When set, a copy moves only the words the GPU
+    // changed (CopyChangedWords) instead of the whole covered range.
+    std::shared_ptr<const std::vector<uint8_t>> pre_image;
   };
 
   struct Stats {
@@ -456,6 +498,37 @@ class MetalLazyPublication {
       uint32_t c1 = std::min(o.guest_addr + o.range_bytes, page_end);
       if (c0 >= c1) {
         return 0;
+      }
+      if (o.pre_image) {
+        static const bool s_watch = std::getenv("XE_GPU_RAM_WATCH") != nullptr;
+        if (s_watch) {
+          // Diagnostic: which words this publication moves, and RAM's value.
+          const uint8_t* pre = o.pre_image->data() + (c0 - o.guest_addr);
+          const uint8_t* src = shared_contents + c0;
+          const uint8_t* dst = ram + (c0 - o.guest_addr);
+          std::string text;
+          uint32_t n = 0;
+          for (uint32_t w = 0; w + 4 <= c1 - c0; w += 4) {
+            if (std::memcmp(src + w, pre + w, 4)) {
+              if (++n <= 6) {
+                uint32_t sv, pv, rv;
+                std::memcpy(&sv, src + w, 4);
+                std::memcpy(&pv, pre + w, 4);
+                std::memcpy(&rv, dst + w, 4);
+                text += fmt::format(" {:08X}:pre={:08X},gpu={:08X},ram={:08X}",
+                                    c0 + w, xe::byte_swap(pv),
+                                    xe::byte_swap(sv), xe::byte_swap(rv));
+              }
+            }
+          }
+          if (n) {
+            XELOGW("GuestRamWatch merge seq={} page {:08X}: {} words{}",
+                   o.authority_sequence, c0, n, text);
+          }
+        }
+        return CopyChangedWords(ram + (c0 - o.guest_addr), shared_contents + c0,
+                                o.pre_image->data() + (c0 - o.guest_addr),
+                                c1 - c0);
       }
       std::memcpy(ram + (c0 - o.guest_addr),
                   shared_contents + c0, c1 - c0);

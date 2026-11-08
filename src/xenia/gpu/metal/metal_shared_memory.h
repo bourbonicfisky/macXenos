@@ -413,6 +413,11 @@ class MetalSharedMemory : public SharedMemory {
   // publishing nothing.
   SharedBufferConvergenceOutcome ConvergeRangeToRam(uint32_t base,
                                                     uint32_t length);
+  // As ConvergeRangeToRam, but copies only the words that differ from
+  // `pre_image` (the range's buffer bytes before a memexport ran; it is
+  // indexed from `base`). bytes_copied counts the words moved.
+  SharedBufferConvergenceOutcome ConvergeChangedWordsToRam(
+      uint32_t base, uint32_t length, const uint8_t* pre_image);
 
   // Upload copy accounting, updated at the memcpy / alias-skip site itself
   // (never from the mode). Saturating rather than wrapping: an overflowed

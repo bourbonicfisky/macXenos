@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/metal/metal_shared_memory.h"
 
+#include "xenia/gpu/metal/metal_lazy_publication.h"
+
 #include <algorithm>
 
 #include "xenia/gpu/trace_writer.h"
@@ -987,6 +989,27 @@ SharedBufferConvergenceOutcome MetalSharedMemory::ConvergeRangeToRam(
   }
   std::memcpy(destination, source, length);
   outcome.bytes_copied = length;  // recorded AT the copy that moved them.
+  outcome.converged = true;
+  return outcome;
+}
+
+SharedBufferConvergenceOutcome MetalSharedMemory::ConvergeChangedWordsToRam(
+    uint32_t base, uint32_t length, const uint8_t* pre_image) {
+  if (!pre_image || is_zero_copy_) {
+    return ConvergeRangeToRam(base, length);
+  }
+  SharedBufferConvergenceOutcome outcome;
+  if (!buffer_contents_ || !length || base >= kBufferSize ||
+      length > kBufferSize - base) {
+    return outcome;
+  }
+  uint8_t* destination = static_cast<uint8_t*>(memory().TranslatePhysical(base));
+  if (!destination) {
+    return outcome;
+  }
+  EnsureCpuCurrent(base, length);
+  outcome.bytes_copied = metal::CopyChangedWords(
+      destination, buffer_contents_ + base, pre_image, length);
   outcome.converged = true;
   return outcome;
 }

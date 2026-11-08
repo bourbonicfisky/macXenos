@@ -949,7 +949,13 @@ class MetalMemexportConvergenceTarget
                                                   sub_length);
         }
         metal::SharedBufferConvergenceOutcome published =
-            shared_memory_->ConvergeRangeToRam(uint32_t(sub_start), sub_length);
+            pre_image_
+                ? shared_memory_->ConvergeChangedWordsToRam(
+                      uint32_t(sub_start), sub_length,
+                      pre_image_->data() + (uint32_t(sub_start) -
+                                            pre_image_base_))
+                : shared_memory_->ConvergeRangeToRam(uint32_t(sub_start),
+                                                     sub_length);
         *bytes_copied += published.bytes_copied;
         if (!published.converged) {
           return false;
@@ -988,12 +994,21 @@ class MetalMemexportConvergenceTarget
     owned_only_ = owned;
   }
 
+  // The owned-only copies of the next record move only the words that differ
+  // from its pre-image (indexed from `base`); nullptr copies whole pages.
+  void SetPreImage(uint32_t base, const std::vector<uint8_t>* pre_image) {
+    pre_image_base_ = base;
+    pre_image_ = pre_image;
+  }
+
  private:
   CommandProcessor* command_processor_;
   Memory* memory_;
   MetalSharedMemory* shared_memory_;
   metal::MetalTextureCache* texture_cache_;
   const std::vector<std::pair<uint32_t, uint32_t>>* owned_only_ = nullptr;
+  uint32_t pre_image_base_ = 0;
+  const std::vector<uint8_t>* pre_image_ = nullptr;
 };
 
 // Snapshot-bridge lineage probe (XE_METAL_LINEAGE=<base hex>): writer-side half.
@@ -2261,6 +2276,13 @@ static void LogCommandBufferFault(id<MTLCommandBuffer> command_buffer,
   }
 }
 
+// XE_METAL_MEMEXPORT_MERGE=0 restores whole-range memexport publication.
+static bool MemexportMergeEnabled() {
+  static const bool s_merge = metal::ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_MEMEXPORT_MERGE"), true);
+  return s_merge;
+}
+
 uint64_t MetalCommandProcessor::StageHazardUpload(uint32_t offset,
                                                   uint32_t length) {
   if (!length || !shared_memory_ || !memory_ || trace_writer_.is_open()) {
@@ -2303,6 +2325,25 @@ uint64_t MetalCommandProcessor::StageHazardUpload(uint32_t offset,
     (void)cb;
     (void)staging;
   }];
+  if (MemexportMergeEnabled() && lazy_read_callback_handle_) {
+    const uint64_t completed =
+        completed_submission_.load(std::memory_order_acquire);
+    while (!staged_upload_images_.empty() &&
+           staged_upload_images_.front().submission <= completed) {
+      staged_upload_images_.pop_front();
+    }
+    constexpr size_t kMaxStagedUploadImages = 1024;
+    if (staged_upload_images_.size() >= kMaxStagedUploadImages) {
+      staged_upload_images_dropped_through_ = std::max(
+          staged_upload_images_dropped_through_,
+          staged_upload_images_.front().submission);
+      staged_upload_images_.pop_front();
+    }
+    const uint8_t* bytes = static_cast<const uint8_t*>(source);
+    staged_upload_images_.push_back(StagedUploadImage{
+        offset, CurrentEncodingSubmission(),
+        std::make_shared<const std::vector<uint8_t>>(bytes, bytes + length)});
+  }
   return CurrentEncodingSubmission();
 }
 
@@ -4806,6 +4847,33 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   const bool commit_first =
       s_write_commit && write_unlocked && may_wait &&
       !kernel::XThread::IsInThread(worker_thread_.get());
+  {
+    // Owners of the touched pages, named in the XE_GPU_RAM_WATCH line.
+    std::string owners_text;
+    static const bool s_watch = std::getenv("XE_GPU_RAM_WATCH") != nullptr;
+    if (s_watch) {
+      const uint32_t first_page =
+          physical_address_start >> metal::MetalLazyPublication::kPageShift;
+      const uint32_t last_page =
+          (physical_address_start + length - 1) >>
+          metal::MetalLazyPublication::kPageShift;
+      for (uint32_t page = first_page; page <= last_page; ++page) {
+        for (const auto& o : lazy_publication_.PageOwners(page)) {
+          owners_text += fmt::format(
+              "[{}seq={} sub={} {:08X}+{:X} pre={}]", o.linear ? "export " : "",
+              o.authority_sequence, o.submission, o.guest_addr, o.range_bytes,
+              o.pre_image ? 1 : 0);
+        }
+      }
+    }
+    GuestRamWatchNote(
+        access == Memory::PhysicalAccess::kRead ? "lazy_read" : "lazy_write",
+        physical_address_start, length);
+    if (!owners_text.empty()) {
+      XELOGW("GuestRamWatch owners {:08X}+{:X}: {}", physical_address_start,
+             length, owners_text);
+    }
+  }
   uint32_t remaining = lazy_publication_.OnAccess(
       physical_address_start, length,
       [this, committed, may_wait, commit_first](uint64_t submission) {
@@ -4930,9 +4998,79 @@ void MetalCommandProcessor::ArmLazyPublication(PendingWriteback& wb) {
   wb.lazy_armed = 1u;
 }
 
-void MetalCommandProcessor::ArmLazyMemexport(PendingMemexport& me) {
+void MetalCommandProcessor::ArmLazyMemexport(
+    PendingMemexport& me, bool capture_pre_image,
+    const std::vector<SupersededMemexport>* superseded) {
   if (!memory_ || !me.submission) {
     return;
+  }
+  constexpr uint32_t kMaxPreImageBytes = 16u << 20;
+  const uint64_t completed =
+      completed_submission_.load(std::memory_order_acquire);
+  if (MemexportMergeEnabled() && capture_pre_image && !me.pre_image &&
+      staged_upload_images_dropped_through_ <= completed && shared_memory_ &&
+      !shared_memory_->is_zero_copy() && !discrete_mirror_ &&
+      me.size_bytes <= kMaxPreImageBytes) {
+    id<MTLBuffer> buffer =
+        (__bridge id<MTLBuffer>)shared_memory_->GetCpuBuffer();
+    const uint8_t* contents =
+        buffer ? static_cast<const uint8_t*>(buffer.contents) : nullptr;
+    if (contents) {
+      auto pre = std::make_shared<std::vector<uint8_t>>(
+          contents + me.base_address,
+          contents + me.base_address + me.size_bytes);
+      // Staged uploads not yet executed land in the buffer before the export
+      // runs (later uploads skip the pages this record owns), so they belong
+      // to the pre-image; otherwise their RAM bytes publish as GPU writes
+      // over newer CPU data.
+      const uint64_t me_end = uint64_t(me.base_address) + me.size_bytes;
+      for (const StagedUploadImage& staged : staged_upload_images_) {
+        if (staged.submission <= completed) {
+          continue;
+        }
+        const uint64_t s_end = uint64_t(staged.offset) + staged.bytes->size();
+        const uint64_t o0 = std::max<uint64_t>(staged.offset, me.base_address);
+        const uint64_t o1 = std::min<uint64_t>(s_end, me_end);
+        if (o0 < o1) {
+          std::memcpy(pre->data() + (o0 - me.base_address),
+                      staged.bytes->data() + (o0 - staged.offset),
+                      size_t(o1 - o0));
+        }
+      }
+      bool complete = true;
+      if (superseded) {
+        // Only pages an older record still owned: its words there are not in
+        // RAM yet. Pages it already published hold RAM's (possibly newer)
+        // bytes, which the buffer snapshot above already has. Newest first,
+        // so the oldest pre-image is the one left in place.
+        for (auto it = superseded->rbegin(); it != superseded->rend(); ++it) {
+          const PendingMemexport& old = it->record;
+          if (it->owned.empty()) {
+            continue;
+          }
+          if (!old.pre_image) {
+            complete = false;
+            break;
+          }
+          for (const auto& [o_start, o_length] : it->owned) {
+            const uint64_t o0 = std::max<uint64_t>(
+                o_start, std::max(old.base_address, me.base_address));
+            const uint64_t o1 = std::min<uint64_t>(
+                uint64_t(o_start) + o_length,
+                std::min<uint64_t>(uint64_t(old.base_address) + old.size_bytes,
+                                   me_end));
+            if (o0 < o1) {
+              std::memcpy(pre->data() + (o0 - me.base_address),
+                          old.pre_image->data() + (o0 - old.base_address),
+                          size_t(o1 - o0));
+            }
+          }
+        }
+      }
+      if (complete) {
+        me.pre_image = std::move(pre);
+      }
+    }
   }
   metal::MetalLazyPublication::Owner owner;
   owner.authority_sequence = me.authority_sequence;
@@ -4940,6 +5078,7 @@ void MetalCommandProcessor::ArmLazyMemexport(PendingMemexport& me) {
   owner.guest_addr = me.base_address;
   owner.range_bytes = me.size_bytes;
   owner.linear = true;
+  owner.pre_image = me.pre_image;
   lazy_publication_.Arm(owner, nullptr, nullptr);
   memory_->EnablePhysicalMemoryAccessCallbacks(me.base_address, me.size_bytes,
                                                false, true);
@@ -14613,18 +14752,25 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 const uint32_t new_end = new_start + owned.range.length();
                 const uint64_t newest_sequence =
                     pending_memexports_.back().authority_sequence;
+                std::vector<SupersededMemexport> superseded;
                 for (auto it = pending_memexports_.begin();
                      it != pending_memexports_.end();) {
                   if (it->authority_sequence != newest_sequence &&
                       it->lazy_armed && it->base_address >= new_start &&
                       it->base_address + it->size_bytes <= new_end) {
+                    SupersededMemexport old;
+                    lazy_publication_.OwnedRangesOf(it->authority_sequence,
+                                                    &old.owned);
                     lazy_publication_.Retire(it->authority_sequence);
+                    old.record = std::move(*it);
+                    superseded.push_back(std::move(old));
                     it = pending_memexports_.erase(it);
                   } else {
                     ++it;
                   }
                 }
-                ArmLazyMemexport(pending_memexports_.back());
+                ArmLazyMemexport(pending_memexports_.back(), true,
+                                 &superseded);
               }
               return true;
             });
@@ -19066,8 +19212,10 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       if (s_drain_owned_only && me.lazy_armed) {
         lazy_publication_.OwnedRangesOf(me.authority_sequence, &me_owned);
         convergence_target.SetOwnedOnly(&me_owned);
+        convergence_target.SetPreImage(me.base_address, me.pre_image.get());
       } else {
         convergence_target.SetOwnedOnly(nullptr);
+        convergence_target.SetPreImage(0, nullptr);
       }
       // ONE gate, shared with conformance. A tagged record is decided by its
       // own submission -- the ordinary shape since the async promotion -- while
