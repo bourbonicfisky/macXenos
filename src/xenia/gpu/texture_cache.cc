@@ -9,6 +9,8 @@
 
 #include "xenia/gpu/texture_cache.h"
 
+#include <cstdlib>
+
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -589,10 +591,34 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
   // (Tiger Woods 14's CPU-filled glyph atlas lost letters this way).
   const uint32_t base_address = key().base_page << 12;
   const uint32_t mips_address = key().mip_page << 12;
+  // XE_GPU_RACED_LOAD_LOG=N (diagnostic): the first N raced loads, with the
+  // first page that lost validity and its watch state.
+  auto log_race = [&](const char* region, uint32_t start, uint32_t length) {
+    static const uint32_t s_limit = [] {
+      const char* v = std::getenv("XE_GPU_RACED_LOAD_LOG");
+      return v ? uint32_t(std::strtoul(v, nullptr, 10)) : 0u;
+    }();
+    static uint32_t s_logged = 0;
+    if (s_logged >= s_limit) {
+      return;
+    }
+    ++s_logged;
+    uint32_t invalid = start & ~uint32_t(0xFFF);
+    while (invalid + 0x1000 < start + length &&
+           shared_memory.IsRangeValid(invalid, invalid + 1)) {
+      invalid += 0x1000;
+    }
+    XELOGW("TextureCache: raced load ({}) {:08X}+{:X} fmt {} {}x{}: page "
+           "{:08X} invalid, watch {}",
+           region, start, length, uint32_t(key().format), key().GetWidth(),
+           key().GetHeight(), invalid,
+           shared_memory.guest_memory().DescribePhysicalWatch(invalid));
+  };
   if (base_outdated_ &&
       !shared_memory.IsRangeValid(base_address,
                                   base_address + GetGuestBaseSize())) {
     ++texture_cache().loads_raced_by_guest_write_;
+    log_race("base", base_address, GetGuestBaseSize());
   } else if (base_outdated_) {
     assert_not_zero(GetGuestBaseSize());
     base_outdated_ = false;
@@ -604,6 +630,7 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
       !shared_memory.IsRangeValid(mips_address,
                                   mips_address + GetGuestMipsSize())) {
     ++texture_cache().loads_raced_by_guest_write_;
+    log_race("mips", mips_address, GetGuestMipsSize());
   } else if (mips_outdated_) {
     assert_not_zero(GetGuestMipsSize());
     mips_outdated_ = false;
