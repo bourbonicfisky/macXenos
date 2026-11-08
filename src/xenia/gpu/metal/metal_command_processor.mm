@@ -3049,6 +3049,13 @@ bool MetalCommandProcessor::SetupContext() {
   shared_memory_->SetGpuCurrentSpanProvider(
       [this](uint32_t start, uint32_t length,
              std::vector<std::pair<uint32_t, uint32_t>>* out) {
+        // XE_METAL_GPU_CURRENT_SKIP=0 (diagnostic): report no GPU-current
+        // spans, so uploads copy guest RAM over pending GPU output too.
+        static const bool s_skip = metal::ParseMetalEnvironmentFlag(
+            std::getenv("XE_METAL_GPU_CURRENT_SKIP"), true);
+        if (!s_skip) {
+          return;
+        }
         const uint64_t end = uint64_t(start) + length;
         // The producer index's page bitmap holds every pending writeback and
         // memexport range: no bit on the upload's 64 KiB pages means neither
