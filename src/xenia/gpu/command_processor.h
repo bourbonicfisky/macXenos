@@ -129,6 +129,11 @@ enum class GammaRampType {
   kPWL,
 };
 
+// XE_GPU_RAM_WATCH=<physical hex>:<length hex>: logs every GPU-derived write
+// that overlaps the range, with the writer and a short host backtrace
+// (diagnostic; inert when unset).
+void GuestRamWatchNote(const char* writer, uint32_t base, uint32_t length);
+
 class CommandProcessor {
  protected:
   RingBuffer
@@ -252,6 +257,7 @@ class CommandProcessor {
     guest_ram_write_journal_ = journal;
   }
   void NotifyGuestRamWrite(uint32_t base, uint32_t length) {
+    GuestRamWatchNote("notify", base, length);
     if (guest_ram_write_journal_) {
       guest_ram_write_journal_->OnBeforeGuestRamWrite(base, length);
     }

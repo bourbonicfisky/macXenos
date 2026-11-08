@@ -9,6 +9,11 @@
 
 #include "xenia/gpu/command_processor.h"
 
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
+
 #include <cstdlib>
 
 #include <algorithm>
@@ -244,6 +249,39 @@ DEFINE_bool(
 
 namespace xe {
 namespace gpu {
+
+void GuestRamWatchNote(const char* writer, uint32_t base, uint32_t length) {
+  static const std::pair<uint32_t, uint32_t> watch = [] {
+    const char* v = std::getenv("XE_GPU_RAM_WATCH");
+    if (!v) {
+      return std::pair<uint32_t, uint32_t>(0, 0);
+    }
+    char* end = nullptr;
+    uint32_t b = uint32_t(std::strtoul(v, &end, 16));
+    uint32_t l = (end && *end == ':') ? uint32_t(std::strtoul(end + 1, nullptr, 16))
+                                      : 0x1000u;
+    return std::pair<uint32_t, uint32_t>(b, l);
+  }();
+  if (!watch.second || !length ||
+      uint64_t(base) + length <= watch.first ||
+      base >= uint64_t(watch.first) + watch.second) {
+    return;
+  }
+  std::string trace;
+#if !defined(_WIN32)
+  void* frames[6];
+  int n = backtrace(frames, 6);
+  Dl_info info;
+  for (int i = 1; i < n; ++i) {
+    if (dladdr(frames[i], &info) && info.dli_sname) {
+      trace += fmt::format(" {}", info.dli_sname);
+    } else {
+      trace += fmt::format(" {}", frames[i]);
+    }
+  }
+#endif
+  XELOGW("GuestRamWatch {} {:08X}+{:X}:{}", writer, base, length, trace);
+}
 
 namespace {
 
