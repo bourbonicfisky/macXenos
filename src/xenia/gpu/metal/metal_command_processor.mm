@@ -6033,6 +6033,16 @@ void MetalCommandProcessor::ExecuteDeferredCacheClear(bool publication_failed) {
         // EndFrameEncoderAndWait has already done this, so this is a no-op
         // there; it is what makes the routine safe from any other boundary.
         EndFrameEncoderAndWait(metal::SeamBoundaryReason::kCacheClear);
+        // EndFrameEncoderAndWait waits only for a buffer it ended itself. An
+        // async submission committed earlier (the swap's own frontbuffer
+        // resolve) can still be running, and the admission check then asked
+        // for this same step on every pass: Tiger Woods 14 and Silent Hill:
+        // Homecoming kept the clear latched on nearly every swap.
+        if (completed_submission_.load(std::memory_order_acquire) <
+                submission_counter_ &&
+            WaitForSubmission(submission_counter_, 4000, nullptr)) {
+          PumpCompletedActions();
+        }
         continue;
       case metal::CacheClearAdmission::kPublishPendingFirst: {
         // Step 4: completing a submission makes a drain POSSIBLE without
@@ -6101,6 +6111,18 @@ void MetalCommandProcessor::ExecuteDeferredCacheClear(bool publication_failed) {
            "at swap#{} (writebacks {}, memexports {}, publication_failed {})",
            swap_count_, pending_writebacks_.size(), pending_memexports_.size(),
            publication_failed);
+    const uint64_t completed =
+        completed_submission_.load(std::memory_order_acquire);
+    for (size_t i = 0; i < pending_writebacks_.size() && i < 4; ++i) {
+      const PendingWriteback& wb = pending_writebacks_[i];
+      XELOGW("  retained writeback {:08X}+{:X} {}x{} seq={} sub={} "
+             "completed={} committed={} gpu_current={} lazy_armed={} "
+             "staging={}",
+             wb.guest_addr, wb.range_bytes(), wb.width, wb.height,
+             wb.authority_sequence, wb.submission, completed,
+             submission_counter_, wb.gpu_current ? 1 : 0,
+             uint32_t(wb.lazy_armed), wb.staging ? 1 : 0);
+    }
   }
 }
 
