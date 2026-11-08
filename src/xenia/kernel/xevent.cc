@@ -156,10 +156,9 @@ void XEvent::SyncGuestStateBeforeWait() {
     return;
   }
   // Only a title's own store (the inlined clear) moves the header off the
-  // value this event last wrote; otherwise the host event already matches.
-  // Skyrim never moves it, and the lock and redundant Set/Reset on every wait
-  // shifted its thread timing into a pure-virtual-call race (M1 2 of 6
-  // boots, mini 5 of 16, against 0 of 14 without the sync).
+  // value this event last wrote; otherwise the host event already matches,
+  // and the wait skips the lock and the redundant Set/Reset. Most titles
+  // never move it (Skyrim: 0 changes in 4 boots).
   if (int32_t(guest_header()->signal_state) ==
       header_state_seen_.load(std::memory_order_acquire)) {
     return;
