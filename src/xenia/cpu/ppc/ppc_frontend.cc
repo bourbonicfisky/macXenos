@@ -93,10 +93,18 @@ struct GuestProbeRecord {
 constexpr size_t kGuestProbeRing = 65536;
 GuestProbeRecord g_guest_probes[kGuestProbeRing];
 std::atomic<uint64_t> g_guest_probe_count{0};
+std::atomic<bool> g_guest_probes_frozen{false};
 }  // namespace
+
+void FreezeGuestProbes() {
+  g_guest_probes_frozen.store(true, std::memory_order_relaxed);
+}
 
 // The probed address arrives in scratch (written just before the call).
 void GuestProbe(PPCContext* ppc_context, void* arg0, void* arg1) {
+  if (g_guest_probes_frozen.load(std::memory_order_relaxed)) {
+    return;
+  }
   GuestProbeRecord r;
   r.ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now().time_since_epoch())

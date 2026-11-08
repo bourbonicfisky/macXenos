@@ -1547,6 +1547,10 @@ bool Emulator::ExceptionCallback(Exception* ex) {
 
   auto context = current_thread->thread_state()->context();
 
+  // The other guest threads keep running until the pause below; without this
+  // they refill the probe ring and push out the crashed thread's last steps.
+  cpu::ppc::FreezeGuestProbes();
+
   std::string crash_msg;
   crash_msg.append("==== CRASH DUMP ====\n");
   crash_msg.append(fmt::format("Thread ID (Host: 0x{:08X} / Guest: 0x{:08X})\n",

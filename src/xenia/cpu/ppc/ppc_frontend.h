@@ -44,6 +44,10 @@ struct PPCBuiltins {
 // first, one line each.
 std::string FormatGuestProbes(size_t max_records);
 
+// Stops recording guest probes, so the ring keeps the steps that led to a
+// guest crash instead of what the other threads ran while it was handled.
+void FreezeGuestProbes();
+
 class PPCFrontend {
  public:
   explicit PPCFrontend(Processor* processor);
