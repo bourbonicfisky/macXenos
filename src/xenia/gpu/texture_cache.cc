@@ -582,14 +582,29 @@ TextureCache::Texture::~Texture() {
 void TextureCache::Texture::MakeUpToDateAndWatch(
     const global_unique_lock_type& global_lock) {
   SharedMemory& shared_memory = texture_cache().shared_memory();
-  if (base_outdated_) {
+  // A guest write between the load's RequestRange and here invalidated pages
+  // while this texture had no watch to fire: the load may hold the bytes from
+  // before it, and the write unprotected the page, so nothing would report it
+  // later either. Stay outdated so the next use uploads and loads again
+  // (Tiger Woods 14's CPU-filled glyph atlas lost letters this way).
+  const uint32_t base_address = key().base_page << 12;
+  const uint32_t mips_address = key().mip_page << 12;
+  if (base_outdated_ &&
+      !shared_memory.IsRangeValid(base_address,
+                                  base_address + GetGuestBaseSize())) {
+    ++texture_cache().loads_raced_by_guest_write_;
+  } else if (base_outdated_) {
     assert_not_zero(GetGuestBaseSize());
     base_outdated_ = false;
     base_watch_handle_ = shared_memory.WatchMemoryRange(
         key().base_page << 12, GetGuestBaseSize(), TextureCache::WatchCallback,
         this, nullptr, 0);
   }
-  if (mips_outdated_) {
+  if (mips_outdated_ &&
+      !shared_memory.IsRangeValid(mips_address,
+                                  mips_address + GetGuestMipsSize())) {
+    ++texture_cache().loads_raced_by_guest_write_;
+  } else if (mips_outdated_) {
     assert_not_zero(GetGuestMipsSize());
     mips_outdated_ = false;
     mips_watch_handle_ = shared_memory.WatchMemoryRange(

@@ -796,6 +796,26 @@ bool MetalSharedTextureCache::LoadTextureDataFromResidentMemoryImpl(
   }
 
   uint64_t submission = submission_provider_ ? submission_provider_() : 0;
+  // RevalidateRegions hashed RAM after the RequestRange that filled the
+  // buffer this load read. A guest write in between invalidated pages and
+  // landed in the hash but not in the texture; adopting that hash would let
+  // the next reload match it and keep the old bytes for good. Adopt only
+  // while every page is still valid; a hash of 0 makes the next reload load.
+  if (pending_base_hash_ || pending_mips_hash_) {
+    auto global_lock = xe::global_critical_region::AcquireDirect();
+    const uint32_t base = uint32_t(key.base_page) << 12;
+    const uint32_t mips = uint32_t(key.mip_page) << 12;
+    if (pending_base_hash_ &&
+        !shared_memory().IsRangeValid(base,
+                                      base + texture.GetGuestBaseSize())) {
+      pending_base_hash_ = 0;
+    }
+    if (pending_mips_hash_ &&
+        !shared_memory().IsRangeValid(mips,
+                                      mips + texture.GetGuestMipsSize())) {
+      pending_mips_hash_ = 0;
+    }
+  }
   if (load_base) {
     metal_texture.last_load_submission = submission;
     // The hash of what this load read, for the next reload's revalidation:
@@ -1202,7 +1222,7 @@ void MetalSharedTextureCache::BeginFrame() {
         "(slot budget {:.1f}), live {} MB in {} textures, slots {} of {} "
         "(free {}), served-stale {:.1f}/frame; revalidated {:.1f}/frame "
         "(changed {:.1f}, gpu-written {:.1f}) in {:.2f} ms; forwarded "
-        "{:.1f}/frame; top:{}",
+        "{:.1f}/frame; raced loads {}; top:{}",
         double(census_loads_base_ + census_loads_mips_) / f,
         double(census_loads_base_) / f, double(census_loads_mips_) / f,
         double(census_reloads_) / f, double(census_side_loads_) / f,
@@ -1218,7 +1238,7 @@ void MetalSharedTextureCache::BeginFrame() {
         double(census_revalidate_changed_) / f,
         double(census_revalidate_gpu_skipped_) / f,
         double(census_revalidate_ns_) / 1e6 / f,
-        double(census_forwarded_) / f, top);
+        double(census_forwarded_) / f, loads_raced_by_guest_write(), top);
   }
   census_destroyed_ = 0;
   census_slot_destroyed_ = 0;

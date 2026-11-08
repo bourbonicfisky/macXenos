@@ -68,6 +68,12 @@ class TextureCache {
   TextureCache& operator=(const TextureCache& texture_cache) = delete;
   virtual ~TextureCache();
 
+  // Loads that a guest write raced (see Texture::MakeUpToDateAndWatch); the
+  // texture stayed outdated and reloads on its next use.
+  uint64_t loads_raced_by_guest_write() const {
+    return loads_raced_by_guest_write_;
+  }
+
   // Returns whether the actual scale is not smaller than the requested one.
   static bool GetConfigDrawResolutionScale(uint32_t& x_out, uint32_t& y_out);
 
@@ -670,6 +676,7 @@ class TextureCache {
   static const LoadShaderInfo load_shader_info_[kLoadShaderCount];
 
   xe::global_critical_region global_critical_region_;
+  uint64_t loads_raced_by_guest_write_ = 0;
   // Bit vector storing whether each 4 KB physical memory page contains scaled
   // resolve data. uint32_t rather than uint64_t because parts of it can be sent
   // to shaders.

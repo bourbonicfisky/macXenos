@@ -175,7 +175,12 @@ class SharedMemory {
   uint32_t FindStaleMirrorRanges(
       const uint8_t* mirror,
       std::vector<std::pair<uint32_t, uint32_t>>* ranges);
-  // Every page of [start, end) is valid (uploaded or GPU-written).
+  // Every page of [start, end) is valid (uploaded or GPU-written). With the
+  // global critical region held, also "nothing invalidated it since the
+  // RequestRange that uploaded it": a consumer that read the buffer after that
+  // RequestRange checks this before it registers its watch, because a guest
+  // write that faulted in between cleared a valid bit and the consumer's copy
+  // may predate it.
   bool IsRangeValid(uint32_t start, uint32_t end) const {
     for (uint32_t page = start >> page_size_log2_,
                   page_last = (end - 1) >> page_size_log2_;
