@@ -6078,12 +6078,29 @@ void MetalCommandProcessor::ExecuteDeferredCacheClear(bool publication_failed) {
         // completed clear (release, so the release work above is visible to
         // whichever thread reads the count).
         cache_clear_requested_ = false;
-        cache_clears_executed_.fetch_add(1, std::memory_order_release);
+        {
+          const uint32_t executed =
+              cache_clears_executed_.fetch_add(1, std::memory_order_release) +
+              1;
+          if (executed <= 4 || (executed & 63) == 0) {
+            XELOGI("MetalCommandProcessor: cache clear #{} executed at swap#{}",
+                   executed, swap_count_);
+          }
+        }
         return;
       case metal::CacheClearAdmission::kDefer:
       case metal::CacheClearAdmission::kNoRequest:
         return;
     }
+  }
+  // Three passes ran out with the request still latched (a producer that the
+  // publication pass leaves pending keeps asking for another publish).
+  static uint32_t s_unsatisfied_logs = 0;
+  if (s_unsatisfied_logs++ < 4 || (s_unsatisfied_logs & 255) == 0) {
+    XELOGW("MetalCommandProcessor: cache clear still latched after 3 passes "
+           "at swap#{} (writebacks {}, memexports {}, publication_failed {})",
+           swap_count_, pending_writebacks_.size(), pending_memexports_.size(),
+           publication_failed);
   }
 }
 
@@ -22992,6 +23009,16 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     XELOGW("MetalCommandProcessor: periodic cache clear requested at swap#{}",
            swap_count_);
     ClearCaches();
+  }
+  // XE_METAL_TEX_STALE_VERIFY=N (diagnostic): every N swaps, report cached
+  // textures whose guest bytes changed without an invalidation.
+  static const uint32_t s_tex_stale_verify_every = [] {
+    const char* v = std::getenv("XE_METAL_TEX_STALE_VERIFY");
+    return v ? uint32_t(strtoul(v, nullptr, 10)) : 0u;
+  }();
+  if (s_tex_stale_verify_every && texture_cache_ && swap_count_ &&
+      (swap_count_ % s_tex_stale_verify_every) == 0) {
+    texture_cache_->VerifyCachedAgainstGuest(swap_count_);
   }
   static const bool s_snaphash_enabled = [] {
     const char* value = std::getenv("XE_METAL_SNAPHASH");

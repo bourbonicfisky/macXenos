@@ -1931,6 +1931,15 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
     if (pk != parked_.end()) {
       ParkedTexture parked = pk->second;
       parked_.erase(pk);
+      // The write that parked it unwatched its region. Watch again BEFORE
+      // hashing: a store landing between the hash and the re-arm would match
+      // the old hash, fault nothing, and leave the stale texture adopted
+      // (Tiger Woods 14 / FIFA 16 glyph atlases lost single glyphs this way).
+      // A store after the re-arm queues an invalidation that parks it again.
+      if (!trace_playback_ && shared_memory_) {
+        shared_memory_->RequestWatchOnlyRange(parked.guest_base,
+                                              parked.guest_bytes);
+      }
       const auto t0 = std::chrono::steady_clock::now();
       const uint64_t now_hash =
           HashGuestRegions(parked.guest_base, parked.guest_bytes,
@@ -1945,12 +1954,6 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
           WriteSlotDescriptor(slot, parked.texture);
           EmplaceEntry(key, Entry{parked.texture, slot, parked.guest_base, parked.guest_bytes,
                                   parked.mip_base, parked.mip_bytes, parked.guest_hash});
-          // The write that parked it unwatched its region; watch again so a
-          // later rewrite reaches this entry.
-          if (!trace_playback_ && shared_memory_) {
-            shared_memory_->RequestWatchOnlyRange(parked.guest_base,
-                                                  parked.guest_bytes);
-          }
           active_textures_.push_back(parked.texture);
           ++census_revalidated_;
           return slot;
@@ -2186,6 +2189,16 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
   if (!trace_playback_ && shared_memory_) {
     shared_memory_->RequestWatchOnlyRange(base, watched_base_bytes);
   }
+  // Revalidation hash of the bytes this upload is about to read, taken after
+  // the watch is armed and BEFORE the untile. Hashing after the untile let a
+  // CPU store that faulted mid-untile land in the hash but not the texture:
+  // the queued invalidation parked the entry, the re-hash matched, and the
+  // stale texture was re-adopted for good.
+  bool base_hash_ok = false;
+  const uint64_t base_hash =
+      RevalidateEnabled()
+          ? HashGuestBase(base, watched_base_bytes, &base_hash_ok)
+          : 0;
 
   // Untile / copy into a linear block-major staging buffer (host byte order).
   // Rows are independent — run them concurrently: stage-3 re-uploads big
@@ -2723,6 +2736,8 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
         normalized_mip_max);
     entry_mip_bytes = std::min<uint32_t>(layout.mips_total_extent_bytes,
                                          kPhysicalSize - mip_addr);
+    pending_guest_hash_ =
+        base_hash_ok ? HashGuestMips(base_hash, mip_addr, entry_mip_bytes) : 0;
     // Mips live at mip_address, NOT relative to the base level — read through
     // their own translation with their own bounds.
     const uint8_t* mip_guest =
@@ -2835,11 +2850,9 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
     }
   }
 
-  pending_guest_hash_ =
-      RevalidateEnabled()
-          ? HashGuestRegions(base, watched_base_bytes,
-                             entry_mip_bytes ? mip_addr : 0, entry_mip_bytes)
-          : 0;
+  if (!entry_mip_bytes) {
+    pending_guest_hash_ = base_hash_ok ? HashGuestMips(base_hash, 0, 0) : 0;
+  }
   return FinalizeTexture(key, fetch, (__bridge void*)texture,
                          uint64_t(plan.host_format), plan.host_swizzle,
                          is_cube, host_levels, base, watched_base_bytes,
@@ -3844,21 +3857,130 @@ bool MetalTextureCache::RevalidateEnabled() {
   return s_enabled;
 }
 
-uint64_t MetalTextureCache::HashGuestRegions(uint32_t base, uint32_t bytes,
-                                             uint32_t mip_base,
-                                             uint32_t mip_bytes) const {
-  if (!memory_) {
-    return 0;
+void MetalTextureCache::VerifyCachedAgainstGuest(uint64_t swap) {
+  if (!memory_ || trace_playback_) {
+    return;
   }
-  uint64_t hash = 0;
-  if (base && bytes && base < kPhysicalSize) {
+  constexpr uint32_t kPage = 16384;
+  // Writes the watch DID report evict their entries here, before the scan.
+  DrainPendingInvalidations();
+  struct Suspect {
+    uint64_t key;
+    void* texture;
+    uint32_t page_address;
+    uint32_t changed_pages;
+  };
+  std::vector<Suspect> suspects;
+  std::unordered_map<uint64_t, StaleVerifyRecord> next;
+  next.reserve(cache_.size());
+  auto hash_pages = [&](uint32_t base, uint32_t bytes,
+                        std::vector<uint64_t>& out) {
+    if (!base || !bytes || base >= kPhysicalSize) {
+      return;
+    }
     const uint8_t* g =
         static_cast<const uint8_t*>(memory_->TranslatePhysical(base));
     if (!g) {
-      return 0;
+      return;
     }
-    hash = XXH3_64bits(g, std::min<size_t>(bytes, kPhysicalSize - base));
+    const uint32_t end = uint32_t(
+        std::min<uint64_t>(uint64_t(base) + bytes, kPhysicalSize));
+    for (uint32_t a = base; a < end;) {
+      const uint32_t next_page = (a & ~(kPage - 1)) + kPage;
+      const uint32_t stop = std::min(end, next_page);
+      out.push_back(XXH3_64bits(g + (a - base), stop - a));
+      a = stop;
+    }
+  };
+  for (const auto& [key, e] : cache_) {
+    StaleVerifyRecord rec{e.texture, {}};
+    hash_pages(e.guest_base, e.guest_bytes, rec.page_hashes);
+    hash_pages(e.mip_base, e.mip_bytes, rec.page_hashes);
+    auto prev = stale_verify_.find(key);
+    if (prev != stale_verify_.end() && prev->second.texture == e.texture &&
+        prev->second.page_hashes.size() == rec.page_hashes.size()) {
+      uint32_t changed = 0, first = UINT32_MAX;
+      for (size_t i = 0; i < rec.page_hashes.size(); ++i) {
+        if (rec.page_hashes[i] != prev->second.page_hashes[i]) {
+          if (first == UINT32_MAX) {
+            first = uint32_t(i);
+          }
+          ++changed;
+        }
+      }
+      if (changed) {
+        // Page index -> address (base pages first, then mip pages).
+        uint32_t base_pages = 0;
+        if (e.guest_base && e.guest_bytes) {
+          base_pages = ((e.guest_base + e.guest_bytes - 1) / kPage) -
+                       (e.guest_base / kPage) + 1;
+        }
+        uint32_t address =
+            first < base_pages
+                ? std::max(e.guest_base, (e.guest_base & ~(kPage - 1)) +
+                                             first * kPage)
+                : std::max(e.mip_base, (e.mip_base & ~(kPage - 1)) +
+                                           (first - base_pages) * kPage);
+        suspects.push_back({key, e.texture, address, changed});
+      }
+    }
+    next.emplace(key, std::move(rec));
   }
+  stale_verify_.swap(next);
+  if (suspects.empty()) {
+    return;
+  }
+  // A write that faulted during the scan queued an invalidation that has not
+  // been drained yet; only entries that survive this drain are real misses.
+  DrainPendingInvalidations();
+  for (const Suspect& s : suspects) {
+    auto it = cache_.find(s.key);
+    if (it == cache_.end() || it->second.texture != s.texture) {
+      continue;
+    }
+    const Entry& e = it->second;
+    ++stale_verify_hits_;
+    if (stale_verify_hits_ > 64 && (stale_verify_hits_ & 255) != 0) {
+      continue;
+    }
+    id<MTLTexture> t = (__bridge id<MTLTexture>)e.texture;
+    XELOGW("MetalTexStaleVerify swap#{}: key {:016X} base {:08X}+{:X} mip "
+           "{:08X}+{:X} {}x{} fmt {} changed {} page(s), first {:08X} "
+           "UNREPORTED (hit {}) watch {}",
+           swap, s.key, e.guest_base, e.guest_bytes, e.mip_base, e.mip_bytes,
+           t ? uint32_t(t.width) : 0, t ? uint32_t(t.height) : 0,
+           t ? uint32_t(t.pixelFormat) : 0, s.changed_pages, s.page_address,
+           stale_verify_hits_, memory_->DescribePhysicalWatch(s.page_address));
+  }
+}
+
+uint64_t MetalTextureCache::HashGuestRegions(uint32_t base, uint32_t bytes,
+                                             uint32_t mip_base,
+                                             uint32_t mip_bytes) const {
+  bool ok = false;
+  const uint64_t base_hash = HashGuestBase(base, bytes, &ok);
+  return ok ? HashGuestMips(base_hash, mip_base, mip_bytes) : 0;
+}
+
+uint64_t MetalTextureCache::HashGuestBase(uint32_t base, uint32_t bytes,
+                                          bool* ok) const {
+  *ok = memory_ != nullptr;
+  if (!memory_ || !base || !bytes || base >= kPhysicalSize) {
+    return 0;
+  }
+  const uint8_t* g =
+      static_cast<const uint8_t*>(memory_->TranslatePhysical(base));
+  if (!g) {
+    *ok = false;
+    return 0;
+  }
+  return XXH3_64bits(g, std::min<size_t>(bytes, kPhysicalSize - base));
+}
+
+uint64_t MetalTextureCache::HashGuestMips(uint64_t base_hash,
+                                          uint32_t mip_base,
+                                          uint32_t mip_bytes) const {
+  uint64_t hash = base_hash;
   if (mip_base && mip_bytes && mip_base < kPhysicalSize) {
     const uint8_t* g =
         static_cast<const uint8_t*>(memory_->TranslatePhysical(mip_base));

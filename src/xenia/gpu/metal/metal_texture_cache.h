@@ -273,6 +273,12 @@ class MetalTextureCache {
   // views into the same pools this drains.
   void ClearCache();
 
+  // Diagnostic (XE_METAL_TEX_STALE_VERIFY=<swaps>): hashes each cached
+  // entry's guest pages and reports any page that changed since the previous
+  // scan while the same texture stayed cached -- a CPU write the watch never
+  // reported. Called at a swap on the GPU thread.
+  void VerifyCachedAgainstGuest(uint64_t swap);
+
   // Cache-clear step: release the resolve-snapshot bridges that are DERIVED,
   // and report (destination base, snapshot texture) for each so the
   // render-target cache can release exactly the texture THIS bridge named.
@@ -619,8 +625,21 @@ class MetalTextureCache {
   static bool RevalidateEnabled();
   uint64_t HashGuestRegions(uint32_t base, uint32_t bytes, uint32_t mip_base,
                             uint32_t mip_bytes) const;
+  // The two halves of HashGuestRegions, so an upload can hash each region
+  // before it reads it. HashGuestBase sets *ok false when the base does not
+  // translate; HashGuestMips seeds with its result and returns the final hash.
+  uint64_t HashGuestBase(uint32_t base, uint32_t bytes, bool* ok) const;
+  uint64_t HashGuestMips(uint64_t base_hash, uint32_t mip_base,
+                         uint32_t mip_bytes) const;
   void ParkEvictedEntry(uint64_t key, const Entry& entry);
   void DropParked(uint64_t key);
+  // VerifyCachedAgainstGuest: per-host-page hashes from the previous scan.
+  struct StaleVerifyRecord {
+    void* texture;
+    std::vector<uint64_t> page_hashes;
+  };
+  std::unordered_map<uint64_t, StaleVerifyRecord> stale_verify_;
+  uint64_t stale_verify_hits_ = 0;
   // Census (XE_METAL_UNTILE_TIMING=1): revalidation outcomes since the last
   // report and the watch ranges that evicted entries
   // (base<<32|len -> calls, evicted).
