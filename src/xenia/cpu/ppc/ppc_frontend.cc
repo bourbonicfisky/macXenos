@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <utility>
+#include <vector>
 
 #include "xenia/base/atomic.h"
 #include "xenia/base/byte_order.h"
@@ -96,6 +97,11 @@ struct GuestProbeRecord {
 constexpr size_t kGuestProbeRing = 65536;
 GuestProbeRecord g_guest_probes[kGuestProbeRing];
 std::atomic<uint64_t> g_guest_probe_count{0};
+// Hits at XE_GUEST_PROBE_RARE_PCS go to their own ring and skip the r31
+// filter, so a few one-off events (thread start, a flag write) survive next
+// to a hot probe that wraps the main ring many times.
+GuestProbeRecord g_guest_rare_probes[kGuestProbeRing];
+std::atomic<uint64_t> g_guest_rare_probe_count{0};
 std::atomic<bool> g_guest_probes_frozen{false};
 }  // namespace
 
@@ -121,10 +127,30 @@ static bool GuestProbeR31InRange(uint32_t r31) {
   return r31 >= range.first && r31 < range.second;
 }
 
+static bool GuestProbeIsRare(uint32_t pc) {
+  static const std::vector<uint32_t> pcs = [] {
+    std::vector<uint32_t> list;
+    const char* value = std::getenv("XE_GUEST_PROBE_RARE_PCS");
+    while (value && *value) {
+      char* end = nullptr;
+      list.push_back(uint32_t(std::strtoul(value, &end, 16)));
+      if (!end || end == value) {
+        break;
+      }
+      value = *end == ',' ? end + 1 : end;
+    }
+    return list;
+  }();
+  return std::find(pcs.begin(), pcs.end(), pc) != pcs.end();
+}
+
 // The probed address arrives in scratch (written just before the call).
 void GuestProbe(PPCContext* ppc_context, void* arg0, void* arg1) {
-  if (g_guest_probes_frozen.load(std::memory_order_relaxed) ||
-      !GuestProbeR31InRange(uint32_t(ppc_context->r[31]))) {
+  if (g_guest_probes_frozen.load(std::memory_order_relaxed)) {
+    return;
+  }
+  const bool rare = GuestProbeIsRare(uint32_t(ppc_context->scratch));
+  if (!rare && !GuestProbeR31InRange(uint32_t(ppc_context->r[31]))) {
     return;
   }
   GuestProbeRecord r;
@@ -152,16 +178,25 @@ void GuestProbe(PPCContext* ppc_context, void* arg0, void* arg1) {
     r.w0 = xe::load_and_swap<uint32_t>(p);
     r.w1 = xe::load_and_swap<uint32_t>(p + 4);
   }
+  if (rare) {
+    const uint64_t n =
+        g_guest_rare_probe_count.fetch_add(1, std::memory_order_relaxed);
+    g_guest_rare_probes[n % kGuestProbeRing] = r;
+    return;
+  }
   const uint64_t n = g_guest_probe_count.fetch_add(1, std::memory_order_relaxed);
   g_guest_probes[n % kGuestProbeRing] = r;
 }
 
-std::string FormatGuestProbes(size_t max_records) {
-  const uint64_t n = g_guest_probe_count.load(std::memory_order_acquire);
+static void FormatGuestProbeRing(std::string& out, const char* label,
+                                 const GuestProbeRecord* ring,
+                                 const std::atomic<uint64_t>& counter,
+                                 size_t max_records) {
+  const uint64_t n = counter.load(std::memory_order_acquire);
   const uint64_t count = std::min<uint64_t>({n, kGuestProbeRing, max_records});
-  std::string out = fmt::format("GuestProbes: {} recorded, last {}\n", n, count);
+  out.append(fmt::format("{}: {} recorded, last {}\n", label, n, count));
   for (uint64_t i = n - count; i < n; ++i) {
-    const GuestProbeRecord& r = g_guest_probes[i % kGuestProbeRing];
+    const GuestProbeRecord& r = ring[i % kGuestProbeRing];
     out.append(fmt::format(
         "  {} t={:08X} pc={:08X} lr={:08X} r1={:08X} r3={:08X} r4={:08X} "
         "r5={:08X} r6={:08X} r7={:08X} r10={:08X} r11={:08X} r30={:08X} "
@@ -170,6 +205,16 @@ std::string FormatGuestProbes(size_t max_records) {
         r.ns, r.thread_id, r.pc, r.lr, r.r1, r.r3, r.r4, r.r5, r.r6, r.r7,
         r.r10, r.r11, r.r30, r.r31, r.w0, r.w1));
   }
+}
+
+std::string FormatGuestProbes(size_t max_records) {
+  std::string out;
+  if (g_guest_rare_probe_count.load(std::memory_order_acquire)) {
+    FormatGuestProbeRing(out, "GuestRareProbes", g_guest_rare_probes,
+                         g_guest_rare_probe_count, max_records);
+  }
+  FormatGuestProbeRing(out, "GuestProbes", g_guest_probes,
+                       g_guest_probe_count, max_records);
   return out;
 }
 
