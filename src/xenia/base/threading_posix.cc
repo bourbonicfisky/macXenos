@@ -1875,12 +1875,16 @@ thread_local PosixThread* current_thread_ = nullptr;
 thread_local volatile sig_atomic_t suspend_deferral_depth_ = 0;
 thread_local volatile sig_atomic_t suspend_deferred_ = 0;
 
-SuspendDeferralScope::SuspendDeferralScope() {
+SuspendDeferralScope::SuspendDeferralScope() { BeginSuspendDeferral(); }
+
+SuspendDeferralScope::~SuspendDeferralScope() { EndSuspendDeferral(); }
+
+void BeginSuspendDeferral() {
   suspend_deferral_depth_ = suspend_deferral_depth_ + 1;
   std::atomic_signal_fence(std::memory_order_seq_cst);
 }
 
-SuspendDeferralScope::~SuspendDeferralScope() {
+void EndSuspendDeferral() {
   std::atomic_signal_fence(std::memory_order_seq_cst);
   suspend_deferral_depth_ = suspend_deferral_depth_ - 1;
   std::atomic_signal_fence(std::memory_order_seq_cst);

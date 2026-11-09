@@ -8,6 +8,7 @@
  */
 
 #include "xenia/base/mutex.h"
+#include "xenia/base/threading.h"
 #if XE_PLATFORM_WIN32 == 1
 #include "xenia/base/platform_win.h"
 #elif XE_PLATFORM_LINUX == 1
@@ -248,6 +249,31 @@ bool xe_fast_mutex::try_lock() {
 }
 
 #endif
+
+#if !(XE_PLATFORM_WIN32 == 1 && XE_ENABLE_FAST_WIN32_MUTEX == 1) && \
+    !(XE_PLATFORM_LINUX == 1 && XE_ENABLE_FAST_LINUX_MUTEX == 1)
+// The deferral opens before the lock is taken: a suspend that lands while the
+// thread waits for it would otherwise park the thread the moment it owns it.
+void xe_global_mutex::lock() {
+  threading::BeginSuspendDeferral();
+  mutex_.lock();
+}
+
+void xe_global_mutex::unlock() {
+  mutex_.unlock();
+  threading::EndSuspendDeferral();
+}
+
+bool xe_global_mutex::try_lock() {
+  threading::BeginSuspendDeferral();
+  if (mutex_.try_lock()) {
+    return true;
+  }
+  threading::EndSuspendDeferral();
+  return false;
+}
+#endif
+
 global_mutex_type& global_critical_region::mutex() {
   static global_mutex_type global_mutex;
   return global_mutex;

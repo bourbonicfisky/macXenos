@@ -10,6 +10,7 @@
 #include <array>
 #include <memory>
 
+#include "xenia/base/mutex.h"
 #include "xenia/base/threading.h"
 #include "xenia/kernel/util/guest_suspend.h"
 
@@ -1138,6 +1139,46 @@ TEST_CASE("Suspend Is Deferred Past A Held Lock", "[thread]") {
   REQUIRE(thread->Resume());
   REQUIRE(Wait(thread.get(), false, 2s) == WaitResult::kSuccess);
   REQUIRE(after_scope);
+}
+
+TEST_CASE("Suspend Is Deferred Past The Global Critical Region", "[thread]") {
+  // BioShock: a loading thread suspended inside MmAllocatePhysicalMemoryEx
+  // parked holding the global critical region, and the thread that would
+  // resume it waited for the region in ObReferenceObjectByHandle. A thread
+  // holding the region parks only once it lets go.
+  std::atomic<int> phase{0};
+  std::atomic<bool> after_region{false};
+  auto thread = Thread::Create({}, [&] {
+    {
+      auto global_lock = xe::global_critical_region::AcquireDirect();
+      phase = 1;
+      while (phase != 2) {
+        MaybeYield();
+      }
+    }
+    after_region = true;
+  });
+  while (phase != 1) {
+    MaybeYield();
+  }
+  REQUIRE(thread->Suspend());
+  Sleep(20ms);
+  phase = 2;
+  Sleep(50ms);
+  REQUIRE_FALSE(after_region);
+  // The region is free although the thread is suspended.
+  bool locked = false;
+  for (int i = 0; i < 100 && !locked; ++i) {
+    locked = xe::global_critical_region::mutex().try_lock();
+    if (!locked) {
+      Sleep(10ms);
+    }
+  }
+  REQUIRE(locked);
+  xe::global_critical_region::mutex().unlock();
+  REQUIRE(thread->Resume());
+  REQUIRE(Wait(thread.get(), false, 2s) == WaitResult::kSuccess);
+  REQUIRE(after_region);
 }
 
 TEST_CASE("Resume Of A Thread Renaming Itself", "[thread]") {

@@ -519,6 +519,12 @@ class SuspendDeferralScope {
   SuspendDeferralScope& operator=(const SuspendDeferralScope&) = delete;
 };
 
+// The same as two calls, for a lock that is not a C++ scope (the global
+// critical region's mutex). Each Begin needs one End on the same thread; the
+// End that closes the outermost scope may park the thread.
+void BeginSuspendDeferral();
+void EndSuspendDeferral();
+
 // True when XE_THREAD_LIFECYCLE_LOG=1: thread create/suspend/resume/start
 // events are logged (host and guest). Read once; off costs one branch.
 bool ThreadLifecycleLogEnabled();

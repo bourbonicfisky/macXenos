@@ -158,7 +158,26 @@ class xe_unlikely_mutex {
 
 using xe_mutex = xe_fast_mutex;
 #else
-using global_mutex_type = std::recursive_mutex;
+// Recursive. A thread holding it is never parked by a suspend: one that lands
+// meanwhile is served when the thread lets go of it
+// (threading::BeginSuspendDeferral). On POSIX a suspend is a signal handled
+// whenever the target next runs, so taking this lock before suspending a
+// thread (see global_critical_region) does not keep the target out of it, and
+// a thread parked inside it blocks every other guest thread: BioShock's
+// loading thread was suspended inside MmAllocatePhysicalMemoryEx while the
+// thread that would resume it waited for the lock in ObReferenceObjectByHandle.
+class xe_global_mutex {
+  std::recursive_mutex mutex_;
+
+ public:
+  xe_global_mutex() = default;
+  ~xe_global_mutex() = default;
+
+  void lock();
+  void unlock();
+  bool try_lock();
+};
+using global_mutex_type = xe_global_mutex;
 using xe_mutex = std::mutex;
 using xe_unlikely_mutex = std::mutex;
 #endif
