@@ -90,7 +90,8 @@ void LeaveGlobalLock(PPCContext* ppc_context, void* arg0, void* arg1) {
 namespace {
 struct GuestProbeRecord {
   uint64_t ns;
-  uint32_t thread_id, pc, lr, r1, r3, r4, r5, r6, r7, r11, r30, r31, w0, w1;
+  uint32_t thread_id, pc, lr, r1, r3, r4, r5, r6, r7, r10, r11, r30, r31, w0,
+      w1;
 };
 constexpr size_t kGuestProbeRing = 65536;
 GuestProbeRecord g_guest_probes[kGuestProbeRing];
@@ -139,6 +140,7 @@ void GuestProbe(PPCContext* ppc_context, void* arg0, void* arg1) {
   r.r5 = uint32_t(ppc_context->r[5]);
   r.r6 = uint32_t(ppc_context->r[6]);
   r.r7 = uint32_t(ppc_context->r[7]);
+  r.r10 = uint32_t(ppc_context->r[10]);
   r.r11 = uint32_t(ppc_context->r[11]);
   r.r30 = uint32_t(ppc_context->r[30]);
   r.r31 = uint32_t(ppc_context->r[31]);
@@ -162,10 +164,11 @@ std::string FormatGuestProbes(size_t max_records) {
     const GuestProbeRecord& r = g_guest_probes[i % kGuestProbeRing];
     out.append(fmt::format(
         "  {} t={:08X} pc={:08X} lr={:08X} r1={:08X} r3={:08X} r4={:08X} "
-        "r5={:08X} r6={:08X} r7={:08X} r11={:08X} r30={:08X} r31={:08X} "
+        "r5={:08X} r6={:08X} r7={:08X} r10={:08X} r11={:08X} r30={:08X} "
+        "r31={:08X} "
         "[r31]={:08X} {:08X}\n",
         r.ns, r.thread_id, r.pc, r.lr, r.r1, r.r3, r.r4, r.r5, r.r6, r.r7,
-        r.r11, r.r30, r.r31, r.w0, r.w1));
+        r.r10, r.r11, r.r30, r.r31, r.w0, r.w1));
   }
   return out;
 }
