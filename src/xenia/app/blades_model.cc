@@ -765,6 +765,7 @@ void BladesModel::WriteTitles(StateWriter& w, const PlayedTitles& played) {
       std::string path;
       int64_t last_played = 0;
       uint32_t title_id = 0;
+      int disc = 0;
     };
     auto key = [](const std::string& name) {
       std::string out;
@@ -778,7 +779,8 @@ void BladesModel::WriteTitles(StateWriter& w, const PlayedTitles& played) {
     std::map<uint32_t, size_t> by_id;
     GameLibrary& library = window_.game_library();
     for (const GameLibrary::Game& game : library.games()) {
-      Row row{game.name, xe::path_to_utf8(game.path), 0, game.title_id};
+      Row row{game.name, xe::path_to_utf8(game.path), 0, game.title_id,
+              game.disc};
       const size_t index = rows.size();
       by_path.emplace(row.path, index);
       if (row.title_id) by_id.emplace(row.title_id, index);
@@ -830,6 +832,8 @@ void BladesModel::WriteTitles(StateWriter& w, const PlayedTitles& played) {
       w.Int64(row.last_played);
       w.Key("icon");
       w.String(icon.c_str());
+      w.Key("disc");
+      w.Int(row.disc);
       write_progress(row.title_id);
       w.EndObject();
     }
@@ -845,6 +849,13 @@ void BladesModel::WriteTitles(StateWriter& w, const PlayedTitles& played) {
     w.EndArray();
     w.Key("scanning");
     w.Bool(library.scanning());
+    const GameLibrary::ScanProgress progress = library.scan_progress();
+    w.Key("found");
+    w.Uint64(progress.found);
+    w.Key("checked");
+    w.Uint64(progress.checked);
+    w.Key("total");
+    w.Uint64(progress.total);
     w.EndObject();
   }
 }

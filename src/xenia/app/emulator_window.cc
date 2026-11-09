@@ -2915,7 +2915,8 @@ GameLibrary& EmulatorWindow::game_library() {
   if (!game_library_) {
     game_library_ = std::make_unique<GameLibrary>(
         emulator_->storage_root(), [this]() {
-          // A scan finished: the dashboard shows what it found.
+          // A scan moved on or finished: the dashboard shows how far it
+          // has got, then what it found.
           app_context().CallInUIThread([this]() {
 #if XE_PLATFORM_MAC
             if (blades_overlay_ && blades_model_) {

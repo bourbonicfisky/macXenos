@@ -100,7 +100,7 @@ export function mockState(): NativeState {
       { name: "Ultra Street Fighter IV", path: "/Games/USF4.iso", lastPlayed: 1788000000, icon: "", achievements: { unlocked: 20, total: 50, score: 310, maxScore: 1000 } },
       { name: "LEGO Star Wars II", path: "/Games/LEGO Star Wars II.iso", lastPlayed: 1787000000, icon: "" }
     ],
-    gameFolders: { folders: ["/Volumes/Plex/Emulation/Xbox 360 Decompressed"], scanning: false },
+    gameFolders: { folders: ["/Volumes/Plex/Emulation/Xbox 360 Decompressed"], scanning: false, found: 0, checked: 0, total: 0 },
     musicPlayer: { available: false, state: "idle", volume: 1 },
     // In the browser the sounds come from public/dash-sounds if a developer
     // put them there (never committed).
@@ -148,6 +148,13 @@ export function mockState(): NativeState {
       path: `/Volumes/Plex/Emulation/Xbox 360 Decompressed/${name}.iso`,
       lastPlayed: 0,
       icon: ""
+    })),
+    ...[1, 2, 3].map((disc) => ({
+      name: "Final Fantasy XIII",
+      path: `/Volumes/Plex/Emulation/Xbox 360 Decompressed/Final Fantasy XIII (USA) (Disc ${disc}).iso`,
+      lastPlayed: 0,
+      icon: "",
+      disc
     }))
   ];
   return state;

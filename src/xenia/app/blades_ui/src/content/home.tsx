@@ -3,6 +3,7 @@ import type { MenuItem } from "../ui/blade-menu";
 import { AppIcon } from "../ui/app-icon";
 import { openAllGames } from "../ui/all-games";
 import { openFolderEditor } from "../ui/folder-editor";
+import { ScanProgress } from "../ui/scan-progress";
 import { send, useNative, type NativeState } from "../native";
 import { Aside, PaneAction } from "./parts";
 import { getLanguage, t } from "../i18n";
@@ -43,7 +44,16 @@ function GameArt({ icon, name }: { icon: string; name: string }) {
 function GameFoldersValue() {
   const { gameFolders } = useNative();
   const count = gameFolders.folders.length;
-  if (gameFolders.scanning) return <>{t("home.gameFolders.scanning")}</>;
+  if (gameFolders.scanning) {
+    const { checked, total } = gameFolders;
+    return (
+      <>
+        {total
+          ? t("home.gameFolders.scanningPercent", { percent: Math.round((Math.min(checked, total) / total) * 100) })
+          : t("home.gameFolders.scanning")}
+      </>
+    );
+  }
   return <>{count === 0 ? t("home.gameFolders.none") : t("home.gameFolders.count", { count })}</>;
 }
 
@@ -73,10 +83,10 @@ function GameFoldersPane() {
           {t("home.gameFolders.refresh")}
         </PaneAction>
       </div>
-      {folders.length ? (
-        <Aside>
-          {scanning ? t("home.gameFolders.looking") : t("home.gameFolders.games", { count: allGames.length })}
-        </Aside>
+      {scanning ? (
+        <ScanProgress />
+      ) : folders.length ? (
+        <Aside>{t("home.gameFolders.games", { count: allGames.length })}</Aside>
       ) : null}
     </>
   );

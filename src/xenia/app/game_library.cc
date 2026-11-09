@@ -47,9 +47,23 @@ std::string Lower(std::string text) {
   return text;
 }
 
+// "Disc 2" -> 2, else 0.
+int DiscTag(std::string_view tag) {
+  if (tag.size() < 6 || Lower(std::string(tag.substr(0, 5))) != "disc ") {
+    return 0;
+  }
+  int disc = 0;
+  for (char c : tag.substr(5)) {
+    if (c < '0' || c > '9' || disc > 99) return 0;
+    disc = disc * 10 + (c - '0');
+  }
+  return disc;
+}
+
 // "Just Cause 2 (USA, Europe) (En,Fr,De,Es,It)" -> "Just Cause 2": the
-// region, language and revision tags disc image names carry.
-std::string CleanName(std::string name) {
+// region, language and revision tags disc image names carry. A "(Disc 2)"
+// tag goes too, into `disc`, so every disc of a game has the same name.
+std::string CleanName(std::string name, int* disc = nullptr) {
   for (;;) {
     while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) {
       name.pop_back();
@@ -61,6 +75,11 @@ std::string CleanName(std::string name) {
     const size_t start = name.rfind(open);
     if (start == std::string::npos || start == 0) {
       break;
+    }
+    const int tag_disc =
+        DiscTag(std::string_view(name).substr(start + 1, name.size() - start - 2));
+    if (disc && tag_disc) {
+      *disc = tag_disc;
     }
     name.erase(start);
   }
@@ -186,9 +205,9 @@ int64_t ModifiedTime(const std::filesystem::path& path) {
 }  // namespace
 
 GameLibrary::GameLibrary(std::filesystem::path storage_root,
-                         std::function<void()> on_scanned)
+                         std::function<void()> on_changed)
     : storage_root_(std::move(storage_root)),
-      on_scanned_(std::move(on_scanned)) {
+      on_changed_(std::move(on_changed)) {
   LoadFolders();
 }
 
@@ -202,6 +221,25 @@ GameLibrary::~GameLibrary() {
 std::vector<std::filesystem::path> GameLibrary::folders() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return folders_;
+}
+
+GameLibrary::ScanProgress GameLibrary::scan_progress() const {
+  ScanProgress progress;
+  progress.found = scan_found_;
+  progress.checked = scan_checked_;
+  progress.total = scan_total_;
+  return progress;
+}
+
+void GameLibrary::ReportProgress(bool force) {
+  const auto now = std::chrono::steady_clock::now();
+  if (!force && now - last_report_ < std::chrono::milliseconds(250)) {
+    return;
+  }
+  last_report_ = now;
+  if (!stop_ && on_changed_) {
+    on_changed_();
+  }
 }
 
 std::vector<GameLibrary::Game> GameLibrary::games() const {
@@ -275,9 +313,7 @@ void GameLibrary::Rescan() {
       Scan(folders());
     } while (rescan_requested_ && !stop_);
     scanning_ = false;
-    if (!stop_ && on_scanned_) {
-      on_scanned_();
-    }
+    ReportProgress(true);
   });
 }
 
@@ -316,8 +352,34 @@ void GameLibrary::Scan(std::vector<std::filesystem::path> folders) {
   std::map<std::string, IndexEntry> next_index;
   size_t probed = 0;
 
+  scan_found_ = 0;
+  scan_checked_ = 0;
+  scan_total_ = 0;
+  ReportProgress(true);
+
+  // First every game in the folders, then what each one is: a progress bar
+  // needs the count, and reading a new disc image (over the network, often)
+  // is the slow part.
+  struct Candidate {
+    std::filesystem::path path;
+    std::string fallback;
+    int disc = 0;
+    int kind = 0;
+  };
+  std::vector<Candidate> candidates;
+  auto listed = [&](std::filesystem::path path, const std::string& name,
+                    int kind) {
+    Candidate candidate;
+    candidate.path = std::move(path);
+    candidate.fallback = CleanName(name, &candidate.disc);
+    candidate.kind = kind;
+    candidates.push_back(std::move(candidate));
+    scan_found_ = candidates.size();
+    ReportProgress(false);
+  };
+
   auto add = [&](const std::filesystem::path& path, const std::string& fallback,
-                 int kind) {
+                 int disc, int kind) {
     std::error_code ec;
     const std::string key = xe::path_to_utf8(path);
     IndexEntry entry;
@@ -344,6 +406,7 @@ void GameLibrary::Scan(std::vector<std::filesystem::path> folders) {
     game.path = path;
     game.title_id = entry.title_id;
     game.name = entry.name.empty() ? fallback : entry.name;
+    game.disc = disc;
     found.push_back(std::move(game));
     next_index[key] = std::move(entry);
   };
@@ -372,7 +435,7 @@ void GameLibrary::Scan(std::vector<std::filesystem::path> folders) {
         // An unpacked game: the folder is the game.
         const std::filesystem::path xex = path / "default.xex";
         if (std::filesystem::is_regular_file(xex, ec)) {
-          add(xex, CleanName(file_name), 1);
+          listed(xex, file_name, 1);
           it.disable_recursion_pending();
         } else if (it.depth() >= kMaxDepth) {
           it.disable_recursion_pending();
@@ -384,15 +447,26 @@ void GameLibrary::Scan(std::vector<std::filesystem::path> folders) {
       }
       const std::string ext = Lower(xe::path_to_utf8(path.extension()));
       if (ext == ".iso") {
-        add(path, CleanName(xe::path_to_utf8(path.stem())), 0);
+        listed(path, xe::path_to_utf8(path.stem()), 0);
       } else if (ext == ".zar") {
-        add(path, CleanName(xe::path_to_utf8(path.stem())), 3);
+        listed(path, xe::path_to_utf8(path.stem()), 3);
       } else if (ext.empty() &&
                  it->file_size(ec) >= sizeof(vfs::XContentContainerHeader) &&
                  IsPackageMagic(path)) {
-        add(path, CleanName(file_name), 2);
+        listed(path, file_name, 2);
       }
     }
+  }
+
+  scan_total_ = candidates.size();
+  ReportProgress(true);
+  for (const Candidate& candidate : candidates) {
+    if (stop_) {
+      break;
+    }
+    add(candidate.path, candidate.fallback, candidate.disc, candidate.kind);
+    ++scan_checked_;
+    ReportProgress(false);
   }
 
   // Keep what was learned, for the next scan.

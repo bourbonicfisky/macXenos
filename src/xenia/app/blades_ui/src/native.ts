@@ -61,6 +61,8 @@ export type RecentTitle = {
   icon: string;
   /** The first signed-in player's progress in it, when they have played it. */
   achievements?: { unlocked: number; total: number; score: number; maxScore: number };
+  /** Which disc of a multi-disc game this is; 0 (or absent) for one disc. */
+  disc?: number;
 };
 
 /** The folders the app looks in for games (game_library.h). */
@@ -68,6 +70,11 @@ export type GameFolders = {
   folders: string[];
   /** A scan is running; the list fills in when it ends. */
   scanning: boolean;
+  /** While it runs: games found so far, and how many of `total` it has read
+      (`total` is 0 until it has listed every folder). */
+  found: number;
+  checked: number;
+  total: number;
 };
 
 export type MusicPlayer = {
@@ -355,7 +362,7 @@ function emptyState(): NativeState {
     timeScalar: 1,
     recentTitles: [],
     allGames: [],
-    gameFolders: { folders: [], scanning: false },
+    gameFolders: { folders: [], scanning: false, found: 0, checked: 0, total: 0 },
     musicPlayer: { available: false, state: "idle", volume: 1 },
     profiles: [],
     dashSounds: { status: "unavailable", error: "", asked: true },

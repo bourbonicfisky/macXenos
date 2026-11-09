@@ -28,7 +28,10 @@ function savedSort(): Sort {
   }
 }
 
-const titleOf = (game: RecentTitle) => game.name || game.path.split("/").pop() || game.path;
+const titleOf = (game: RecentTitle) => {
+  const name = game.name || game.path.split("/").pop() || game.path;
+  return game.disc ? t("allGames.disc", { name, disc: game.disc }) : name;
+};
 
 const byName = (a: RecentTitle, b: RecentTitle) =>
   titleOf(a).localeCompare(titleOf(b), undefined, { numeric: true, sensitivity: "base" });

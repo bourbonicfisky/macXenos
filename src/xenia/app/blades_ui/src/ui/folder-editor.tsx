@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { send, useNative } from "../native";
 import { openSubBlade, SubBlade } from "./sub-blade";
 import { showToast } from "./toast";
+import { ScanProgress } from "./scan-progress";
 import { t } from "../i18n";
 
 /**
@@ -110,6 +111,15 @@ export function FolderEditor() {
             </ul>
 
             <div className="grid gap-[0.7em] text-[0.82em]">
+              {/* A scan starts when a folder is added or removed: how far it
+                  has got, whichever row is highlighted. */}
+              {gameFolders.scanning ? (
+                <section className="subblade-card">
+                  <div className="subblade-card-body">
+                    <ScanProgress />
+                  </div>
+                </section>
+              ) : null}
               {folder ? (
                 <>
                   <section className="subblade-card">
