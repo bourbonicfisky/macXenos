@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <utility>
 
 #include "xenia/base/atomic.h"
 #include "xenia/base/byte_order.h"
@@ -100,9 +102,28 @@ void FreezeGuestProbes() {
   g_guest_probes_frozen.store(true, std::memory_order_relaxed);
 }
 
+// XE_GUEST_PROBE_R31_RANGE=lo-hi (hex) records only hits whose r31 lies in
+// [lo, hi): one lock or one object array out of a hot shared path.
+static bool GuestProbeR31InRange(uint32_t r31) {
+  static const std::pair<uint32_t, uint32_t> range = [] {
+    const char* value = std::getenv("XE_GUEST_PROBE_R31_RANGE");
+    if (!value) {
+      return std::make_pair(uint32_t(0), uint32_t(0xFFFFFFFF));
+    }
+    char* end = nullptr;
+    const uint32_t lo = uint32_t(std::strtoul(value, &end, 16));
+    const uint32_t hi =
+        end && *end == '-' ? uint32_t(std::strtoul(end + 1, nullptr, 16))
+                           : lo + 1;
+    return std::make_pair(lo, hi);
+  }();
+  return r31 >= range.first && r31 < range.second;
+}
+
 // The probed address arrives in scratch (written just before the call).
 void GuestProbe(PPCContext* ppc_context, void* arg0, void* arg1) {
-  if (g_guest_probes_frozen.load(std::memory_order_relaxed)) {
+  if (g_guest_probes_frozen.load(std::memory_order_relaxed) ||
+      !GuestProbeR31InRange(uint32_t(ppc_context->r[31]))) {
     return;
   }
   GuestProbeRecord r;

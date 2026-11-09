@@ -9,6 +9,9 @@
 
 #include "xenia/cpu/processor.h"
 
+#include <chrono>
+#include <cstdlib>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/byte_order.h"
@@ -253,9 +256,31 @@ void Processor::RemoveFunctionByAddress(uint32_t address) {
   entry_table_.Delete(address);
 }
 
+// Diagnostic: XE_JIT_COMPILE_LOG_US=N logs every first-call compile (and every
+// wait for another thread's compile) that takes N us or longer, on the thread
+// that paid for it. Off when unset.
+static int64_t JitCompileLogThresholdUs() {
+  static const int64_t threshold = [] {
+    const char* value = std::getenv("XE_JIT_COMPILE_LOG_US");
+    return value ? int64_t(std::strtoll(value, nullptr, 10)) : int64_t(-1);
+  }();
+  return threshold;
+}
+
 Function* Processor::ResolveFunction(uint32_t address) {
+  const int64_t log_threshold_us = JitCompileLogThresholdUs();
+  const auto resolve_start = std::chrono::steady_clock::now();
   Entry* entry;
   Entry::Status status = entry_table_.GetOrCreate(address, &entry);
+  if (log_threshold_us >= 0 && status != Entry::STATUS_NEW) {
+    const int64_t wait_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - resolve_start)
+            .count();
+    if (wait_us >= log_threshold_us) {
+      XELOGI("JitCompile: waited {} us for {:08X}", wait_us, address);
+    }
+  }
   if (status == Entry::STATUS_NEW) {
     // Needs to be generated. We have the 'lock' on it and must do so now.
 
@@ -284,6 +309,15 @@ Function* Processor::ResolveFunction(uint32_t address) {
 
     entry_table_.MarkReady(entry, function, function->end_address());
     status = Entry::STATUS_READY;
+    if (log_threshold_us >= 0) {
+      const int64_t compile_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now() - resolve_start)
+              .count();
+      if (compile_us >= log_threshold_us) {
+        XELOGI("JitCompile: {:08X} took {} us", address, compile_us);
+      }
+    }
   }
   if (status == Entry::STATUS_READY) {
     // Ready to use.

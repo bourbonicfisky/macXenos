@@ -8,10 +8,21 @@
  */
 
 #include "xenia/base/mutex.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <string>
+
+#include "xenia/base/logging.h"
 #include "xenia/base/threading.h"
 #if XE_PLATFORM_WIN32 == 1
 #include "xenia/base/platform_win.h"
-#elif XE_PLATFORM_LINUX == 1
+#else
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
+#if XE_PLATFORM_LINUX == 1
 #include <linux/futex.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -252,21 +263,109 @@ bool xe_fast_mutex::try_lock() {
 
 #if !(XE_PLATFORM_WIN32 == 1 && XE_ENABLE_FAST_WIN32_MUTEX == 1) && \
     !(XE_PLATFORM_LINUX == 1 && XE_ENABLE_FAST_LINUX_MUTEX == 1)
+// Diagnostic: XE_GLOBAL_LOCK_LOG_US=N logs every outermost acquisition that
+// waited N us or longer (with the thread seen holding the lock) and every
+// outermost hold of N us or longer (with the host frames that released it).
+// Off when unset.
+namespace {
+int64_t GlobalLockLogThresholdUs() {
+  static const int64_t threshold = [] {
+    const char* value = std::getenv("XE_GLOBAL_LOCK_LOG_US");
+    return value ? int64_t(std::strtoll(value, nullptr, 10)) : int64_t(-1);
+  }();
+  return threshold;
+}
+int64_t GlobalLockNowUs() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+std::atomic<uint32_t> global_lock_owner{0};
+thread_local uint32_t global_lock_depth = 0;
+thread_local int64_t global_lock_acquired_us = 0;
+thread_local int64_t global_lock_wait_us = 0;
+thread_local uint32_t global_lock_waited_on = 0;
+
+void NoteGlobalLockAcquired(int64_t wait_us, uint32_t waited_on) {
+  global_lock_owner.store(threading::current_thread_id(),
+                          std::memory_order_relaxed);
+  global_lock_depth = 1;
+  global_lock_acquired_us = GlobalLockNowUs();
+  global_lock_wait_us = wait_us;
+  global_lock_waited_on = waited_on;
+}
+
+void LogGlobalLockRelease(int64_t threshold_us, int64_t hold_us) {
+  if (global_lock_wait_us >= threshold_us) {
+    XELOGI("GlobalLock: waited {} us (held by {:08X})", global_lock_wait_us,
+           global_lock_waited_on);
+  }
+  if (hold_us >= threshold_us) {
+    void* frames[8];
+    int count = backtrace(frames, 8);
+    std::string where;
+    for (int i = 2; i < count; ++i) {
+      Dl_info info;
+      if (dladdr(frames[i], &info) && info.dli_sname) {
+        where += fmt::format(" {}+{:X}", info.dli_sname,
+                             uintptr_t(frames[i]) - uintptr_t(info.dli_saddr));
+      } else {
+        where += fmt::format(" {}", frames[i]);
+      }
+    }
+    XELOGI("GlobalLock: held {} us, released at{}", hold_us, where);
+  }
+}
+}  // namespace
+
 // The deferral opens before the lock is taken: a suspend that lands while the
 // thread waits for it would otherwise park the thread the moment it owns it.
 void xe_global_mutex::lock() {
   threading::BeginSuspendDeferral();
+  if (GlobalLockLogThresholdUs() < 0) {
+    mutex_.lock();
+    return;
+  }
+  if (global_lock_depth) {
+    mutex_.lock();
+    ++global_lock_depth;
+    return;
+  }
+  if (mutex_.try_lock()) {
+    NoteGlobalLockAcquired(0, 0);
+    return;
+  }
+  const uint32_t waited_on =
+      global_lock_owner.load(std::memory_order_relaxed);
+  const int64_t wait_start_us = GlobalLockNowUs();
   mutex_.lock();
+  NoteGlobalLockAcquired(GlobalLockNowUs() - wait_start_us, waited_on);
 }
 
 void xe_global_mutex::unlock() {
+  const int64_t threshold_us = GlobalLockLogThresholdUs();
+  if (threshold_us < 0 || --global_lock_depth) {
+    mutex_.unlock();
+    threading::EndSuspendDeferral();
+    return;
+  }
+  const int64_t hold_us = GlobalLockNowUs() - global_lock_acquired_us;
+  global_lock_owner.store(0, std::memory_order_relaxed);
   mutex_.unlock();
   threading::EndSuspendDeferral();
+  LogGlobalLockRelease(threshold_us, hold_us);
 }
 
 bool xe_global_mutex::try_lock() {
   threading::BeginSuspendDeferral();
   if (mutex_.try_lock()) {
+    if (GlobalLockLogThresholdUs() >= 0) {
+      if (global_lock_depth) {
+        ++global_lock_depth;
+      } else {
+        NoteGlobalLockAcquired(0, 0);
+      }
+    }
     return true;
   }
   threading::EndSuspendDeferral();
