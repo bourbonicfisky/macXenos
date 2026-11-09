@@ -340,6 +340,7 @@ class Emulator {
   // Logs every guest thread's blocking call, wait handles and back chain (for
   // diagnosing guest hangs in unattended runs).
   void LogGuestThreadStates(std::string_view reason);
+  void DumpGuestMemoryOnce();
 
  private:
   enum : uint64_t { EmulatorFlagDisclaimerAcknowledged = 1ULL << 0 };

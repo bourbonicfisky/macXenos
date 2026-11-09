@@ -8,6 +8,9 @@
  */
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <ranges>
 #include <unordered_map>
 #include <unordered_set>
@@ -1497,6 +1500,64 @@ void Emulator::LogGuestThreadStates(std::string_view reason) {
     }
     XELOGW("{}", piece);
     rest.remove_prefix(n);
+  }
+  DumpGuestMemoryOnce();
+}
+
+void Emulator::DumpGuestMemoryOnce() {
+  // XE_GUEST_DUMP_PREFIX=<path prefix>: on the first thread-state dump (hang
+  // or guest crash), write guest memory to <prefix>-<base>.img, one file per
+  // range in XE_GUEST_DUMP_RANGES (hex lo-hi, comma separated; default: the
+  // usual heaps, the stacks and the title image). Pages the guest has not
+  // made readable are written as zeros, so file offset = address - base.
+  // For hosts where a debugger can't attach.
+  static std::atomic<bool> dumped{false};
+  const char* prefix = std::getenv("XE_GUEST_DUMP_PREFIX");
+  if (!prefix || !*prefix || dumped.exchange(true)) {
+    return;
+  }
+  const char* ranges_env = std::getenv("XE_GUEST_DUMP_RANGES");
+  std::string ranges = ranges_env && *ranges_env
+                           ? ranges_env
+                           : "40000000-60000000,70000000-71000000,"
+                             "82000000-90000000";
+  constexpr uint32_t kPage = 4096;
+  std::vector<uint8_t> zeros(kPage, 0);
+  size_t start = 0;
+  while (start < ranges.size()) {
+    size_t end = ranges.find(',', start);
+    if (end == std::string::npos) {
+      end = ranges.size();
+    }
+    std::string item = ranges.substr(start, end - start);
+    start = end + 1;
+    size_t dash = item.find('-');
+    if (dash == std::string::npos) {
+      continue;
+    }
+    uint32_t lo = uint32_t(std::strtoul(item.c_str(), nullptr, 16)) & ~(kPage - 1);
+    uint32_t hi = uint32_t(std::strtoul(item.c_str() + dash + 1, nullptr, 16));
+    std::string path = fmt::format("{}-{:08X}.img", prefix, lo);
+    std::FILE* file = std::fopen(path.c_str(), "wb");
+    if (!file) {
+      XELOGE("GuestDump: cannot open {}", path);
+      continue;
+    }
+    uint32_t pages = 0;
+    for (uint64_t address = lo; address + kPage <= hi; address += kPage) {
+      BaseHeap* heap = memory()->LookupHeap(uint32_t(address));
+      uint32_t protect = 0;
+      bool readable = heap && heap->QueryProtect(uint32_t(address), &protect) &&
+                      (protect & kMemoryProtectRead);
+      const void* source =
+          readable ? memory()->TranslateVirtual(uint32_t(address))
+                   : zeros.data();
+      std::fwrite(source, 1, kPage, file);
+      pages += readable;
+    }
+    std::fclose(file);
+    XELOGW("GuestDump: {:08X}-{:08X} -> {} ({} readable pages)", lo, hi, path,
+           pages);
   }
 }
 
