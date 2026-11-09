@@ -399,9 +399,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* GetResolveSnapshot(uint32_t dest_base) const;
   void* FindContainingSnapshot(uint32_t dest_base, uint32_t* y_offset_out) const;
   // A resolve that FindContainingSnapshot did not place, whose destination
-  // starts exactly where a snapshot of the same width and format ends, is the
-  // next vertical strip of one buffer (Ridge Racer Unbounded renders 1152x720
-  // as 1152x384 + 1152x336 predicated tiles, the second at base + 384 rows).
+  // starts a whole number of rows into a snapshot of the same width and
+  // format (at its end, or inside its padding) and runs past its bottom, is
+  // the next vertical strip of one buffer (Ridge Racer Unbounded renders
+  // 1152x720 as 1152x384 + 1152x336 predicated tiles, the second at base +
+  // 384 rows; Burnout Paradise stacks three 1280x640 shadow cascades).
   // Remembers the combined height so the parent's next resolve allocates it
   // and later strips land inside; EnsureResolveSnapshot only assumes the full
   // 720 rows for 1280-wide scenes.

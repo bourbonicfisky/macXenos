@@ -6828,13 +6828,22 @@ void MetalRenderTargetCache::NoteSnapshotStripContinuation(
         snap.pixel_format != pixel_format || snap.width != width) {
       continue;
     }
-    // The same 4-byte row layout FindContainingSnapshot assumes.
+    // The same 4-byte row layout FindContainingSnapshot assumes. The strip
+    // starts a whole number of rows into the snapshot, at its end or inside
+    // rows a 1280-wide snapshot was only padded to (720): Burnout Paradise's
+    // three 1280x640 shadow cascades, sampled as one 1280x1920 texture,
+    // put the second at row 640 of the first's 720-row snapshot, where it
+    // did not fit and became its own snapshot; the fetch saw 720 rows.
     const uint32_t snap_base = uint32_t(pair.first >> 1);
-    if (uint64_t(snap_base) + uint64_t(snap.width) * 4 * snap.height !=
-        dest_base) {
+    const uint64_t row_bytes = uint64_t(snap.width) * 4;
+    if (dest_base <= snap_base || (dest_base - snap_base) % row_bytes) {
       continue;
     }
-    const uint32_t full_height = snap.height + height;
+    const uint64_t row = (dest_base - snap_base) / row_bytes;
+    if (row > snap.height || row + height <= snap.height) {
+      continue;
+    }
+    const uint32_t full_height = uint32_t(row) + height;
     if (full_height > 2048) {
       return;
     }
