@@ -189,7 +189,11 @@ const uint32_t XAPC::kTimerKernelRoutine;
 
 using namespace xe::literals;
 
-uint32_t next_xthread_id_ = 0;
+// Atomic: guest threads and the emulator's host threads are constructed on
+// different threads, and a duplicate id is visible to the guest (KTHREAD
+// thread_id at 0x14C, which some titles' recursive locks use as the owner
+// token, e.g. Skyrim's 82311B78).
+std::atomic<uint32_t> next_xthread_id_{0};
 
 XThread::XThread(KernelState* kernel_state)
     : XObject(kernel_state, kObjectType), guest_thread_(true) {}
@@ -199,7 +203,7 @@ XThread::XThread(KernelState* kernel_state, uint32_t stack_size,
                  uint32_t start_context, uint32_t creation_flags,
                  bool guest_thread, bool main_thread, uint32_t guest_process)
     : XObject(kernel_state, kObjectType, !guest_thread),
-      thread_id_(++next_xthread_id_),
+      thread_id_(next_xthread_id_.fetch_add(1) + 1),
       guest_thread_(guest_thread),
       main_thread_(main_thread) {
   creation_params_.stack_size = stack_size;
