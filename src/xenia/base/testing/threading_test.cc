@@ -8,7 +8,11 @@
 */
 
 #include <array>
+#include <atomic>
+#include <functional>
 #include <memory>
+#include <thread>
+#include <vector>
 
 #include "xenia/base/mutex.h"
 #include "xenia/base/threading.h"
@@ -395,6 +399,88 @@ TEST_CASE("Reset Event", "[event]") {
   evt->Set();
   result = Wait(evt.get(), false, 50ms);
   REQUIRE(result == WaitResult::kSuccess);
+}
+
+// Parks `count` threads in a wait on `evt`, runs `signal` once they're all
+// waiting and returns how many of them the wait released.
+static int ReleasedWaiters(Event* evt, int count,
+                           const std::function<void()>& signal) {
+  std::atomic<int> parked{0};
+  std::atomic<int> released{0};
+  std::vector<std::thread> waiters;
+  for (int i = 0; i < count; ++i) {
+    waiters.emplace_back([&] {
+      ++parked;
+      if (Wait(evt, false, 500ms) == WaitResult::kSuccess) {
+        ++released;
+      }
+    });
+  }
+  while (parked != count) {
+    MaybeYield();
+  }
+  // Counted before the wait itself, so give them time to block.
+  Sleep(20ms);
+  signal();
+  for (auto& waiter : waiters) {
+    waiter.join();
+  }
+  return released;
+}
+
+TEST_CASE("Set then Reset releases parked waiters", "[event]") {
+  // Setting a manual-reset event satisfies every wait parked on it at that
+  // moment. A reset before those threads run doesn't take the wake back.
+  auto evt = Event::CreateManualResetEvent(false);
+  REQUIRE(evt);
+  for (int round = 0; round < 8; ++round) {
+    int released = ReleasedWaiters(evt.get(), 4, [&] {
+      evt->Set();
+      evt->Reset();
+    });
+    REQUIRE(released == 4);
+    REQUIRE(Wait(evt.get(), false, 0ms) == WaitResult::kTimeout);
+  }
+}
+
+TEST_CASE("Pulse releases parked waiters", "[event]") {
+  auto manual = Event::CreateManualResetEvent(false);
+  REQUIRE(manual);
+  for (int round = 0; round < 8; ++round) {
+    int released = ReleasedWaiters(manual.get(), 4, [&] { manual->Pulse(); });
+    REQUIRE(released == 4);
+    REQUIRE(Wait(manual.get(), false, 0ms) == WaitResult::kTimeout);
+  }
+
+  // An auto-reset event releases one.
+  auto automatic = Event::CreateAutoResetEvent(false);
+  REQUIRE(automatic);
+  for (int round = 0; round < 4; ++round) {
+    int released =
+        ReleasedWaiters(automatic.get(), 4, [&] { automatic->Pulse(); });
+    REQUIRE(released == 1);
+    REQUIRE(Wait(automatic.get(), false, 0ms) == WaitResult::kTimeout);
+  }
+}
+
+TEST_CASE("Query Event", "[event]") {
+  auto manual = Event::CreateManualResetEvent(false);
+  auto automatic = Event::CreateAutoResetEvent(true);
+  REQUIRE(manual);
+  REQUIRE(automatic);
+
+  // NotificationEvent is 0, SynchronizationEvent 1.
+  REQUIRE(manual->Query().type == 0);
+  REQUIRE(manual->Query().state == 0);
+  REQUIRE(automatic->Query().type == 1);
+  REQUIRE(automatic->Query().state == 1);
+
+  manual->Set();
+  REQUIRE(manual->Query().state == 1);
+  // Asking doesn't consume it.
+  REQUIRE(automatic->Query().state == 1);
+  REQUIRE(Wait(automatic.get(), false, 0ms) == WaitResult::kSuccess);
+  REQUIRE(automatic->Query().state == 0);
 }
 
 TEST_CASE("Wait on Multiple Events", "[event]") {

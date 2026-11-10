@@ -61,14 +61,19 @@
 #include "xenia/base/cvar.h"
 
 DEFINE_bool(
-    threading_blocking_waitany, false,
-    "Candidate fix (default off = current 1ms poll): make WaitMultiple(WaitAny) "
-    "event-driven instead of polling. Waiters register a latched wait-block with "
-    "each handle; a handle's Signal hands the wake to one registered waiter "
-    "under lock (auto-reset consumed exactly once), so a sub-millisecond "
-    "Set-then-Reset transient is no longer lost (the DOA5 worker-pool deadlock). "
-    "WaitAll still uses the poll. Regression-check broadly before shipping.",
+    threading_blocking_waitany, true,
+    "Event-driven waits on events and WaitMultiple(WaitAny) (default on). A "
+    "waiter registers a latched wait-block with each handle; a handle's Signal "
+    "hands the wake to the registered waiters under lock (every waiter of a "
+    "manual-reset event, one for an auto-reset event), so a Set that is Reset "
+    "before the woken threads run still releases them, as on a console. Off = "
+    "a wait rechecks the event once it runs, and WaitAny polls every 1 ms, "
+    "both of which lose such a Set. Advanced: turn off only to bisect a "
+    "threading regression.",
     "Threading");
+// 2026-11-10: default off -> on. With it off a manual-reset Set followed by a
+// Reset released none of the waiters parked on the event.
+UPDATE_from_bool(threading_blocking_waitany, 2026, 11, 10, 0, false);
 DEFINE_bool(
     threading_blocking_waitall, true,
     "Event-driven WaitMultiple(WaitAll) (default on). The waiter registers a "
@@ -388,10 +393,12 @@ class PosixConditionBase {
   virtual bool Signal() = 0;
 
   WaitResult Wait(std::chrono::milliseconds timeout) {
-    // Route single waits through the same latched wait-block path as WaitAny so
-    // a Signal is delivered (and auto-reset consumed) exactly once across single
-    // AND multi waiters — no transient loss, no steal. (Gated; off = old path.)
-    if (cvars::threading_blocking_waitany) {
+    // Route single waits on an event through the same latched wait-block path
+    // as WaitAny so a Signal is delivered (and auto-reset consumed) exactly once
+    // across single AND multi waiters — no transient loss, no steal. The other
+    // objects stay signaled until a waiter takes them, so they keep the
+    // condition variable, which their Signal notifies directly.
+    if (cvars::threading_blocking_waitany && latches_single_waits()) {
       std::vector<PosixConditionBase*> one{this};
       return WaitAnyBlocking(one, timeout).first;
     }
@@ -620,15 +627,18 @@ class PosixConditionBase {
       }
       {
         std::unique_lock<std::mutex> bl(block.m);
-        if (!block.satisfied) {
-          block.cv.wait_for(bl, backstop, [&] { return block.satisfied; });
+        if (!block.satisfied && !block.pending) {
+          block.cv.wait_for(bl, backstop,
+                            [&] { return block.satisfied || block.pending; });
         }
         if (block.satisfied) {
           fired = static_cast<size_t>(block.fired_index);
           break;
         }
+        block.pending = false;
       }
-      // Backstop re-poll for a persistent signal whose source isn't hooked.
+      // Re-poll: a member poked the block (PokeWaitBlocksLocked), or the
+      // backstop ran out for a persistent signal whose source isn't hooked.
       for (size_t i = 0; i < n && fired == kNone; ++i) {
         std::lock_guard<std::mutex> hl(handles[i]->mutex_);
         if (try_take(i)) {
@@ -743,6 +753,22 @@ class PosixConditionBase {
  protected:
   [[nodiscard]] inline virtual bool signaled() const = 0;
   inline virtual void post_execution() = 0;
+  // Whether a single Wait() on this object goes through a wait-block. Only an
+  // event needs it: its signal can be taken back (Reset, Pulse) before the
+  // woken thread runs.
+  [[nodiscard]] virtual bool latches_single_waits() const { return false; }
+
+  // Called WITH mutex_ held by a signal source whose state the waiter has to
+  // take for itself: a mutant is acquired by the waiting thread and a thread
+  // handle is joined by it, neither can be done by the signaling thread. Wakes
+  // the registered waiters to re-check now rather than at their backstop.
+  void PokeWaitBlocksLocked() {
+    for (auto& [b, index] : wait_blocks_) {
+      std::lock_guard<std::mutex> bl(b->m);
+      b->pending = true;
+      b->cv.notify_all();
+    }
+  }
 
   // Called by a subclass Signal/Release WITH mutex_ held, after the signal
   // state has been raised. Hands the wake to registered WaitAny waiters,
@@ -828,6 +854,22 @@ class PosixCondition<Event> : public PosixConditionBase {
     signal_ = false;
   }
 
+  // Releases the waiters parked right now (every one of a manual-reset event,
+  // one of an auto-reset event) and leaves the event non-signaled. Needs the
+  // waiters to be registered wait-blocks (threading_blocking_waitany).
+  void Pulse() {
+    auto lock = std::unique_lock(mutex_);
+    signal_ = true;
+    DeliverToWaitBlocksLocked();
+    signal_ = false;
+  }
+
+  EventInfo Query() {
+    auto lock = std::unique_lock(mutex_);
+    // EVENT_BASIC_INFORMATION: NotificationEvent is 0, SynchronizationEvent 1.
+    return {manual_reset_ ? 0u : 1u, signal_ ? 1u : 0u};
+  }
+
  private:
   [[nodiscard]] bool signaled() const override { return signal_; }
   void post_execution() override {
@@ -835,6 +877,7 @@ class PosixCondition<Event> : public PosixConditionBase {
       signal_ = false;
     }
   }
+  [[nodiscard]] bool latches_single_waits() const override { return true; }
   bool signal_;
   const bool manual_reset_;
 };
@@ -893,6 +936,7 @@ class PosixCondition<Mutant> final : public PosixConditionBase {
       --count_;
       // Free to be acquired by another thread
       if (count_ == 0) {
+        PokeWaitBlocksLocked();
         cond_.notify_all();
       }
       return true;
@@ -927,6 +971,12 @@ class PosixCondition<Timer> final : public PosixConditionBase {
   bool Signal() override {
     std::lock_guard lock(mutex_);
     signal_ = true;
+    if ((cvars::threading_blocking_waitany ||
+         cvars::threading_blocking_waitall) &&
+        DeliverToWaitBlocksLocked()) {
+      // An auto-reset timer, consumed by a WaitAny waiter.
+      return true;
+    }
     cond_.notify_all();
     return true;
   }
@@ -1444,6 +1494,7 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
       exit_code_ = exit_code;
       signaled_ = true;
+      PokeWaitBlocksLocked();
       cond_.notify_all();
     }
     if (is_current_thread) {
@@ -1686,13 +1737,13 @@ class PosixEvent final : public PosixConditionHandle<Event> {
   ~PosixEvent() override = default;
   void Set() override { handle_.Signal(); }
   void Reset() override { handle_.Reset(); }
-  EventInfo Query() override {
-    EventInfo result{};
-    assert_always();
-    return result;
-  }
+  EventInfo Query() override { return handle_.Query(); }
   void Pulse() override {
     using namespace std::chrono_literals;
+    if (cvars::threading_blocking_waitany) {
+      handle_.Pulse();
+      return;
+    }
     handle_.Signal();
     MaybeYield();
     Sleep(10us);
@@ -1979,6 +2030,7 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
     std::unique_lock lock(thread->handle_.mutex_);
     thread->handle_.exit_code_ = 0;
     thread->handle_.signaled_ = true;
+    thread->handle_.PokeWaitBlocksLocked();
     thread->handle_.cond_.notify_all();
   }
 
