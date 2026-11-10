@@ -1658,21 +1658,17 @@ dword_result_t NtSetTimerEx_entry(dword_t timer_handle, lpqword_t due_time_ptr,
 DECLARE_XBOXKRNL_EXPORT1(NtSetTimerEx, kThreading, kImplemented);
 
 dword_result_t NtCancelTimer_entry(dword_t timer_handle,
-                                   lpdword_t current_state_ptr) {
-  X_STATUS result = X_STATUS_SUCCESS;
-
+                                   pointer_t<uint8_t> current_state_ptr) {
   auto timer =
       kernel_state()->object_table()->LookupObject<XTimer>(timer_handle);
-  if (timer) {
-    result = timer->Cancel();
-  } else {
-    result = X_STATUS_INVALID_HANDLE;
+  if (!timer) {
+    return X_STATUS_INVALID_HANDLE;
   }
+  // The BOOLEAN signal state, which cancelling leaves as it is.
   if (current_state_ptr) {
-    *current_state_ptr = 0;
+    *current_state_ptr = timer->IsSignaled() ? 1 : 0;
   }
-
-  return result;
+  return timer->Cancel();
 }
 DECLARE_XBOXKRNL_EXPORT1(NtCancelTimer, kThreading, kImplemented);
 

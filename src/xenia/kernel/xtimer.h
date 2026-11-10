@@ -33,12 +33,14 @@ class XTimer : public XObject {
   X_STATUS SetTimer(int64_t due_time, uint32_t period_ms, uint32_t routine,
                     uint32_t routine_arg, bool resume);
   X_STATUS Cancel();
+  bool IsSignaled();
 
  protected:
   xe::threading::WaitHandle* GetWaitHandle() override { return timer_.get(); }
 
  private:
   std::unique_ptr<xe::threading::Timer> timer_;
+  bool manual_reset_ = false;
   std::mutex timer_lock_;
 
   XThread* callback_thread_ = nullptr;
