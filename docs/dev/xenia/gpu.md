@@ -59,27 +59,6 @@ Playground tool.
       --shader_output_type=ucode (or spirvtext)
 ```
 
-#### Shader Playground
-
-Built separately (for now) under [tools/shader-playground/](../../../tools/shader-playground/)
-is a GUI for interactive shader assembly, disassembly, validation, and
-translation.
-
-![Shader Playground Screenshot](images/shader_playground.png?raw=true)
-
-Entering shader microcode on the left will invoke the XNA Game Studio
-D3D compiler to translate the ucode to binary. The D3D compiler is then
-used to disassemble the binary and display the optimized form. If
-`xe-gpu-shader-compiler` has been built the ucode will be passed to that
-for disassembly and that will then be passed through D3D compiler. If
-the output of D3D compiler on the xenia disassembly doesn't match the
-original D3D compiler output the box will turn red, indicating that the
-disassembly is broken. Finally, the right most box will show the
-translated shader in the desired format.
-
-For more information and setup instructions see
-[tools/shader-playground/README.md](../../../tools/shader-playground/README.md).
-
 ### xe-gpu-trace-viewer
 
 To quickly iterate on graphical issues, xenia can dump frames (or sequences of
@@ -88,8 +67,7 @@ frames) while running that can be opened and inspected in a separate app.
 The basic workflow is:
 
 1. Capture the frame in game (using F4) or a stream of frames.
-2. Add the file path to the xe-gpu-trace-viewer Debugging command line in
-Visual Studio.
+2. Pass the file path to xe-gpu-trace-viewer on its command line.
 3. Launch xe-gpu-trace-viewer.
 4. Poke around, find issues, etc.
 5. Modify code.

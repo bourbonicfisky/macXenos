@@ -61,11 +61,7 @@ function(xe_platform_sources target base_path)
   endif()
 
   # Add back platform-specific files
-  if(WIN32)
-    file(${glob_mode} _plat_sources      "${base_path}/*_win.h"
-      "${base_path}/*_win.cc"
-    )
-  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     file(${glob_mode} _plat_sources      "${base_path}/*_posix.h"
       "${base_path}/*_posix.cc"
       "${base_path}/*_linux.h"
@@ -109,7 +105,7 @@ endfunction()
 # xe_target_defaults(target)
 #
 # Applies xenia-specific compile settings to a target:
-# - Fatal warnings (-Werror / /WX)
+# - Fatal warnings (-Werror)
 # - Common include directories
 function(xe_target_defaults target)
   target_include_directories(${target} PRIVATE
@@ -117,36 +113,13 @@ function(xe_target_defaults target)
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/third_party
   )
-  if(MSVC)
-    target_compile_options(${target} PRIVATE /WX)
-    # Recreate directory structure in Visual Studio filters
-    get_target_property(_srcs ${target} SOURCES)
-    if(_srcs)
-      set(_local_srcs)
-      set(_external_srcs)
-      foreach(_s IN LISTS _srcs)
-        get_filename_component(_abs "${_s}" ABSOLUTE)
-        string(FIND "${_abs}" "${CMAKE_CURRENT_SOURCE_DIR}" _pos)
-        if(_pos EQUAL 0)
-          list(APPEND _local_srcs "${_s}")
-        else()
-          list(APPEND _external_srcs "${_s}")
-        endif()
-      endforeach()
-      if(_local_srcs)
-        source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${_local_srcs})
-      endif()
-      if(_external_srcs)
-        source_group(TREE ${PROJECT_SOURCE_DIR} PREFIX "External" FILES ${_external_srcs})
-      endif()
-    endif()
-  elseif(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
     # GCC is too noisy for -Werror; only apply to Clang.
     # macOS: Xenia and its bundled third-party libraries were written against an
     # older warning baseline than the current mac toolchain (libc++; e.g. size_t
     # vs uint64_t format mismatches that don't warn on Linux's LP64 typedefs).
     # Keep warnings non-fatal here rather than patching dozens of upstream files;
-    # Windows/Linux retain FatalWarnings. (Mirrors mainline's macos-moltenvk.)
+    # Linux retains FatalWarnings. (Mirrors mainline's macos-moltenvk.)
     target_compile_options(${target} PRIVATE -Werror)
   endif()
 endfunction()
@@ -212,7 +185,7 @@ endfunction()
 # (e.g. the ui/shaders immediate.vs/.ps pair the UI overlay drawer consumes)
 # compile through the same path with no tool change.
 #
-# Unlike the SPIR-V/DXBC rules, the compile work is owned by ONE global
+# Unlike the SPIR-V rule, the compile work is owned by ONE global
 # custom target per shader directory, and consumers only add a dependency on
 # it -- two consumers must never race writing the same generated headers.
 # Ownership is therefore per-directory: the first registration for a given
@@ -274,51 +247,6 @@ function(xe_shader_rules_metal target shader_dir)
   add_dependencies(${target} ${_owner_target})
 endfunction()
 
-# xe_shader_rules_dxbc(target shader_dir)
-#
-# Ensures DXBC shaders are compiled before the target builds.
-# Uses a stamp file; rebuilds when any shader source changes.
-function(xe_shader_rules_dxbc target shader_dir)
-  get_filename_component(shader_dir "${shader_dir}" ABSOLUTE)
-  file(GLOB _sources
-    "${shader_dir}/*.xesl" "${shader_dir}/*.hlsl"
-    "${shader_dir}/*.xesli" "${shader_dir}/*.hlsli")
-  set(_stamp "${CMAKE_CURRENT_BINARY_DIR}/${target}_dxbc.stamp")
-  set(_script "${PROJECT_SOURCE_DIR}/tools/build/compile_shader_dxbc.py")
-  set(_valid_stages vs hs ds gs ps cs)
-  set(_commands)
-  set(_bytecode_dir "${shader_dir}/bytecode/d3d12_5_1")
-  list(APPEND _commands COMMAND ${CMAKE_COMMAND} -E make_directory "${_bytecode_dir}")
-  foreach(src ${_sources})
-    get_filename_component(_name ${src} NAME)
-    string(REGEX REPLACE "\\.[^.]+$" "" _basename "${_name}")
-    string(REPLACE "." "_" _id "${_basename}")
-    string(LENGTH "${_id}" _len)
-    if(_len LESS 3)
-      continue()
-    endif()
-    math(EXPR _s "${_len} - 2")
-    string(SUBSTRING "${_id}" ${_s} 2 _stage)
-    if(NOT _stage IN_LIST _valid_stages)
-      continue()
-    endif()
-    list(APPEND _commands COMMAND ${Python3_EXECUTABLE} "${_script}" "${src}" "${_bytecode_dir}/${_id}.h")
-  endforeach()
-  add_custom_command(
-    OUTPUT "${_stamp}"
-    ${_commands}
-    COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
-    DEPENDS ${_sources} "${_script}"
-    COMMENT "Compiling DXBC shaders for ${target}..."
-    VERBATIM
-  )
-  add_custom_target(${target}-dxbc-shaders DEPENDS "${_stamp}")
-  add_dependencies(${target} ${target}-dxbc-shaders)
-  # Add sources for IDE visibility but prevent VS from compiling them itself
-  set_source_files_properties(${_sources} PROPERTIES HEADER_FILE_ONLY TRUE)
-  target_sources(${target} PRIVATE ${_sources})
-endfunction()
-
 # xe_force_c(files...)
 #
 # Forces the given source files to compile as C.
@@ -351,13 +279,8 @@ function(xe_test_suite name base_path)
   )
 
   # Add platform-specific console app main
-  if(WIN32)
-    target_sources(${name} PRIVATE
-      ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_win.cc)
-  else()
-    target_sources(${name} PRIVATE
-      ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
-  endif()
+  target_sources(${name} PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
 
   target_compile_definitions(${name} PRIVATE
     "XE_TEST_SUITE_NAME=\"${name}\""
@@ -381,11 +304,6 @@ function(xe_test_suite name base_path)
   endif()
   xe_target_defaults(${name})
   set_target_properties(${name} PROPERTIES FOLDER "tests")
-
-  if(MSVC)
-    # Disable Edit and Continue - breaks Catch2 __LINE__ usage
-    target_compile_options(${name} PRIVATE /Zi)
-  endif()
 
   catch_discover_tests(${name})
 endfunction()

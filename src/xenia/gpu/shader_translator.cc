@@ -30,8 +30,6 @@ using namespace ucode;
 //
 // Naming has been matched as closely as possible to the real thing by using the
 // publicly available XNA Game Studio shader assembler.
-// You can find a tool for exploring this under tools/shader-playground/,
-// allowing interative assembling/disassembling of shader code.
 //
 // Though the 360's GPU is similar to the Adreno r200, the microcode format is
 // slightly different. Though this is a great guide it cannot be assumed it

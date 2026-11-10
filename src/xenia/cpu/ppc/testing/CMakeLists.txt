@@ -7,13 +7,8 @@ add_executable(xenia-cpu-ppc-tests
 )
 
 # Add platform-specific console app main
-if(WIN32)
-  target_sources(xenia-cpu-ppc-tests PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_win.cc)
-else()
-  target_sources(xenia-cpu-ppc-tests PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
-endif()
+target_sources(xenia-cpu-ppc-tests PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
 
 # Add .s files but exclude from build (they're test data)
 file(GLOB _ppc_asm  "${CMAKE_CURRENT_SOURCE_DIR}/*.s")

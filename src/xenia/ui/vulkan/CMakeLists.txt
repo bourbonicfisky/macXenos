@@ -12,14 +12,8 @@ xe_target_defaults(xenia-ui-vulkan)
 if(XENIA_BUILD_MISC)
   # Vulkan window demo
   add_executable(xenia-ui-window-vulkan-demo)
-  if(WIN32)
-    set_target_properties(xenia-ui-window-vulkan-demo PROPERTIES WIN32_EXECUTABLE TRUE)
-    target_sources(xenia-ui-window-vulkan-demo PRIVATE
-      ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_win.cc)
-  else()
-    target_sources(xenia-ui-window-vulkan-demo PRIVATE
-      ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_posix.cc)
-  endif()
+  target_sources(xenia-ui-window-vulkan-demo PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_posix.cc)
   target_sources(xenia-ui-window-vulkan-demo PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../window_demo.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_window_demo.cc

@@ -1,11 +1,7 @@
 # third_party/CMakeLists.txt - All third-party library targets.
 
 # Suppress warnings for all third-party code.
-if(MSVC)
-  add_compile_options(/W0)
-else()
-  add_compile_options(-w)
-endif()
+add_compile_options(-w)
 
 # ==============================================================================
 # xbyak_aarch64 (ARM64 JIT assembler)
@@ -20,12 +16,7 @@ if(XE_TARGET_AARCH64)
     ${CMAKE_CURRENT_SOURCE_DIR}/xbyak_aarch64/src
     ${CMAKE_CURRENT_SOURCE_DIR}/xbyak_aarch64/xbyak_aarch64
   )
-  if(MSVC)
-    target_compile_definitions(xbyak_aarch64 PRIVATE NOMINMAX)
-    target_compile_options(xbyak_aarch64 PRIVATE /w)
-  else()
-    target_compile_options(xbyak_aarch64 PRIVATE -w)
-  endif()
+  target_compile_options(xbyak_aarch64 PRIVATE -w)
 endif()
 
 # ==============================================================================
@@ -116,12 +107,7 @@ elseif(XE_TARGET_ARM64)
   target_compile_definitions(discord-rpc PRIVATE RAPIDJSON_NEON)
 endif()
 target_include_directories(discord-rpc PUBLIC discord-rpc/include PRIVATE rapidjson/include)
-if(WIN32)
-  target_sources(discord-rpc PRIVATE
-    discord-rpc/src/connection_win.cpp
-    discord-rpc/src/discord_register_win.cpp
-  )
-elseif(APPLE)
+if(APPLE)
   target_sources(discord-rpc PRIVATE
     discord-rpc/src/connection_unix.cpp
     discord-rpc/src/discord_register_osx.m
@@ -231,11 +217,7 @@ add_library(d3d11-tessellator STATIC
   d3d11-tessellator/tessellator.cpp
 )
 target_include_directories(d3d11-tessellator PUBLIC d3d11-tessellator)
-if(MSVC)
-  target_compile_options(d3d11-tessellator PRIVATE /w)
-else()
-  target_compile_options(d3d11-tessellator PRIVATE -w)
-endif()
+target_compile_options(d3d11-tessellator PRIVATE -w)
 
 # ==============================================================================
 # xxhash
@@ -263,7 +245,7 @@ target_compile_definitions(zstd PRIVATE
   XXH_NAMESPACE=ZSTD_
   ZSTD_LEGACY_SUPPORT=0
 )
-if(XE_TARGET_X86_64 AND NOT MSVC)
+if(XE_TARGET_X86_64)
   enable_language(ASM)
   target_sources(zstd PRIVATE zstd/lib/decompress/huf_decompress_amd64.S)
 else()
@@ -324,9 +306,7 @@ if(XE_TARGET_AARCH64)
     HAVE_ARM_ACLE_H
     WITH_GZFILEOP
   )
-  if(NOT MSVC)
-    target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL)
-  endif()
+  target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL)
 else()
   file(GLOB _zlibng_x86 "zlib-ng/arch/x86/*.c")
   add_library(zlib-ng STATIC
@@ -345,124 +325,33 @@ else()
     X86_AVX512VNNI
     WITH_GZFILEOP
   )
-  if(NOT MSVC)
-    # GCC/Clang have native __builtin_ctz/__builtin_ctzll (MSVC gets these
-    # from fallback_builtins.h). Defining these enables optimized compare256
-    # and longest_match codepaths.
-    target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL)
-    # GCC/Clang need per-file ISA flags; MSVC handles this via runtime dispatch
-    set_source_files_properties(
-      zlib-ng/arch/x86/adler32_avx2.c
-      zlib-ng/arch/x86/chunkset_avx2.c
-      zlib-ng/arch/x86/compare256_avx2.c
-      zlib-ng/arch/x86/slide_hash_avx2.c
-      PROPERTIES COMPILE_OPTIONS "-mavx2;-mbmi2"
-    )
-    set_source_files_properties(
-      zlib-ng/arch/x86/adler32_avx512.c
-      zlib-ng/arch/x86/chunkset_avx512.c
-      PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mavx512vl;-mavx512bw;-mbmi2"
-    )
-    set_source_files_properties(
-      zlib-ng/arch/x86/adler32_avx512_vnni.c
-      PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mavx512vl;-mavx512bw;-mavx512vnni;-mbmi2"
-    )
-  endif()
+  # GCC/Clang have native __builtin_ctz/__builtin_ctzll. Defining these
+  # enables optimized compare256 and longest_match codepaths.
+  target_compile_definitions(zlib-ng PRIVATE HAVE_BUILTIN_CTZ HAVE_BUILTIN_CTZLL)
+  # GCC/Clang need per-file ISA flags
+  set_source_files_properties(
+    zlib-ng/arch/x86/adler32_avx2.c
+    zlib-ng/arch/x86/chunkset_avx2.c
+    zlib-ng/arch/x86/compare256_avx2.c
+    zlib-ng/arch/x86/slide_hash_avx2.c
+    PROPERTIES COMPILE_OPTIONS "-mavx2;-mbmi2"
+  )
+  set_source_files_properties(
+    zlib-ng/arch/x86/adler32_avx512.c
+    zlib-ng/arch/x86/chunkset_avx512.c
+    PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mavx512vl;-mavx512bw;-mbmi2"
+  )
+  set_source_files_properties(
+    zlib-ng/arch/x86/adler32_avx512_vnni.c
+    PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mavx512vl;-mavx512bw;-mavx512vnni;-mbmi2"
+  )
 endif()
 target_include_directories(zlib-ng PUBLIC zlib-ng)
 
 # ==============================================================================
-# libusb (Windows only)
-# ==============================================================================
-if(WIN32)
-  add_library(libusb STATIC
-    libusb/libusb/core.c
-    libusb/libusb/descriptor.c
-    libusb/libusb/hotplug.c
-    libusb/libusb/io.c
-    libusb/libusb/strerror.c
-    libusb/libusb/sync.c
-    libusb/libusb/os/events_windows.c
-    libusb/libusb/os/events_windows.h
-    libusb/libusb/os/threads_windows.c
-    libusb/libusb/os/threads_windows.h
-    libusb/libusb/os/windows_common.c
-    libusb/libusb/os/windows_common.h
-    libusb/libusb/os/windows_usbdk.c
-    libusb/libusb/os/windows_usbdk.h
-    libusb/libusb/os/windows_winusb.c
-    libusb/libusb/os/windows_winusb.h
-  )
-  target_include_directories(libusb PUBLIC libusb/libusb PRIVATE libusb/msvc)
-endif()
-
-# ==============================================================================
 # SDL2
 # ==============================================================================
-if(WIN32)
-  # Build SDL2 from source on Windows
-  file(GLOB _sdl2_sources
-    "SDL2/src/*.c"
-    "SDL2/src/atomic/*.c"
-    "SDL2/src/audio/*.c"
-    "SDL2/src/audio/directsound/*.c"
-    "SDL2/src/audio/disk/*.c"
-    "SDL2/src/audio/dummy/*.c"
-    "SDL2/src/audio/wasapi/*.c"
-    "SDL2/src/audio/winmm/*.c"
-    "SDL2/src/core/windows/*.c"
-    "SDL2/src/cpuinfo/*.c"
-    "SDL2/src/dynapi/*.c"
-    "SDL2/src/events/*.c"
-    "SDL2/src/file/*.c"
-    "SDL2/src/filesystem/windows/*.c"
-    "SDL2/src/haptic/*.c"
-    "SDL2/src/haptic/dummy/*.c"
-    "SDL2/src/haptic/windows/*.c"
-    "SDL2/src/hidapi/*.c"
-    "SDL2/src/joystick/*.c"
-    "SDL2/src/joystick/dummy/*.c"
-    "SDL2/src/joystick/hidapi/*.c"
-    "SDL2/src/joystick/virtual/*.c"
-    "SDL2/src/joystick/windows/*.c"
-    "SDL2/src/libm/*.c"
-    "SDL2/src/loadso/windows/*.c"
-    "SDL2/src/locale/*.c"
-    "SDL2/src/locale/windows/*.c"
-    "SDL2/src/misc/*.c"
-    "SDL2/src/misc/windows/*.c"
-    "SDL2/src/power/*.c"
-    "SDL2/src/power/windows/*.c"
-    "SDL2/src/render/*.c"
-    "SDL2/src/render/direct3d/*.c"
-    "SDL2/src/render/direct3d11/*.c"
-    "SDL2/src/render/direct3d12/*.c"
-    "SDL2/src/render/opengl/*.c"
-    "SDL2/src/render/opengles2/*.c"
-    "SDL2/src/render/software/*.c"
-    "SDL2/src/sensor/*.c"
-    "SDL2/src/sensor/dummy/*.c"
-    "SDL2/src/sensor/windows/*.c"
-    "SDL2/src/stdlib/*.c"
-    "SDL2/src/thread/*.c"
-    "SDL2/src/thread/generic/SDL_syscond.c"
-    "SDL2/src/thread/windows/*.c"
-    "SDL2/src/timer/*.c"
-    "SDL2/src/timer/windows/*.c"
-    "SDL2/src/video/*.c"
-    "SDL2/src/video/dummy/*.c"
-    "SDL2/src/video/windows/*.c"
-    "SDL2/src/video/yuv2rgb/*.c"
-  )
-  add_library(SDL2 STATIC ${_sdl2_sources})
-  target_compile_definitions(SDL2 PRIVATE
-    HAVE_LIBC
-    SDL_LEAN_AND_MEAN
-    SDL_RENDER_DISABLED
-  )
-  target_include_directories(SDL2 PUBLIC SDL2/include)
-  target_link_libraries(SDL2 PRIVATE setupapi winmm imm32 version)
-elseif(APPLE)
+if(APPLE)
   # Build SDL2 from the vendored submodule via its own CMake (self-contained;
   # no system SDL2 framework required). SDL2 configures its own CoreAudio/Cocoa/
   # IOKit backends and links the needed system frameworks through its target
@@ -493,63 +382,16 @@ endif()
 # ==============================================================================
 set(XE_HAS_GAS_ASM FALSE)
 if(XE_TARGET_AARCH64)
-  if(MSVC)
-    # MSVC can't assemble GAS-syntax .S files. Use clang as the ASM compiler
-    # if available — the resulting .obj files link fine with MSVC-compiled code.
-    # Pick clang from the host architecture directory so it can actually
-    # run on this machine (clang is a cross-compiler — it handles the
-    # target arch via --target regardless of host).
-    if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "ARM64")
-      set(_clang_host_dir "ARM64")
-    else()
-      set(_clang_host_dir "x64")
-    endif()
-    find_program(CLANG_EXE clang HINTS
-      "$ENV{VCINSTALLDIR}/Tools/Llvm/${_clang_host_dir}/bin"
-      "$ENV{VCINSTALLDIR}/Tools/Llvm/bin"
-      "C:/Program Files/LLVM/bin"
-    )
-    if(CLANG_EXE)
-      set(XE_HAS_GAS_ASM TRUE)
-      set(XE_CLANG_ASM "${CLANG_EXE}")
-      message(STATUS "Using clang for ARM64 assembly: ${CLANG_EXE}")
-    else()
-      message(WARNING "clang not found — FFmpeg NEON assembly disabled on MSVC ARM64. "
-                      "Install LLVM/clang to enable optimized audio decoding.")
-    endif()
-  else()
-    enable_language(ASM)
-    set(XE_HAS_GAS_ASM TRUE)
-  endif()
+  enable_language(ASM)
+  set(XE_HAS_GAS_ASM TRUE)
 endif()
 
-# Helper: compile GAS-syntax .S files with clang on MSVC, or natively on
-# GCC/Clang. Adds the resulting objects to the target.
+# Helper: adds GAS-syntax .S files to the target when assembly is enabled.
 function(xe_add_gas_sources target)
   if(NOT XE_HAS_GAS_ASM)
     return()
   endif()
-  foreach(src ${ARGN})
-    if(XE_CLANG_ASM)
-      # MSVC: use clang to assemble .S -> .obj
-      get_filename_component(src_name "${src}" NAME_WE)
-      get_filename_component(src_abs "${src}" ABSOLUTE)
-      set(obj "${CMAKE_CURRENT_BINARY_DIR}/${src_name}.obj")
-      add_custom_command(
-        OUTPUT "${obj}"
-        COMMAND "${XE_CLANG_ASM}" --target=aarch64-pc-windows-msvc
-                -I "${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg"
-                -I "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-xenia"
-                -c "${src_abs}" -o "${obj}"
-        DEPENDS "${src_abs}"
-        COMMENT "Assembling ${src} with clang"
-      )
-      target_sources(${target} PRIVATE "${obj}")
-    else()
-      # GCC/Clang: native ASM support
-      target_sources(${target} PRIVATE "${src}")
-    endif()
-  endforeach()
+  target_sources(${target} PRIVATE ${ARGN})
 endfunction()
 
 # Common function to apply shared FFmpeg settings to a target.
@@ -563,28 +405,12 @@ function(ffmpeg_common target)
     ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg
   )
 
-  if(WIN32)
-    target_include_directories(${target} PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg/compat/atomics/win32
-    )
-    target_link_libraries(${target} PRIVATE bcrypt)
-    # Size optimization on Debug/Checked (dead code elimination is mandatory)
-    target_compile_options(${target} PRIVATE
-      $<$<CONFIG:Debug>:/Os>
-      $<$<CONFIG:Checked>:/Os>
-    )
-  else()
-    target_include_directories(${target} PRIVATE
-      ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg/compat/atomics/gcc
-    )
-  endif()
+  target_include_directories(${target} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg/compat/atomics/gcc
+  )
 
   # Suppress all warnings for FFmpeg code
-  if(MSVC)
-    target_compile_options(${target} PRIVATE /w)
-  else()
-    target_compile_options(${target} PRIVATE -w)
-  endif()
+  target_compile_options(${target} PRIVATE -w)
 
   # All FFmpeg source is C
   set_target_properties(${target} PROPERTIES LINKER_LANGUAGE C)
@@ -778,9 +604,6 @@ add_library(libavcodec STATIC
   FFmpeg/libavcodec/mpegaudiotabs.c
   FFmpeg/libavcodec/tiff_common.c
 )
-if(WIN32)
-  target_sources(libavcodec PRIVATE FFmpeg/libavcodec/file_open.c)
-endif()
 # x86 platform files
 if(XE_TARGET_X86_64)
   target_sources(libavcodec PRIVATE
@@ -844,9 +667,6 @@ add_library(libavformat STATIC
   FFmpeg/libavformat/asf_tags.c
   FFmpeg/libavformat/to_upper4.c
 )
-if(WIN32)
-  target_sources(libavformat PRIVATE FFmpeg/libavformat/file_open.c)
-endif()
 target_link_libraries(libavformat PRIVATE libavutil libavcodec)
 ffmpeg_common(libavformat)
 

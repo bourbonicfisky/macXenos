@@ -15,13 +15,8 @@ if(XENIA_BUILD_MISC)
   add_executable(xenia-gpu-vulkan-trace-viewer
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_trace_viewer_main.cc
   )
-  if(WIN32)
-    target_sources(xenia-gpu-vulkan-trace-viewer PRIVATE
-      ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_win.cc)
-  else()
-    target_sources(xenia-gpu-vulkan-trace-viewer PRIVATE
-      ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_posix.cc)
-  endif()
+  target_sources(xenia-gpu-vulkan-trace-viewer PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_posix.cc)
   target_include_directories(xenia-gpu-vulkan-trace-viewer PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
     ${PROJECT_SOURCE_DIR}/third_party/glslang
@@ -53,13 +48,8 @@ if(XENIA_BUILD_MISC)
   add_executable(xenia-gpu-vulkan-trace-dump
     ${CMAKE_CURRENT_SOURCE_DIR}/vulkan_trace_dump_main.cc
   )
-  if(WIN32)
-    target_sources(xenia-gpu-vulkan-trace-dump PRIVATE
-      ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_win.cc)
-  else()
-    target_sources(xenia-gpu-vulkan-trace-dump PRIVATE
-      ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
-  endif()
+  target_sources(xenia-gpu-vulkan-trace-dump PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
   target_include_directories(xenia-gpu-vulkan-trace-dump PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
     ${PROJECT_SOURCE_DIR}/third_party/glslang

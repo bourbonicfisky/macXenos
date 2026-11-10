@@ -76,13 +76,8 @@ xe_target_defaults(xenia-gpu-metal-backend)
 add_executable(xenia-gpu-metal-trace-dump
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_trace_dump_main.cc
 )
-if(WIN32)
-  target_sources(xenia-gpu-metal-trace-dump PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_win.cc)
-else()
-  target_sources(xenia-gpu-metal-trace-dump PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
-endif()
+target_sources(xenia-gpu-metal-trace-dump PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
 target_include_directories(xenia-gpu-metal-trace-dump PRIVATE
   ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(xenia-gpu-metal-trace-dump PRIVATE

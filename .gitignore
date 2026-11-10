@@ -41,12 +41,7 @@ tmtags
 # WebStorm
 .idea
 
-# VS
-.vs
-*.user
-*.sdf
-*.opensdf
-*.suo
+# Build output
 bin/
 obj/
 
@@ -127,7 +122,6 @@ capture_meta.json
 /third_party/binutils/powerpc-none-elf/
 /third_party/binutils/share/
 /third_party/vasm/
-/tools/shader-playground/*.dll
 /profile_print_times.py
 /profile_times.txt
 /cache

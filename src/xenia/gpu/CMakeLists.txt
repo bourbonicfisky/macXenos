@@ -26,13 +26,8 @@ if(XENIA_BUILD_MISC)
   add_executable(xenia-gpu-shader-compiler
     ${CMAKE_CURRENT_SOURCE_DIR}/shader_compiler_main.cc
   )
-  if(WIN32)
-    target_sources(xenia-gpu-shader-compiler PRIVATE
-      ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_win.cc)
-  else()
-    target_sources(xenia-gpu-shader-compiler PRIVATE
-      ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
-  endif()
+  target_sources(xenia-gpu-shader-compiler PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/xenia/base/console_app_main_posix.cc)
   target_include_directories(xenia-gpu-shader-compiler PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/Vulkan-Headers/include
     ${PROJECT_SOURCE_DIR}/third_party/glslang

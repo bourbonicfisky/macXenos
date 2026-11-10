@@ -1,10 +1,6 @@
 # src/xenia/app/CMakeLists.txt - Main xenia_canary executable.
 
-if(WIN32)
-  add_executable(xenia-app WIN32)
-else()
-  add_executable(xenia-app)
-endif()
+add_executable(xenia-app)
 
 set_target_properties(xenia-app PROPERTIES OUTPUT_NAME "xenia_canary")
 
@@ -17,21 +13,7 @@ target_sources(xenia-app PRIVATE
 xe_platform_sources(xenia-app ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Platform-specific entry points
-if(WIN32)
-  target_sources(xenia-app PRIVATE
-    ${PROJECT_SOURCE_DIR}/src/xenia/base/main_init_win.cc
-    ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_win.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/main_resources.rc
-    ${PROJECT_SOURCE_DIR}/src/xenia/base/app_win32.manifest
-  )
-  if(XE_TARGET_X86_64)
-    # main_init_win.cc needs SSE2 only (not AVX)
-    set_source_files_properties(
-      ${PROJECT_SOURCE_DIR}/src/xenia/base/main_init_win.cc
-      PROPERTIES COMPILE_OPTIONS "/arch:SSE2"
-    )
-  endif()
-elseif(APPLE)
+if(APPLE)
   # macOS: Cocoa entry (windowed_app_main_mac.cc) + a non-GTK AVX check, instead
   # of the GTK-coupled posix files.
   target_sources(xenia-app PRIVATE
@@ -60,7 +42,7 @@ else()
     ${PROJECT_SOURCE_DIR}/src/xenia/base/main_init_posix.cc
     ${PROJECT_SOURCE_DIR}/src/xenia/ui/windowed_app_main_posix.cc
   )
-  if(NOT MSVC AND XE_TARGET_X86_64)
+  if(XE_TARGET_X86_64)
     set_source_files_properties(
       ${PROJECT_SOURCE_DIR}/src/xenia/base/main_init_posix.cc
       PROPERTIES COMPILE_OPTIONS "-msse2;-mno-avx"
@@ -115,7 +97,7 @@ if(APPLE AND XENIA_GPU_METAL)
   target_link_libraries(xenia-app PRIVATE xenia-gpu-metal-backend)
 endif()
 
-# Non-Android specific (always true for Windows/Linux)
+# Non-Android specific
 target_link_libraries(xenia-app PRIVATE
   xenia-app-discord
   xenia-debug-ui
@@ -138,14 +120,7 @@ elseif(XE_TARGET_AARCH64)
 endif()
 
 # Platform-specific libraries
-if(WIN32)
-  target_link_libraries(xenia-app PRIVATE
-    xenia-apu-xaudio2
-    xenia-gpu-d3d12
-    xenia-hid-xinput
-    xenia-ui-d3d12
-  )
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(xenia-app PRIVATE
     xenia-apu-alsa
     X11
