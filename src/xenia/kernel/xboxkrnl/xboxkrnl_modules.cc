@@ -107,6 +107,22 @@ dword_result_t XexGetModuleSection_entry(lpvoid_t hmodule, lpstring_t name,
 }
 DECLARE_XBOXKRNL_EXPORT1(XexGetModuleSection, kModules, kImplemented);
 
+// Returns the image base of the module containing pc (callers pass it to
+// RtlImageDirectoryEntryToData to find .pdata) and stores its loader entry. A
+// pc in no module returns 0 and leaves ldr_data_ptr alone. The kernel also
+// finds its own modules, which have no guest image here.
+dword_result_t XexPcToFileHeader_entry(dword_t pc, lpdword_t ldr_data_ptr) {
+  auto module = kernel_state()->GetUserModuleForAddress(pc);
+  if (!module) {
+    return 0;
+  }
+  if (ldr_data_ptr) {
+    *ldr_data_ptr = module->hmodule_ptr();
+  }
+  return module->xex_module()->base_address();
+}
+DECLARE_XBOXKRNL_EXPORT1(XexPcToFileHeader, kModules, kImplemented);
+
 dword_result_t xeXexLoadImage(
     lpstring_t module_name, dword_t module_flags, dword_t min_version,
     lpdword_t hmodule_ptr,

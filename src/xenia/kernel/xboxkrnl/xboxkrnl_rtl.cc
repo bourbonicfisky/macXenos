@@ -840,24 +840,114 @@ static void RtlRip_entry(const ppc_context_t& ctx) {
 }
 DECLARE_XBOXKRNL_EXPORT1(RtlRip, kNone, kImportant);
 
+void xeRtlGetStackLimits(PPCContext* context, uint32_t* out_end,
+                         uint32_t* out_base) {
+  auto kpcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
+  if (kpcr->use_alternative_stack) {
+    *out_base = kpcr->alt_stack_base_ptr;
+    *out_end = kpcr->alt_stack_end_ptr;
+  } else {
+    *out_base = kpcr->stack_base_ptr;
+    *out_end = kpcr->stack_end_ptr;
+  }
+}
+
 void RtlGetStackLimits_entry(lpdword_t out_end, lpdword_t out_base,
                              const ppc_context_t& ctx) {
-  auto kpcr = ctx->TranslateVirtualGPR<X_KPCR*>(ctx->r[13]);
-
   uint32_t stack_base;
   uint32_t stack_end;
-
-  if (kpcr->use_alternative_stack) {
-    stack_base = kpcr->alt_stack_base_ptr;
-    stack_end = kpcr->alt_stack_end_ptr;
-  } else {
-    stack_base = kpcr->stack_base_ptr;
-    stack_end = kpcr->stack_end_ptr;
-  }
+  xeRtlGetStackLimits(ctx, &stack_end, &stack_base);
   *out_base = stack_base;
   *out_end = stack_end;
 }
 DECLARE_XBOXKRNL_EXPORT1(RtlGetStackLimits, kNone, kImplemented);
+
+// The kernel's RtlCaptureContext is a system call and reports the iar after its
+// sc, where an unwinder finds no function entry and steps out to lr. The
+// caller's import thunk has no function entry either, so it stands in.
+static uint32_t CapturedContextIar(uint32_t lr) {
+  if (auto module = kernel_state()->GetUserModuleForAddress(lr)) {
+    for (const auto& library : *module->xex_module()->import_libraries()) {
+      if (library.name != "xboxkrnl") {
+        continue;
+      }
+      for (const auto& import : library.imports) {
+        if (import.ordinal == ordinals::RtlCaptureContext &&
+            import.thunk_address) {
+          return import.thunk_address;
+        }
+      }
+    }
+  }
+  return lr;
+}
+
+void StoreContextRecord(uint8_t* p, const PPCContext* ctx, uint32_t iar,
+                        uint32_t lr) {
+  xe::store_and_swap<uint32_t>(p + kContextFlags,
+                               kContextControl | kContextFloatingPoint |
+                                   kContextInteger | kContextVector);
+  xe::store_and_swap<uint32_t>(p + kContextMsr,
+                               static_cast<uint32_t>(ctx->msr));
+  xe::store_and_swap<uint32_t>(p + kContextIar, iar);
+  xe::store_and_swap<uint32_t>(p + kContextLr, lr);
+  xe::store_and_swap<uint64_t>(p + kContextCtr, ctx->ctr);
+  for (size_t i = 0; i < 32; ++i) {
+    xe::store_and_swap<uint64_t>(p + kContextGpr + i * 8, ctx->r[i]);
+  }
+  xe::store_and_swap<uint32_t>(p + kContextCr,
+                               static_cast<uint32_t>(ctx->cr()));
+  xe::store_and_swap<uint32_t>(p + kContextXer, ctx->xer());
+  xe::store_and_swap<uint64_t>(p + kContextFpscr, ctx->fpscr.value);
+  for (size_t i = 0; i < 32; ++i) {
+    xe::store_and_swap<double>(p + kContextFpr + i * 8, ctx->f[i]);
+  }
+  xe::store_and_swap<uint32_t>(p + kContextUserModeControl, 0);
+  for (size_t i = 0; i < 4; ++i) {
+    xe::store_and_swap<uint32_t>(p + kContextVscr + i * 4,
+                                 ctx->vscr_vec.u32[i]);
+  }
+  for (size_t i = 0; i < 128; ++i) {
+    for (size_t j = 0; j < 4; ++j) {
+      xe::store_and_swap<uint32_t>(p + kContextVr + i * 16 + j * 4,
+                                   ctx->v[i].u32[j]);
+    }
+  }
+}
+
+uint32_t LoadContextRecord(const uint8_t* p, PPCContext* ctx) {
+  ctx->lr = xe::load_and_swap<uint32_t>(p + kContextLr);
+  ctx->ctr = xe::load_and_swap<uint64_t>(p + kContextCtr);
+  for (size_t i = 0; i < 32; ++i) {
+    ctx->r[i] = xe::load_and_swap<uint64_t>(p + kContextGpr + i * 8);
+  }
+  ctx->set_cr(xe::load_and_swap<uint32_t>(p + kContextCr));
+  ctx->set_xer(xe::load_and_swap<uint32_t>(p + kContextXer));
+  ctx->fpscr.value = xe::load_and_swap<uint64_t>(p + kContextFpscr);
+  for (size_t i = 0; i < 32; ++i) {
+    ctx->f[i] = xe::load_and_swap<double>(p + kContextFpr + i * 8);
+  }
+  for (size_t i = 0; i < 4; ++i) {
+    ctx->vscr_vec.u32[i] =
+        xe::load_and_swap<uint32_t>(p + kContextVscr + i * 4);
+  }
+  for (size_t i = 0; i < 128; ++i) {
+    for (size_t j = 0; j < 4; ++j) {
+      ctx->v[i].u32[j] =
+          xe::load_and_swap<uint32_t>(p + kContextVr + i * 16 + j * 4);
+    }
+  }
+  return xe::load_and_swap<uint32_t>(p + kContextIar);
+}
+
+// The import thunk leaves the caller's registers in the guest context.
+void RtlCaptureContext_entry(lpvoid_t context_record,
+                             const ppc_context_t& ctx) {
+  const uint32_t lr = static_cast<uint32_t>(ctx->lr);
+  StoreContextRecord(context_record.as<uint8_t*>(), ctx, CapturedContextIar(lr),
+                     lr);
+}
+DECLARE_XBOXKRNL_EXPORT1(RtlCaptureContext, kNone, kImplemented);
 
 }  // namespace xboxkrnl
 }  // namespace kernel
