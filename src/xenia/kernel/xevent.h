@@ -56,6 +56,9 @@ class XEvent : public XObject {
   // with the host event (see SyncGuestStateBeforeWait).
   X_DISPATCH_HEADER* guest_header() const;
   void WriteGuestSignalState(uint32_t state);
+  // The signal state the Ke calls report as the one from before. Needs
+  // header_mutex_.
+  int32_t SignalStateLocked() const;
 
   bool manual_reset_ = false;
   uint32_t guest_header_ptr_ = 0;

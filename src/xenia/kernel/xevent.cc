@@ -80,14 +80,14 @@ int32_t XEvent::Set(uint32_t priority_increment, bool wait) {
                                     : 0u);
   }
   set_priority_increment(priority_increment);
+  // KeSetEvent returns the signal state from before.
+  std::lock_guard<std::mutex> lock(header_mutex_);
+  const int32_t old_signal_state = SignalStateLocked();
   if (guest_header_ptr_) {
-    std::lock_guard<std::mutex> lock(header_mutex_);
     WriteGuestSignalState(1);
-    event_->Set();
-    return 1;
   }
   event_->Set();
-  return 1;
+  return old_signal_state;
 }
 
 int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
@@ -100,14 +100,14 @@ int32_t XEvent::Pulse(uint32_t priority_increment, bool wait) {
                                     : 0u);
   }
   set_priority_increment(priority_increment);
-  if (guest_header_ptr_) {
-    std::lock_guard<std::mutex> lock(header_mutex_);
-    event_->Pulse();
-    WriteGuestSignalState(0);
-    return 1;
-  }
+  // As does KePulseEvent.
+  std::lock_guard<std::mutex> lock(header_mutex_);
+  const int32_t old_signal_state = SignalStateLocked();
   event_->Pulse();
-  return 1;
+  if (guest_header_ptr_) {
+    WriteGuestSignalState(0);
+  }
+  return old_signal_state;
 }
 
 int32_t XEvent::Reset() {
@@ -118,14 +118,24 @@ int32_t XEvent::Reset() {
                                    ts ? static_cast<uint32_t>(ts->context()->lr)
                                       : 0u);
   }
+  // And KeResetEvent.
+  std::lock_guard<std::mutex> lock(header_mutex_);
+  const int32_t old_signal_state = SignalStateLocked();
   if (guest_header_ptr_) {
-    std::lock_guard<std::mutex> lock(header_mutex_);
     WriteGuestSignalState(0);
-    event_->Reset();
-    return 1;
   }
   event_->Reset();
-  return 1;
+  return old_signal_state;
+}
+
+int32_t XEvent::SignalStateLocked() const {
+  // A notification event's state is its header, which the title may have
+  // cleared itself. A synchronization event's is the host event's: a released
+  // waiter consumes it there.
+  if (guest_header_ptr_) {
+    return guest_header()->signal_state;
+  }
+  return int32_t(event_->Query().state);
 }
 
 X_DISPATCH_HEADER* XEvent::guest_header() const {
