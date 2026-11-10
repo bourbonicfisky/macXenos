@@ -1803,7 +1803,8 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
 }
 
 bool BaseHeap::QueryRegionInfo(uint32_t base_address,
-                               HeapAllocationInfo* out_info) {
+                               HeapAllocationInfo* out_info,
+                               uint32_t max_region_size) {
   uint32_t start_page_number = (base_address - heap_base_) >> page_size_shift_;
   if (start_page_number > page_table_.size()) {
     XELOGE("BaseHeap::QueryRegionInfo base page out of range");
@@ -1843,6 +1844,9 @@ bool BaseHeap::QueryRegionInfo(uint32_t base_address,
         break;
       }
       out_info->region_size += page_size_;
+      if (out_info->region_size >= max_region_size) {
+        break;
+      }
     }
   } else {
     // Free region.
@@ -1854,6 +1858,9 @@ bool BaseHeap::QueryRegionInfo(uint32_t base_address,
         break;
       }
       out_info->region_size += page_size_;
+      if (out_info->region_size >= max_region_size) {
+        break;
+      }
     }
   }
   return true;

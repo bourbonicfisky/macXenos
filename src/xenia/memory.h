@@ -183,7 +183,10 @@ class BaseHeap {
                        uint32_t* old_protect = nullptr);
 
   // Queries information about the given region of pages.
-  bool QueryRegionInfo(uint32_t base_address, HeapAllocationInfo* out_info);
+  // The region size stops growing once it reaches max_region_size, for a
+  // caller only asking about a range within it.
+  bool QueryRegionInfo(uint32_t base_address, HeapAllocationInfo* out_info,
+                       uint32_t max_region_size = UINT32_MAX);
 
   // Queries the size of the region containing the given address.
   bool QuerySize(uint32_t address, uint32_t* out_size);

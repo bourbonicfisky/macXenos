@@ -9,6 +9,10 @@
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_memory.h"
 
+#include <algorithm>
+#include <utility>
+#include <vector>
+
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/cpu/ppc/ppc_context.h"
@@ -61,6 +65,29 @@ uint32_t FromXdkProtectFlags(uint32_t protect) {
     result |= kMemoryProtectWriteCombine;
   }
   return result;
+}
+
+// The runs of a range that hold no committed pages.
+static std::vector<std::pair<uint32_t, uint32_t>> UncommittedRuns(
+    BaseHeap* heap, uint32_t address, uint32_t size) {
+  std::vector<std::pair<uint32_t, uint32_t>> runs;
+  // 64-bit: a range may end at the top of the address space.
+  const uint64_t end = uint64_t(address) + size;
+  while (address < end) {
+    HeapAllocationInfo info = {};
+    uint32_t length = uint32_t(end - address);
+    if (heap->QueryRegionInfo(address, &info, length) && info.region_size) {
+      length = std::min(length, info.region_size);
+    }
+    if (!(info.state & kMemoryAllocationCommit)) {
+      runs.emplace_back(address, length);
+    }
+    if (uint64_t(address) + length >= end) {
+      break;
+    }
+    address += length;
+  }
+  return runs;
 }
 
 dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
@@ -159,8 +186,9 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
   uint32_t protect = FromXdkProtectFlags(protect_bits);
   uint32_t address = 0;
   BaseHeap* heap;
-  HeapAllocationInfo prev_alloc_info = {};
-  bool was_commited = false;
+  const bool zero = (alloc_type & X_MEM_COMMIT) && !(alloc_type & X_MEM_NOZERO);
+  // Only the pages this call commits are zeroed.
+  std::vector<std::pair<uint32_t, uint32_t>> zero_runs;
 
   if (adjusted_base != 0) {
     heap = kernel_memory()->LookupHeap(adjusted_base);
@@ -168,8 +196,9 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
       // Specified the wrong page size for the wrong heap.
       return X_STATUS_ACCESS_DENIED;
     }
-    was_commited = heap->QueryRegionInfo(adjusted_base, &prev_alloc_info) &&
-                   (prev_alloc_info.state & kMemoryAllocationCommit) != 0;
+    if (zero) {
+      zero_runs = UncommittedRuns(heap, adjusted_base, adjusted_size);
+    }
 
     if (heap->AllocFixed(adjusted_base, adjusted_size, page_size,
                          allocation_type, protect)) {
@@ -180,25 +209,22 @@ dword_result_t NtAllocateVirtualMemory_entry(lpdword_t base_addr_ptr,
     heap = kernel_memory()->LookupHeapByType(false, page_size);
     heap->Alloc(adjusted_size, page_size, allocation_type, protect, top_down,
                 &address);
+    if (zero) {
+      zero_runs.emplace_back(address, adjusted_size);
+    }
   }
   if (!address) {
     // Failed - assume no memory available.
     return X_STATUS_NO_MEMORY;
   }
 
-  // Zero memory, if needed.
-  if (address && !(alloc_type & X_MEM_NOZERO)) {
-    if (alloc_type & X_MEM_COMMIT) {
-      if (!(protect & kMemoryProtectWrite)) {
-        heap->Protect(address, adjusted_size,
-                      kMemoryProtectRead | kMemoryProtectWrite);
-      }
-      if (!was_commited) {
-        kernel_memory()->Zero(address, adjusted_size);
-      }
-      if (!(protect & kMemoryProtectWrite)) {
-        heap->Protect(address, adjusted_size, protect);
-      }
+  for (const auto& [start, length] : zero_runs) {
+    if (!(protect & kMemoryProtectWrite)) {
+      heap->Protect(start, length, kMemoryProtectRead | kMemoryProtectWrite);
+    }
+    kernel_memory()->Zero(start, length);
+    if (!(protect & kMemoryProtectWrite)) {
+      heap->Protect(start, length, protect);
     }
   }
 
