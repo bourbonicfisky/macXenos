@@ -463,6 +463,50 @@ TEST_CASE("Pulse releases parked waiters", "[event]") {
   }
 }
 
+TEST_CASE("A timed-out wait does not swallow a Set", "[event]") {
+  // A wait that gives up while a Set is on its way either takes the event or
+  // leaves it signaled. One thread polls an auto-reset event with waits that
+  // time out; every Set has to reach some wait. Once as single waits, once
+  // as a wait for either of two events.
+  for (bool multiple : {false, true}) {
+    auto evt = Event::CreateAutoResetEvent(false);
+    auto other = Event::CreateAutoResetEvent(false);
+    REQUIRE(evt);
+    REQUIRE(other);
+    std::atomic<uint32_t> taken{0};
+    std::atomic<bool> stop{false};
+    std::thread poller([&] {
+      WaitHandle* both[] = {other.get(), evt.get()};
+      uint32_t n = 0;
+      while (!stop.load(std::memory_order_relaxed)) {
+        // Polls and short timed waits, as titles do both.
+        const auto timeout = (++n & 1) ? 0ms : 1ms;
+        const bool success =
+            multiple ? WaitMultiple(both, 2, false, false, timeout).first ==
+                           WaitResult::kSuccess
+                     : Wait(evt.get(), false, timeout) == WaitResult::kSuccess;
+        if (success) {
+          taken.fetch_add(1, std::memory_order_release);
+        }
+      }
+    });
+    bool lost = false;
+    for (uint32_t i = 0; i < 20000 && !lost; ++i) {
+      evt->Set();
+      const auto deadline = std::chrono::steady_clock::now() + 2s;
+      while (taken.load(std::memory_order_acquire) != i + 1) {
+        if (std::chrono::steady_clock::now() > deadline) {
+          lost = true;
+          break;
+        }
+      }
+    }
+    stop = true;
+    poller.join();
+    REQUIRE(!lost);
+  }
+}
+
 TEST_CASE("Query Event", "[event]") {
   auto manual = Event::CreateManualResetEvent(false);
   auto automatic = Event::CreateAutoResetEvent(true);

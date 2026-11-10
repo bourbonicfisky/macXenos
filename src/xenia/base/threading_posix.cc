@@ -399,8 +399,7 @@ class PosixConditionBase {
     // objects stay signaled until a waiter takes them, so they keep the
     // condition variable, which their Signal notifies directly.
     if (cvars::threading_blocking_waitany && latches_single_waits()) {
-      std::vector<PosixConditionBase*> one{this};
-      return WaitAnyBlocking(one, timeout).first;
+      return WaitLatched(timeout);
     }
 
     bool executed;
@@ -437,6 +436,51 @@ class PosixConditionBase {
       return WaitResult::kSuccess;
     }
     return WaitResult::kTimeout;
+  }
+
+  // A single wait through a wait-block: WaitAnyBlocking for one handle whose
+  // every signal source delivers to the registered blocks (an event), so it
+  // needs no backstop re-poll and a parked thread stays parked until the Set
+  // or the timeout. A poll (zero timeout) only looks, under the lock.
+  WaitResult WaitLatched(std::chrono::milliseconds timeout) {
+    WaitBlock block;
+    {
+      std::lock_guard<std::mutex> hl(mutex_);
+      if (signaled()) {
+        post_execution();
+        return WaitResult::kSuccess;
+      }
+      if (timeout == std::chrono::milliseconds::zero()) {
+        return WaitResult::kTimeout;
+      }
+      wait_blocks_.push_back({&block, 0});
+    }
+    {
+      std::unique_lock<std::mutex> bl(block.m);
+      auto satisfied = [&] { return block.satisfied; };
+      if (timeout == std::chrono::milliseconds::max()) {
+        block.cv.wait(bl, satisfied);
+      } else {
+        block.cv.wait_for(bl, timeout, satisfied);
+      }
+    }
+    // Unregister under the handle's lock even when satisfied (the signaller
+    // has erased the block by then): it holds that lock until it is done with
+    // the block, which lives on this stack.
+    {
+      std::lock_guard<std::mutex> hl(mutex_);
+      for (auto it = wait_blocks_.begin(); it != wait_blocks_.end(); ++it) {
+        if (it->first == &block) {
+          wait_blocks_.erase(it);
+          break;
+        }
+      }
+    }
+    // Read the latch only now: a Set that arrived after the timeout but before
+    // the unregistration was handed to (and, for an auto-reset event, consumed
+    // for) this wait.
+    std::lock_guard<std::mutex> bl(block.m);
+    return block.satisfied ? WaitResult::kSuccess : WaitResult::kTimeout;
   }
 
   static std::pair<WaitResult, size_t> WaitMultiple(
@@ -657,6 +701,19 @@ class PosixConditionBase {
         } else {
           ++it;
         }
+      }
+    }
+
+    // A signaller can satisfy the block (and, for an auto-reset event or a
+    // semaphore, consume the signal for it) any time before the unregistration
+    // above, including after the wait gave up: a poll with a zero timeout is
+    // registered only for an instant. The wake is this wait's, so take it;
+    // returning a timeout here would drop a Set nobody else can see. No
+    // signaller holds the block any more, so this read is the last word.
+    if (fired == kNone) {
+      std::lock_guard<std::mutex> bl(block.m);
+      if (block.satisfied) {
+        fired = static_cast<size_t>(block.fired_index);
       }
     }
 
