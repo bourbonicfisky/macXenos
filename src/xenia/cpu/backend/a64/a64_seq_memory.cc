@@ -71,6 +71,16 @@ struct MEMORY_BARRIER
 EMITTER_OPCODE_TABLE(OPCODE_MEMORY_BARRIER, MEMORY_BARRIER);
 
 // ============================================================================
+// OPCODE_LOAD_BARRIER
+// ============================================================================
+struct LOAD_BARRIER : Sequence<LOAD_BARRIER, I<OPCODE_LOAD_BARRIER, VoidOp>> {
+  static void Emit(A64Emitter& e, const EmitArgType& i) {
+    e.dmb(Xbyak_aarch64::ISHLD);
+  }
+};
+EMITTER_OPCODE_TABLE(OPCODE_LOAD_BARRIER, LOAD_BARRIER);
+
+// ============================================================================
 // OPCODE_CACHE_CONTROL
 // ============================================================================
 struct CACHE_CONTROL
@@ -1012,179 +1022,131 @@ EMITTER_OPCODE_TABLE(OPCODE_STORE_MMIO, STORE_MMIO_I32);
 // ============================================================================
 // OPCODE_RESERVED_LOAD / OPCODE_RESERVED_STORE
 // ============================================================================
-// Helper: get pointer to A64BackendContext.
-// x19 is the dedicated backend context register, so this is a no-op
-// accessor for readability. The returned register is x19.
-static const Xbyak_aarch64::XReg& LoadBackendCtxPtr(A64Emitter& e) {
-  return e.GetBackendCtxReg();
+// A per-granule generation counter makes a stwcx. on one thread invalidate
+// other threads' reservations, which a compare-and-swap on the value alone
+// cannot (ABA). These sequences share their state with the host helpers in
+// a64_backend.cc, so a reservation taken by either can be completed by the
+// other. Only x22-x28 and v4-v31 hold guest values, x0-x17 are scratch.
+static constexpr uint32_t kReserveFlagBit = 1u << kA64BackendHasReserveBit;
+
+static constexpr uint32_t BackendCtxOffset(size_t offset) {
+  return static_cast<uint32_t>(offset);
+}
+
+// The guest (untranslated) address the reservation is keyed on. Non-constant
+// sources sit in a callee-saved register ComputeMemoryAddress leaves alone.
+static WReg GuestAddressReg(A64Emitter& e, const I64Op& src,
+                            const WReg& scratch) {
+  if (src.is_constant) {
+    e.mov(scratch,
+          static_cast<uint64_t>(static_cast<uint32_t>(src.constant())));
+    return scratch;
+  }
+  return WReg(src.reg().getIdx());
+}
+
+static void EmitTryAcquireReservation(A64Emitter& e,
+                                      const WReg& guest_address) {
+  const auto bctx = e.GetBackendCtxReg();
+  e.ldr(e.x8, ptr(bctx, BackendCtxOffset(
+                            offsetof(A64BackendContext, reserve_helper_))));
+  e.ubfx(e.w9, guest_address, A64_RESERVE_GRANULE_SHIFT,
+         A64_RESERVE_ENTRY_BITS);
+  e.add(e.x8, e.x8, e.x9, Xbyak_aarch64::LSL, 2);
+  // snapshot the generation first, the acquire pins the value read after
+  e.ldar(e.w10, ptr(e.x8));
+  e.str(guest_address, ptr(bctx, BackendCtxOffset(offsetof(A64BackendContext,
+                                                           reserve_address))));
+  // lwarx replaces any reservation this thread already held
+  e.ldr(e.w11, ptr(bctx, BackendCtxOffset(offsetof(A64BackendContext, flags))));
+  e.orr(e.w11, e.w11, kReserveFlagBit);
+  e.str(e.w11, ptr(bctx, BackendCtxOffset(offsetof(A64BackendContext, flags))));
+
+  // a stwcx. has the granule claimed, AwaitReservation takes the generation
+  // once it publishes
+  auto& unclaimed = e.NewCachedLabel();
+  auto& acquired = e.NewCachedLabel();
+  e.tbz(e.w10, 0, unclaimed);
+  e.mov(e.w1, guest_address);
+  e.CallNativeSafe(reinterpret_cast<void*>(A64Backend::AwaitReservation));
+  e.b(acquired);
+  e.L(unclaimed);
+  e.str(e.w10, ptr(bctx, BackendCtxOffset(
+                             offsetof(A64BackendContext, reserve_generation))));
+  e.L(acquired);
 }
 
 struct RESERVED_LOAD_I32
     : Sequence<RESERVED_LOAD_I32, I<OPCODE_RESERVED_LOAD, I32Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const WReg guest_address = GuestAddressReg(e, i.src1, e.w12);
+    // the address after the acquire, whose wait clobbers the scratch registers
+    EmitTryAcquireReservation(e, guest_address);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    // Save guest address before load — dest may alias addr register.
-    e.mov(e.w0, WReg(addr.getIdx()));
-    // Load the value (may clobber addr if dest == addr).
     e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
-    // Save reservation: address and value in backend context.
-    auto bctx = LoadBackendCtxPtr(e);
-    // Store the guest address (already saved in x0).
-    e.str(e.x0, ptr(bctx, static_cast<uint32_t>(offsetof(
-                              A64BackendContext, cached_reserve_offset))));
-    // Store the loaded value (zero-extended to 64-bit).
-    e.mov(e.w1, i.dest);
-    e.str(e.x1, ptr(bctx, static_cast<uint32_t>(offsetof(
-                              A64BackendContext, cached_reserve_value_))));
-    // Set the "has reserve" flag (bit 1).
-    e.ldr(e.w1,
-          ptr(bctx, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
-    e.orr(e.w1, e.w1, static_cast<uint32_t>(1u << kA64BackendHasReserveBit));
-    e.str(e.w1,
-          ptr(bctx, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
+    e.mov(e.w0, i.dest);
+    e.str(e.x0, ptr(e.GetBackendCtxReg(),
+                    BackendCtxOffset(
+                        offsetof(A64BackendContext, cached_reserve_value_))));
   }
 };
 struct RESERVED_LOAD_I64
     : Sequence<RESERVED_LOAD_I64, I<OPCODE_RESERVED_LOAD, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const WReg guest_address = GuestAddressReg(e, i.src1, e.w12);
+    EmitTryAcquireReservation(e, guest_address);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    // Save guest address before load — dest may alias addr register.
-    e.mov(e.w0, WReg(addr.getIdx()));
-    // Load the value (may clobber addr if dest == addr).
     e.ldr(i.dest, ptr(e.GetMembaseReg(), addr));
-    // Save reservation in backend context.
-    auto bctx = LoadBackendCtxPtr(e);
-    e.str(e.x0, ptr(bctx, static_cast<uint32_t>(offsetof(
-                              A64BackendContext, cached_reserve_offset))));
-    e.str(i.dest, ptr(bctx, static_cast<uint32_t>(offsetof(
-                                A64BackendContext, cached_reserve_value_))));
-    e.ldr(e.w1,
-          ptr(bctx, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
-    e.orr(e.w1, e.w1, static_cast<uint32_t>(1u << kA64BackendHasReserveBit));
-    e.str(e.w1,
-          ptr(bctx, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
+    e.str(i.dest, ptr(e.GetBackendCtxReg(),
+                      BackendCtxOffset(
+                          offsetof(A64BackendContext, cached_reserve_value_))));
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RESERVED_LOAD, RESERVED_LOAD_I32,
                      RESERVED_LOAD_I64);
 
+// x1 = host address, x2 = value to store, both set up by the caller.
+// Writes 1 to dest if the store landed, 0 otherwise.
+static void EmitReservedStore(A64Emitter& e, const I8Op& dest,
+                              const WReg& guest_address, bool bit64) {
+  if (guest_address.getIdx() != e.w12.getIdx()) {
+    e.mov(e.w12, guest_address);
+  }
+  e.mov(e.x9, reinterpret_cast<uint64_t>(
+                  e.backend()->reserved_store_helper(bit64)));
+  e.blr(e.x9);
+  e.mov(WReg(dest.reg().getIdx()), e.w0);
+}
+
 struct RESERVED_STORE_I32
     : Sequence<RESERVED_STORE_I32,
                I<OPCODE_RESERVED_STORE, I8Op, I64Op, I32Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const WReg guest_address = GuestAddressReg(e, i.src1, e.w12);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    auto& no_reserve = e.NewCachedLabel();
-    auto& done = e.NewCachedLabel();
-    // Check if we have a reservation.
-    auto bctx = LoadBackendCtxPtr(e);
-    e.ldr(e.w4,
-          ptr(bctx, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
-    e.tbz(e.w4, kA64BackendHasReserveBit, no_reserve);
-    // Clear the reserve flag.
-    e.and_(e.w4, e.w4,
-           static_cast<uint32_t>(~(1u << kA64BackendHasReserveBit)));
-    e.str(e.w4,
-          ptr(bctx, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
-    // Check if address matches.
-    e.ldr(e.x4, ptr(bctx, static_cast<uint32_t>(offsetof(
-                              A64BackendContext, cached_reserve_offset))));
-    e.mov(e.w5, WReg(addr.getIdx()));
-    e.cmp(e.x4, e.x5);
-    e.b(Xbyak_aarch64::NE, no_reserve);
-    // Address matches. Do atomic compare-exchange.
-    // Expected value from cached_reserve_value_.
-    e.ldr(e.w5, ptr(bctx, static_cast<uint32_t>(offsetof(
-                              A64BackendContext, cached_reserve_value_))));
-    // Desired value.
+    e.add(e.x1, e.GetMembaseReg(), addr);
     if (i.src2.is_constant) {
-      e.mov(e.w6,
+      e.mov(e.w2,
             static_cast<uint64_t>(static_cast<uint32_t>(i.src2.constant())));
     } else {
-      e.mov(e.w6, WReg(i.src2.reg().getIdx()));
+      e.mov(e.w2, WReg(i.src2.reg().getIdx()));
     }
-    // Compute host address.
-    e.add(e.x4, e.GetMembaseReg(), addr);
-
-    if (e.IsFeatureEnabled(kA64EmitLSE)) {
-      e.mov(e.w0, e.w5);
-      e.casal(e.w5, e.w6, ptr(e.x4));
-      e.cmp(e.w5, e.w0);
-      e.cset(i.dest, Xbyak_aarch64::EQ);
-      e.b(done);
-    } else {
-      // LDXR/STXR loop.
-      auto& cas_loop = e.NewCachedLabel();
-      auto& cas_fail = e.NewCachedLabel();
-      e.L(cas_loop);
-      e.ldaxr(e.w7, ptr(e.x4));
-      e.cmp(e.w7, e.w5);
-      e.b(Xbyak_aarch64::NE, cas_fail);
-      e.stlxr(e.w7, e.w6, ptr(e.x4));
-      e.cbnz(e.w7, cas_loop);
-      // Success.
-      e.mov(i.dest, 1);
-      e.b(done);
-      e.L(cas_fail);
-      e.clrex(15);
-    }
-    e.L(no_reserve);
-    e.mov(i.dest, 0);
-    e.L(done);
+    EmitReservedStore(e, i.dest, guest_address, false);
   }
 };
 struct RESERVED_STORE_I64
     : Sequence<RESERVED_STORE_I64,
                I<OPCODE_RESERVED_STORE, I8Op, I64Op, I64Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
+    const WReg guest_address = GuestAddressReg(e, i.src1, e.w12);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    auto& no_reserve = e.NewCachedLabel();
-    auto& done = e.NewCachedLabel();
-    auto bctx = LoadBackendCtxPtr(e);
-    e.ldr(e.w4,
-          ptr(bctx, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
-    e.tbz(e.w4, kA64BackendHasReserveBit, no_reserve);
-    e.and_(e.w4, e.w4,
-           static_cast<uint32_t>(~(1u << kA64BackendHasReserveBit)));
-    e.str(e.w4,
-          ptr(bctx, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
-    e.ldr(e.x4, ptr(bctx, static_cast<uint32_t>(offsetof(
-                              A64BackendContext, cached_reserve_offset))));
-    e.mov(e.w5, WReg(addr.getIdx()));
-    e.cmp(e.x4, e.x5);
-    e.b(Xbyak_aarch64::NE, no_reserve);
-    // 64-bit compare-exchange.
-    e.ldr(e.x5, ptr(bctx, static_cast<uint32_t>(offsetof(
-                              A64BackendContext, cached_reserve_value_))));
+    e.add(e.x1, e.GetMembaseReg(), addr);
     if (i.src2.is_constant) {
-      e.mov(e.x6, static_cast<uint64_t>(i.src2.constant()));
+      e.mov(e.x2, static_cast<uint64_t>(i.src2.constant()));
     } else {
-      e.mov(e.x6, XReg(i.src2.reg().getIdx()));
+      e.mov(e.x2, XReg(i.src2.reg().getIdx()));
     }
-    e.add(e.x4, e.GetMembaseReg(), addr);
-
-    if (e.IsFeatureEnabled(kA64EmitLSE)) {
-      e.mov(e.x0, e.x5);
-      e.casal(e.x5, e.x6, ptr(e.x4));
-      e.cmp(e.x5, e.x0);
-      e.cset(i.dest, Xbyak_aarch64::EQ);
-      e.b(done);
-    } else {
-      auto& cas_loop = e.NewCachedLabel();
-      auto& cas_fail = e.NewCachedLabel();
-      e.L(cas_loop);
-      e.ldaxr(e.x7, ptr(e.x4));
-      e.cmp(e.x7, e.x5);
-      e.b(Xbyak_aarch64::NE, cas_fail);
-      e.stlxr(e.w7, e.x6, ptr(e.x4));
-      e.cbnz(e.w7, cas_loop);
-      e.mov(i.dest, 1);
-      e.b(done);
-      e.L(cas_fail);
-      e.clrex(15);
-    }
-    e.L(no_reserve);
-    e.mov(i.dest, 0);
-    e.L(done);
+    EmitReservedStore(e, i.dest, guest_address, true);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_RESERVED_STORE, RESERVED_STORE_I32,

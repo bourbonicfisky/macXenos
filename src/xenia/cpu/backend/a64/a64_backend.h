@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_BACKEND_A64_A64_BACKEND_H_
 #define XENIA_CPU_BACKEND_A64_A64_BACKEND_H_
 
+#include <atomic>
 #include <memory>
 
 #include "xenia/base/bit_map.h"
@@ -30,6 +31,11 @@ class A64CodeCache;
 typedef void* (*HostToGuestThunk)(void* target, void* arg0, void* arg1);
 typedef void* (*GuestToHostThunk)(void* target, void* arg0, void* arg1);
 typedef void (*ResolveFunctionThunk)();
+// Host entry to a stwcx. helper, returns 1 if the store landed. The value is
+// guest endian.
+typedef uint32_t (*ReservedStoreThunk)(uint32_t guest_address,
+                                       ppc::PPCContext* context, uint64_t value,
+                                       void* host_address);
 
 // Place guest trampolines in an address range that the HV normally occupies.
 static constexpr uint32_t GUEST_TRAMPOLINE_BASE = 0x80000000;
@@ -38,14 +44,23 @@ static constexpr uint32_t GUEST_TRAMPOLINE_MIN_LEN = 8;
 static constexpr uint32_t MAX_GUEST_TRAMPOLINES =
     (GUEST_TRAMPOLINE_END - GUEST_TRAMPOLINE_BASE) / GUEST_TRAMPOLINE_MIN_LEN;
 
-#define A64_RESERVE_BLOCK_SHIFT 16
-#define A64_RESERVE_NUM_ENTRIES \
-  ((1024ULL * 1024ULL * 1024ULL * 4ULL) >> A64_RESERVE_BLOCK_SHIFT)
+// Xenon reservation granule is one 128 byte cache line.
+static constexpr uint32_t A64_RESERVE_GRANULE_SHIFT = 7;
+// A generation counter per granule, hashed. stwcx. bumps its granule to kill
+// other threads' reservations. Colliding granules only cost a spurious failure.
+static constexpr uint32_t A64_RESERVE_ENTRY_BITS = 20;
+static constexpr uint32_t A64_RESERVE_ENTRY_MASK =
+    (1u << A64_RESERVE_ENTRY_BITS) - 1;
+static constexpr uint32_t A64_RESERVE_NUM_ENTRIES = A64_RESERVE_ENTRY_MASK + 1;
 
 struct ReserveHelper {
-  uint64_t blocks[A64_RESERVE_NUM_ENTRIES / 64];
+  std::atomic<uint32_t> generations[A64_RESERVE_NUM_ENTRIES];
 
-  ReserveHelper() { memset(blocks, 0, sizeof(blocks)); }
+  ReserveHelper() {
+    for (auto& generation : generations) {
+      generation.store(0, std::memory_order_relaxed);
+    }
+  }
 };
 
 struct A64BackendStackpoint {
@@ -75,8 +90,10 @@ struct A64BackendContext {
   uint64_t cached_reserve_value_;
   uint64_t* guest_tick_count;
   A64BackendStackpoint* stackpoints;
-  uint64_t cached_reserve_offset;
-  uint32_t cached_reserve_bit;
+  // guest address the live reservation was taken on, and the granule
+  // generation as it read at that point
+  uint32_t reserve_address;
+  uint32_t reserve_generation;
   unsigned int current_stackpoint_depth;
   unsigned int fpcr_fpu;
   unsigned int fpcr_vmx;
@@ -118,6 +135,10 @@ class A64Backend : public Backend {
   void* synchronize_guest_and_host_stack_helper() const {
     return synchronize_guest_and_host_stack_helper_;
   }
+  // The stwcx./stdcx. helper JIT code calls, see EmitReservedStoreHelper.
+  void* reserved_store_helper(bool bit64) const {
+    return bit64 ? reserved_store_64_helper_ : reserved_store_32_helper_;
+  }
 
   bool Initialize(Processor* processor) override;
 
@@ -142,6 +163,15 @@ class A64Backend : public Backend {
     return reinterpret_cast<A64BackendContext*>(
         reinterpret_cast<intptr_t>(ctx) - sizeof(A64BackendContext));
   }
+  // lwarx found the granule claimed, refreshes the generation it took.
+  static uint64_t AwaitReservation(void* raw_context, uint64_t guest_address);
+
+  uint32_t ReservedLoad32(ppc::PPCContext* context, uint32_t address) override;
+  uint64_t ReservedLoad64(ppc::PPCContext* context, uint32_t address) override;
+  bool ReservedStore32(ppc::PPCContext* context, uint32_t address,
+                       uint32_t value) override;
+  bool ReservedStore64(ppc::PPCContext* context, uint32_t address,
+                       uint64_t value) override;
 
   uint32_t CreateGuestTrampoline(GuestTrampolineProc proc, void* userdata1,
                                  void* userdata2, bool long_term) override;
@@ -154,6 +184,7 @@ class A64Backend : public Backend {
  private:
   static bool ExceptionCallbackThunk(Exception* ex, void* data);
   bool ExceptionCallback(Exception* ex);
+  static uint64_t ReleaseFaultingReservedStore(void* data, Exception* ex);
 
   uintptr_t capstone_handle_ = 0;
 
@@ -164,13 +195,12 @@ class A64Backend : public Backend {
   GuestToHostThunk guest_to_host_thunk_ = nullptr;
   ResolveFunctionThunk resolve_function_thunk_ = nullptr;
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
+  void* reserved_store_32_helper_ = nullptr;
+  void* reserved_store_64_helper_ = nullptr;
+  ReservedStoreThunk reserved_store_32_thunk_ = nullptr;
+  ReservedStoreThunk reserved_store_64_thunk_ = nullptr;
+  ReservedStoreFaultSite reserved_store_fault_sites_[2] = {};
 
- public:
-  void* try_acquire_reservation_helper_ = nullptr;
-  void* reserved_store_32_helper = nullptr;
-  void* reserved_store_64_helper = nullptr;
-
- private:
   alignas(64) ReserveHelper reserve_helper_;
   BitMap guest_trampoline_address_bitmap_;
   uint8_t* guest_trampoline_memory_ = nullptr;

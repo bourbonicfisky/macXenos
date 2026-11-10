@@ -33,6 +33,7 @@
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 #include "xenia/cpu/backend/a64/a64_stack_layout.h"
 #include "xenia/cpu/breakpoint.h"
+#include "xenia/cpu/mmio_handler.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/stack_walker.h"
@@ -109,6 +110,8 @@ class A64HelperEmitter : public A64Emitter {
   GuestToHostThunk EmitGuestToHostThunk();
   ResolveFunctionThunk EmitResolveFunctionThunk();
   void* EmitGuestAndHostSynchronizeStackHelper();
+  void* EmitReservedStoreHelper(bool bit64, ReservedStoreFaultSite& fault_site);
+  ReservedStoreThunk EmitReservedStoreThunk(void* helper);
 };
 
 A64HelperEmitter::A64HelperEmitter(A64Backend* backend,
@@ -594,6 +597,276 @@ static uint64_t ResolveLongjmp(ppc::PPCContext* guest_context,
   return 0;
 }
 
+// stwcx./stdcx. on the reservation the last lwarx/ldarx took. One copy per
+// width, called from JIT code and (through EmitReservedStoreThunk) from host
+// code, so the fault handler has two sites to recognise.
+// w12 = guest address, x1 = host address, x2 = value
+// w0 = 1 if the store landed. Clobbers x0-x3, x8-x17 and the flags.
+void* A64HelperEmitter::EmitReservedStoreHelper(
+    bool bit64, ReservedStoreFaultSite& fault_site) {
+  using namespace Xbyak_aarch64;
+  struct {
+    size_t prolog;
+    size_t prolog_stack_alloc;
+    size_t body;
+    size_t epilog;
+    size_t tail;
+  } code_offsets = {};
+  code_offsets.prolog = getSize();
+  code_offsets.prolog_stack_alloc = getSize();
+  code_offsets.body = getSize();
+
+  auto bctx = [this](size_t offset) {
+    return ptr(x19, static_cast<uint32_t>(offset));
+  };
+  constexpr uint32_t kReserveFlagBit = 1u << kA64BackendHasReserveBit;
+  const bool lse = IsFeatureEnabled(kA64EmitLSE);
+  Label fail, release_fail, claim_mismatch, value_mismatch;
+
+  // stwcx. always clears the reservation, stored or not
+  ldr(w8, bctx(offsetof(A64BackendContext, flags)));
+  and_(w9, w8, static_cast<uint64_t>(~kReserveFlagBit));
+  str(w9, bctx(offsetof(A64BackendContext, flags)));
+  tst(w8, static_cast<uint64_t>(kReserveFlagBit));
+  b(EQ, fail);
+
+  // the reservation must be for the address we're storing to
+  ldr(w10, bctx(offsetof(A64BackendContext, reserve_address)));
+  cmp(w10, w12);
+  b(NE, fail);
+
+  ldr(x11, bctx(offsetof(A64BackendContext, reserve_helper_)));
+  ubfx(w13, w12, A64_RESERVE_GRANULE_SHIFT, A64_RESERVE_ENTRY_BITS);
+  add(x11, x11, x13, LSL, 2);
+  // claim the generation (even to odd) so no other store can land until we
+  // publish the next even value, odd snapshots always fail
+  ldr(w15, bctx(offsetof(A64BackendContext, reserve_generation)));
+  tbnz(w15, 0, fail);
+  add(w17, w15, 1);
+
+  // a fault here leaves the claim in x11 and w17 for the handler
+  size_t first_access;
+  size_t last_access;
+  if (lse) {
+    mov(w14, w15);
+    casal(w14, w17, ptr(x11));
+    cmp(w14, w15);
+    b(NE, fail);
+
+    ldr(x16, bctx(offsetof(A64BackendContext, cached_reserve_value_)));
+    // casal returns the old value in the compare register, so keep a copy
+    mov(x3, x16);
+    first_access = getSize();
+    last_access = first_access;
+    if (bit64) {
+      casal(x16, x2, ptr(x1));
+      cmp(x16, x3);
+    } else {
+      casal(w16, w2, ptr(x1));
+      cmp(w16, w3);
+    }
+    b(NE, release_fail);
+  } else {
+    Label claim_retry, cas_retry;
+    L(claim_retry);
+    ldaxr(w14, ptr(x11));
+    cmp(w14, w15);
+    b(NE, claim_mismatch);
+    stlxr(w13, w17, ptr(x11));
+    cbnz(w13, claim_retry);
+
+    ldr(x16, bctx(offsetof(A64BackendContext, cached_reserve_value_)));
+    L(cas_retry);
+    first_access = getSize();
+    if (bit64) {
+      ldaxr(x14, ptr(x1));
+      cmp(x14, x16);
+      b(NE, value_mismatch);
+      last_access = getSize();
+      stlxr(w15, x2, ptr(x1));
+    } else {
+      ldaxr(w14, ptr(x1));
+      cmp(w14, w16);
+      b(NE, value_mismatch);
+      last_access = getSize();
+      stlxr(w15, w2, ptr(x1));
+    }
+    cbnz(w15, cas_retry);
+  }
+
+  add(w17, w17, 1);
+  stlr(w17, ptr(x11));
+  mov(w0, 1);
+  ret();
+
+  if (!lse) {
+    // ldaxr compare failed, drop the exclusive monitor
+    L(claim_mismatch);
+    clrex(15);
+    b(fail);
+    L(value_mismatch);
+    clrex(15);
+  }
+  // claimed, so publish even on failure
+  L(release_fail);
+  add(w17, w17, 1);
+  stlr(w17, ptr(x11));
+  const size_t fail_offset = getSize();
+  L(fail);
+  mov(w0, 0);
+  ret();
+
+  code_offsets.epilog = getSize();
+  code_offsets.tail = getSize();
+
+  EmitFunctionInfo func_info = {};
+  func_info.code_size.total = getSize();
+  func_info.code_size.prolog = code_offsets.body - code_offsets.prolog;
+  func_info.code_size.body = code_offsets.epilog - code_offsets.body;
+  func_info.code_size.epilog = code_offsets.tail - code_offsets.epilog;
+  func_info.code_size.tail = getSize() - code_offsets.tail;
+  func_info.prolog_stack_alloc_offset =
+      code_offsets.prolog_stack_alloc - code_offsets.prolog;
+  func_info.stack_size = 0;
+
+  auto helper = reinterpret_cast<uint8_t*>(Emplace(func_info));
+  fault_site.first_access = reinterpret_cast<uint64_t>(helper + first_access);
+  fault_site.last_access = reinterpret_cast<uint64_t>(helper + last_access);
+  fault_site.fail = reinterpret_cast<uint64_t>(helper + fail_offset);
+  return helper;
+}
+
+// Puts host arguments where the stwcx. helper takes them, so a fault in a host
+// store is released the same way as one in guest code.
+// w0 = guest address, x1 = context, x2 = value, x3 = host address
+ReservedStoreThunk A64HelperEmitter::EmitReservedStoreThunk(void* helper) {
+  using namespace Xbyak_aarch64;
+  struct {
+    size_t prolog;
+    size_t prolog_stack_alloc;
+    size_t body;
+    size_t epilog;
+    size_t tail;
+  } code_offsets = {};
+  code_offsets.prolog = getSize();
+  sub(sp, sp, static_cast<uint32_t>(16));
+  code_offsets.prolog_stack_alloc = getSize();
+  stp(x19, x30, ptr(sp, 0x00));
+  code_offsets.body = getSize();
+
+  sub(x19, x1, static_cast<uint32_t>(sizeof(A64BackendContext)));
+  mov(w12, w0);
+  mov(x1, x3);
+  mov(x9, reinterpret_cast<uint64_t>(helper));
+  blr(x9);
+
+  code_offsets.epilog = getSize();
+  ldp(x19, x30, ptr(sp, 0x00));
+  add(sp, sp, static_cast<uint32_t>(16));
+  ret();
+  code_offsets.tail = getSize();
+
+  EmitFunctionInfo func_info = {};
+  func_info.code_size.total = getSize();
+  func_info.code_size.prolog = code_offsets.body - code_offsets.prolog;
+  func_info.code_size.body = code_offsets.epilog - code_offsets.body;
+  func_info.code_size.epilog = code_offsets.tail - code_offsets.epilog;
+  func_info.code_size.tail = getSize() - code_offsets.tail;
+  func_info.prolog_stack_alloc_offset =
+      code_offsets.prolog_stack_alloc - code_offsets.prolog;
+  func_info.stack_size = 16;
+
+  return reinterpret_cast<ReservedStoreThunk>(Emplace(func_info));
+}
+
+// ==========================================================================
+// Reservation helpers. A global per-granule generation counter so
+// cross-thread stores invalidate other threads' reservations. A CAS on the
+// value alone would be ABA-vulnerable.
+// ==========================================================================
+namespace {
+
+A64BackendContext* BackendContextFromRawContext(void* raw_context) {
+  return reinterpret_cast<A64BackendContext*>(
+      reinterpret_cast<uint8_t*>(raw_context) - sizeof(A64BackendContext));
+}
+
+std::atomic<uint32_t>& ReserveGranule(ReserveHelper* reserve_helper,
+                                      uint32_t guest_address) {
+  const uint32_t granule = guest_address >> A64_RESERVE_GRANULE_SHIFT;
+  return reserve_helper->generations[granule & A64_RESERVE_ENTRY_MASK];
+}
+
+void TryAcquireReservation(void* raw_context, uint32_t guest_address) {
+  auto* bctx = BackendContextFromRawContext(raw_context);
+  // snapshot the generation first, the acquire pins the value read after
+  bctx->reserve_generation = AwaitReserveGranule(
+      ReserveGranule(bctx->reserve_helper_, guest_address));
+  bctx->reserve_address = guest_address;
+  // lwarx replaces any reservation this thread already held
+  bctx->flags |= 1u << kA64BackendHasReserveBit;
+}
+
+template <typename T>
+T ReservedLoadImpl(ppc::PPCContext* context, uint32_t address) {
+  T* host_address = context->TranslateVirtual<T*>(address);
+  TryAcquireReservation(context, address);
+  auto* bctx = BackendContextFromRawContext(context);
+  const T raw = *host_address;
+  bctx->cached_reserve_value_ = static_cast<uint64_t>(raw);
+  return xe::byte_swap(raw);
+}
+
+}  // namespace
+
+uint64_t A64Backend::AwaitReservation(void* raw_context,
+                                      uint64_t guest_address) {
+  auto* bctx = BackendContextFromRawContext(raw_context);
+  bctx->reserve_generation = AwaitReserveGranule(
+      ReserveGranule(bctx->reserve_helper_, uint32_t(guest_address)));
+  return 0;
+}
+
+uint64_t A64Backend::ReleaseFaultingReservedStore(void* data, Exception* ex) {
+  auto* backend = reinterpret_cast<A64Backend*>(data);
+  for (const auto& site : backend->reserved_store_fault_sites_) {
+    if (ex->pc() < site.first_access || ex->pc() > site.last_access) {
+      continue;
+    }
+    // x11 = the claimed granule, w17 = its odd generation
+    const HostThreadContext& context = *ex->thread_context();
+    reinterpret_cast<std::atomic<uint32_t>*>(context.x[11])
+        ->store(uint32_t(context.x[17]) + 1, std::memory_order_release);
+    return site.fail;
+  }
+  return 0;
+}
+
+uint32_t A64Backend::ReservedLoad32(ppc::PPCContext* context,
+                                    uint32_t address) {
+  return ReservedLoadImpl<uint32_t>(context, address);
+}
+
+uint64_t A64Backend::ReservedLoad64(ppc::PPCContext* context,
+                                    uint32_t address) {
+  return ReservedLoadImpl<uint64_t>(context, address);
+}
+
+bool A64Backend::ReservedStore32(ppc::PPCContext* context, uint32_t address,
+                                 uint32_t value) {
+  return reserved_store_32_thunk_(
+      address, context, xe::byte_swap(value),
+      context->TranslateVirtual<uint32_t*>(address));
+}
+
+bool A64Backend::ReservedStore64(ppc::PPCContext* context, uint32_t address,
+                                 uint64_t value) {
+  return reserved_store_64_thunk_(
+      address, context, xe::byte_swap(value),
+      context->TranslateVirtual<uint64_t*>(address));
+}
+
+
 uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
   auto guest_context = reinterpret_cast<ppc::PPCContext*>(raw_context);
   auto thread_state = guest_context->thread_state;
@@ -739,6 +1012,10 @@ A64Backend::A64Backend() {
 
 A64Backend::~A64Backend() {
   ExceptionHandler::Uninstall(&ExceptionCallbackThunk, this);
+  // gone if Memory was torn down first
+  if (auto mmio_handler = MMIOHandler::global_handler()) {
+    mmio_handler->SetReservedStoreFaultCallback(nullptr, nullptr);
+  }
   if (guest_trampoline_memory_) {
     memory::DeallocFixed(guest_trampoline_memory_,
                          kGuestTrampolineSize * MAX_GUEST_TRAMPOLINES,
@@ -799,6 +1076,14 @@ bool A64Backend::Initialize(Processor* processor) {
     synchronize_guest_and_host_stack_helper_ =
         thunk_emitter.EmitGuestAndHostSynchronizeStackHelper();
   }
+  reserved_store_32_helper_ = thunk_emitter.EmitReservedStoreHelper(
+      false, reserved_store_fault_sites_[0]);
+  reserved_store_64_helper_ = thunk_emitter.EmitReservedStoreHelper(
+      true, reserved_store_fault_sites_[1]);
+  reserved_store_32_thunk_ =
+      thunk_emitter.EmitReservedStoreThunk(reserved_store_32_helper_);
+  reserved_store_64_thunk_ =
+      thunk_emitter.EmitReservedStoreThunk(reserved_store_64_helper_);
 
   // Set the indirection table default to point at the resolve thunk.
   // Pass the full host address; the code cache truncates to the slot width where
@@ -816,6 +1101,10 @@ bool A64Backend::Initialize(Processor* processor) {
 
   // Register exception handler for MMIO access from JIT code.
   ExceptionHandler::Install(ExceptionCallbackThunk, this);
+  if (auto mmio_handler = MMIOHandler::global_handler()) {
+    mmio_handler->SetReservedStoreFaultCallback(ReleaseFaultingReservedStore,
+                                                this);
+  }
 
   return true;
 }
