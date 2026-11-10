@@ -681,6 +681,31 @@ class RenderTargetCache {
   // EDRAM memory are committed with a memory barrier.
   void PixelShaderInterlockFullEdramBarrierPlaced();
 
+  // Diagnostics: calls fn(render_target, owned_tiles) for every host render
+  // target, with the EDRAM tiles it currently owns (0 for one ClearCache would
+  // destroy).
+  template <typename Fn>
+  void ForEachRenderTargetWithOwnedTiles(Fn&& fn) const {
+    std::unordered_map<uint32_t, uint32_t> owned_tiles;
+    for (const auto& [start_tiles, range] : ownership_ranges_) {
+      uint32_t length_tiles = range.end_tiles - start_tiles;
+      for (RenderTargetKey key :
+           {range.render_target, range.depth_bits_target,
+            range.host_depth_render_target_unorm24,
+            range.host_depth_render_target_float24}) {
+        if (!key.IsEmpty()) {
+          owned_tiles[key.key] += length_tiles;
+        }
+      }
+    }
+    for (const auto& [key, render_target] : render_targets_) {
+      if (render_target) {
+        auto found = owned_tiles.find(key.key);
+        fn(render_target, found != owned_tiles.end() ? found->second : 0);
+      }
+    }
+  }
+
  private:
   const RegisterFile& register_file_;
   uint32_t draw_resolution_scale_x_;

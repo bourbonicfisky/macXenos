@@ -14,6 +14,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -924,6 +925,10 @@ bool MetalRenderTargetCache::Update(bool is_rasterization_done,
   if (!EnsureCurrentMsaaCompanions()) {
     return false;
   }
+  static const bool s_rt_census = std::getenv("XE_METAL_RT_CENSUS") != nullptr;
+  if (s_rt_census) {
+    NoteRenderTargetCensus();
+  }
   RenderTarget* const* accumulated = last_update_accumulated_render_targets();
   {
     // Diagnostic census (XE_METAL_MSAA_STENCIL_CENSUS=1): how often 2x/4x
@@ -973,6 +978,110 @@ bool MetalRenderTargetCache::Update(bool is_rasterization_done,
     }
   }
   return true;
+}
+
+void MetalRenderTargetCache::NoteRenderTargetCensus() {
+  uint64_t now_ms = uint64_t(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  RenderTarget* const* used = last_update_used_render_targets();
+  const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const uint32_t* starts = last_update_used_render_target_starts_tiles();
+  for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
+    if (!used[slot] || !lengths[slot]) {
+      continue;
+    }
+    RenderTargetCensusEntry& entry = rt_census_[used[slot]->key().key];
+    entry.last_used_ms = now_ms;
+    entry.max_end_tiles =
+        std::max(entry.max_end_tiles, starts[slot] + lengths[slot]);
+  }
+  if (!rt_census_last_report_ms_) {
+    rt_census_last_report_ms_ = now_ms;
+  } else if (now_ms - rt_census_last_report_ms_ >= 10000) {
+    rt_census_last_report_ms_ = now_ms;
+    ReportRenderTargetCensus(now_ms);
+  }
+}
+
+void MetalRenderTargetCache::ReportRenderTargetCensus(uint64_t now_ms) {
+  struct Row {
+    RenderTargetKey key;
+    uint64_t bytes;
+    uint64_t used_bytes;
+    uint32_t owned_tiles;
+    uint32_t width, height, used_height, samples;
+    // Seconds since a draw used it; UINT32_MAX if none has (transfers only).
+    uint32_t idle_s;
+  };
+  std::vector<Row> rows;
+  // Totals in bytes: all, without EDRAM ownership, not drawn to for 10 s and
+  // 60 s, never drawn to, and what the rows draws have reached would take.
+  uint64_t total = 0, unowned = 0, idle_10 = 0, idle_60 = 0, never = 0,
+           reached = 0;
+  ForEachRenderTargetWithOwnedTiles(
+      [&](RenderTarget* render_target, uint32_t owned_tiles) {
+        auto* rt = static_cast<MetalRenderTarget*>(render_target);
+        id<MTLTexture> texture = (__bridge id<MTLTexture>)rt->texture();
+        id<MTLTexture> msaa = (__bridge id<MTLTexture>)rt->msaa_texture();
+        RenderTargetKey key = rt->key();
+        Row row = {};
+        row.key = key;
+        row.bytes = uint64_t(texture.allocatedSize) +
+                    (msaa ? uint64_t(msaa.allocatedSize) : 0);
+        row.owned_tiles = owned_tiles;
+        row.width = uint32_t(texture.width);
+        row.height = uint32_t(texture.height);
+        row.samples = msaa ? rt->sample_count() : 1;
+        row.idle_s = UINT32_MAX;
+        auto found = rt_census_.find(key.key);
+        if (found != rt_census_.end()) {
+          row.idle_s = uint32_t((now_ms - found->second.last_used_ms) / 1000);
+          uint32_t x_shift, y_shift;
+          GetMsaaShifts(uint32_t(key.msaa_samples), x_shift, y_shift);
+          row.used_height = ComputeCanonicalRangeTextureHeight(
+              key.base_tiles, key.GetPitchTiles(), y_shift,
+              key.base_tiles + found->second.max_end_tiles, row.height,
+              draw_resolution_scale_y());
+        }
+        row.used_bytes =
+            row.height ? row.bytes * row.used_height / row.height : 0;
+        total += row.bytes;
+        reached += row.used_bytes;
+        if (!owned_tiles) {
+          unowned += row.bytes;
+        }
+        if (row.idle_s == UINT32_MAX) {
+          never += row.bytes;
+        } else {
+          if (row.idle_s >= 10) {
+            idle_10 += row.bytes;
+          }
+          if (row.idle_s >= 60) {
+            idle_60 += row.bytes;
+          }
+        }
+        rows.push_back(row);
+      });
+  std::sort(rows.begin(), rows.end(),
+            [](const Row& a, const Row& b) { return a.bytes > b.bytes; });
+  constexpr double kMb = 1.0 / (1024.0 * 1024.0);
+  XELOGI("MetalRtCensus {} targets {:.1f} MB | owning no EDRAM {:.1f} | not "
+         "drawn to for 10 s {:.1f}, 60 s {:.1f}, ever {:.1f} | rows draws "
+         "reached {:.1f}",
+         rows.size(), total * kMb, unowned * kMb, idle_10 * kMb, idle_60 * kMb,
+         never * kMb, reached * kMb);
+  for (size_t i = 0; i < rows.size() && i < 48; ++i) {
+    const Row& row = rows[i];
+    XELOGI("MetalRtCensus #{} {:.1f} MB {}x{} x{} reached {} rows owns {}t "
+           "idle {} | {}",
+           i, row.bytes * kMb, row.width, row.height, row.samples,
+           row.used_height, row.owned_tiles,
+           row.idle_s == UINT32_MAX ? std::string("never drawn")
+                                    : fmt::format("{} s", row.idle_s),
+           row.key.GetDebugName());
+  }
 }
 
 bool MetalRenderTargetCache::IsWindowOffsetInEdramSupported() const {

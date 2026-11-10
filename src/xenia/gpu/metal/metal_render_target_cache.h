@@ -879,6 +879,17 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   std::unordered_map<uint32_t, uint64_t> msaa_census_last_draw_;
   std::unordered_map<uint32_t, MsaaCensusPack> msaa_census_last_pack_;
   uint32_t shadow_count_ = 0;  // Cap the sampled transitions per run.
+  // XE_METAL_RT_CENSUS=1: every ten seconds, the memory each host render
+  // target holds, whether it still owns EDRAM, how long since a draw used it
+  // and how many of its rows draws have ever reached.
+  struct RenderTargetCensusEntry {
+    uint64_t last_used_ms = 0;
+    uint32_t max_end_tiles = 0;
+  };
+  std::unordered_map<uint32_t, RenderTargetCensusEntry> rt_census_;
+  uint64_t rt_census_last_report_ms_ = 0;
+  void NoteRenderTargetCensus();
+  void ReportRenderTargetCensus(uint64_t now_ms);
 
   MetalCommandProcessor& command_processor_;
   void* device_;  // id<MTLDevice>, not owned.
