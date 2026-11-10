@@ -954,10 +954,17 @@ dword_result_t NtQueryFullAttributesFile_entry(
     return X_STATUS_SUCCESS;
   }
 
-  if (cvars::io_ledger_diag) {
-    XELOGI("IoLedger ATTR '{}' -> C0000034 (no such file)", target_path);
+  // A missing directory or link before the last component is a missing path.
+  X_STATUS missing_status = X_STATUS_OBJECT_NAME_NOT_FOUND;
+  auto base_path = xe::utf8::find_base_guest_path(target_path);
+  if (!base_path.empty() &&
+      !kernel_state()->file_system()->ResolvePath(base_path)) {
+    missing_status = X_STATUS_OBJECT_PATH_NOT_FOUND;
   }
-  return X_STATUS_NO_SUCH_FILE;
+  if (cvars::io_ledger_diag) {
+    XELOGI("IoLedger ATTR '{}' -> {:08X}", target_path, missing_status);
+  }
+  return missing_status;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtQueryFullAttributesFile, kFileSystem, kImplemented);
 
