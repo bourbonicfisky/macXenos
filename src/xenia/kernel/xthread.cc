@@ -233,6 +233,10 @@ XThread::~XThread() {
 
   thread_.reset();
 
+  for (const auto& dispatch : exception_dispatches_) {
+    kernel_state()->memory()->SystemHeapFree(dispatch.records);
+  }
+
   if (thread_state_) {
     delete thread_state_;
   }

@@ -1854,6 +1854,69 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   return false;
 }
 
+void Emulator::HaltCrashedGuestThread(uint32_t pc, std::string_view fault) {
+  auto* current_thread = kernel::XThread::GetCurrentThread();
+  auto* context = current_thread->thread_state()->context();
+
+  cpu::ppc::FreezeGuestProbes();
+
+  std::string crash_msg;
+  crash_msg.append("==== CRASH DUMP ====\n");
+  crash_msg.append(fmt::format("Thread ID (Host: 0x{:08X} / Guest: 0x{:08X})\n",
+                               current_thread->thread()->system_id(),
+                               current_thread->thread_id()));
+  crash_msg.append(
+      fmt::format("Thread Handle: 0x{:08X}\n", current_thread->handle()));
+  crash_msg.append(fmt::format("PC: 0x{:08X}\n", pc));
+  crash_msg.append(fmt::format("LR: 0x{:016X}  CTR: 0x{:016X}  CR: 0x{:08X}\n",
+                               context->lr, context->ctr,
+                               static_cast<uint32_t>(context->cr())));
+  crash_msg.append(fault);
+  crash_msg.append("\n");
+  if (current_thread->is_guest_thread()) {
+    const uint32_t stack_low = current_thread->stack_limit();
+    const uint32_t stack_high = current_thread->stack_base();
+    crash_msg.append(fmt::format("Guest stack {:08X}-{:08X}, r1={:08X}:\n",
+                                 stack_low, stack_high,
+                                 uint32_t(context->r[1])));
+    const std::vector<uint32_t> return_addresses = WalkGuestBackChain(
+        memory(), uint32_t(context->r[1]), stack_low, stack_high, 48);
+    for (size_t i = 0; i < return_addresses.size(); ++i) {
+      crash_msg.append(
+          fmt::format("  #{:<5} LR {:08X}\n", i, return_addresses[i]));
+    }
+  }
+  crash_msg.append("Registers:\n");
+  for (int i = 0; i < 32; i++) {
+    crash_msg.append(fmt::format(" r{:<3} = {:016X}\n", i, context->r[i]));
+  }
+  XELOGE("{}", crash_msg);
+
+  // As for a host fault in guest code (ExceptionCallback): pause the other
+  // guest threads, say where they stood and tell the user.
+  Pause();
+  XELOGE("Emulator paused after the guest crash.");
+  LogGuestThreadStates("guest crash");
+  xe::FlushLog();
+
+  std::string crash_dlg = fmt::format(
+      "The guest has crashed.\n\n"
+      "Xenia has now paused itself.\n\n"
+      "{}",
+      crash_msg);
+  if (display_window_ && imgui_drawer_) {
+    display_window_->app_context().CallInUIThreadSynchronous([this,
+                                                              &crash_dlg]() {
+      xe::ui::ImGuiDialog::ShowMessageBox(imgui_drawer_, "Uh-oh!", crash_dlg);
+    });
+  }
+
+  current_thread->Suspend(nullptr);
+  while (true) {
+    xe::threading::NanoSleep(int64_t(1'000'000'000));
+  }
+}
+
 void Emulator::WaitUntilExit() {
   while (true) {
     if (main_thread_) {

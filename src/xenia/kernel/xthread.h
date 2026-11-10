@@ -551,6 +551,21 @@ class XThread : public XObject, public cpu::Thread {
   static object_ref<XThread> Restore(KernelState* kernel_state,
                                      ByteStream* stream);
 
+  // A guest exception dispatch whose handler is running. One whose handler
+  // continued the thread elsewhere instead of returning stays here until the
+  // next dispatch on the thread finds it gone.
+  struct ExceptionDispatch {
+    // Where the handlers run, below the trap frame, and return to, which
+    // unwinding a handler's frame leads to.
+    uint32_t handler_sp;
+    uint32_t handler_return;
+    // Its CONTEXT, EXCEPTION_RECORD and DISPATCHER_CONTEXT in the system heap.
+    uint32_t records;
+  };
+  std::vector<ExceptionDispatch>& exception_dispatches() {
+    return exception_dispatches_;
+  }
+
   // Internal - do not use.
   void AcquireMutantOnStartup(object_ref<XMutant> mutant) {
     pending_mutant_acquires_.push_back(mutant);
@@ -573,6 +588,7 @@ class XThread : public XObject, public cpu::Thread {
   CreationParams creation_params_ = {0};
 
   std::vector<object_ref<XMutant>> pending_mutant_acquires_;
+  std::vector<ExceptionDispatch> exception_dispatches_;
 
   uint32_t thread_id_ = 0;
   uint32_t tls_static_address_ = 0;

@@ -896,8 +896,11 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
     }
   }
 
-  auto fn = thread_state->processor()->ResolveFunction(
-      static_cast<uint32_t>(target_address));
+  // Where there is no code the call faults on the instruction fetch, which
+  // the guest's exception handlers can continue elsewhere.
+  uint32_t address = static_cast<uint32_t>(target_address);
+  auto fn =
+      thread_state->processor()->ResolveCallTarget(guest_context, &address);
   if (!fn) {
     // Unresolvable — return 0, and the thunk traps (brk 0xF000). Name the
     // address and thread first: the crash reporter cannot walk JIT frames, so

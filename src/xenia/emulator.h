@@ -314,6 +314,11 @@ class Emulator {
 
   void WaitUntilExit();
 
+  // Reports a crash of the calling guest thread at pc, which fault describes,
+  // and halts it. For a fault the guest's handlers didn't take, outside the
+  // host exception handler.
+  [[noreturn]] void HaltCrashedGuestThread(uint32_t pc, std::string_view fault);
+
  public:
   xe::Delegate<uint32_t, const std::string_view> on_launch;
   xe::Delegate<bool> on_shader_storage_initialization;

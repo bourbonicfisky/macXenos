@@ -20,6 +20,22 @@ namespace xboxkrnl {
 
 xe::cpu::Export* RegisterExport_xboxkrnl(xe::cpu::Export* export_entry);
 
+// Delivers a guest call to an address with no code to the guest's frame-based
+// exception handlers, as the console's kernel does for the instruction fetch
+// fault the call raises there. Returns the address a handler continued at, with
+// the context loaded from its CONTEXT record, and halts the thread as crashed
+// if none did.
+uint32_t DispatchCodeFetchFault(xe::cpu::ppc::PPCContext* context,
+                                uint32_t address);
+
+// Delivers a guest load or store at |pc| that faulted on |address| to the
+// guest's frame-based exception handlers, as the console's kernel dispatches
+// the access violation of a storage fault. Returns the address a handler
+// continued at, with the context loaded from its CONTEXT record, or 0 if none
+// did.
+uint32_t DispatchDataFault(xe::cpu::ppc::PPCContext* context, uint32_t pc,
+                           bool is_store, uint32_t address);
+
 // --io_ledger_diag (default off): async-I/O completion ledger for the DOA5
 // load-stall hunt. Implemented in xboxkrnl_io.cc; called from the APC delivery
 // loop (xeProcessUserApcs) and the spin detector (DelayPollDiagProbe). Revert

@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_PROCESSOR_H_
 #define XENIA_CPU_PROCESSOR_H_
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
@@ -118,6 +119,28 @@ class Processor {
   Module* LookupModule(uint32_t address);
   Function* LookupFunction(Module* module, uint32_t address);
   Function* ResolveFunction(uint32_t address);
+
+  // Runs for a guest call to |address| where there is no code, on the calling
+  // thread with the guest context as it was at the call. Returns the address
+  // a handler continued at, or 0 if none took the fault.
+  using CodeFaultHook = uint32_t (*)(ppc::PPCContext* context,
+                                     uint32_t address);
+  CodeFaultHook code_fault_hook() const { return code_fault_hook_.load(); }
+  void set_code_fault_hook(CodeFaultHook hook) { code_fault_hook_.store(hook); }
+
+  // Runs for a guest load or store at |pc| that faults on |address|, on the
+  // faulting thread with the guest context as it was at the access. Returns
+  // the address a handler continued at, or 0 if none took the fault.
+  using DataFaultHook = uint32_t (*)(ppc::PPCContext* context, uint32_t pc,
+                                     bool is_store, uint32_t address);
+  DataFaultHook data_fault_hook() const { return data_fault_hook_.load(); }
+  void set_data_fault_hook(DataFaultHook hook) { data_fault_hook_.store(hook); }
+
+  // Resolves the guest function a call to |*address| runs. Where there is no
+  // code the call faults on the instruction fetch, which the guest's handlers
+  // can continue elsewhere: |*address| is then where they continued. Returns
+  // nullptr if nothing took the fault.
+  Function* ResolveCallTarget(ppc::PPCContext* context, uint32_t* address);
 
   bool Execute(ThreadState* thread_state, uint32_t address);
   bool ExecuteRaw(ThreadState* thread_state, uint32_t address);
@@ -277,6 +300,9 @@ class Processor {
   ExecutionState execution_state_ = ExecutionState::kPaused;
   std::vector<std::unique_ptr<Module>> modules_;
   Module* builtin_module_ = nullptr;
+
+  std::atomic<CodeFaultHook> code_fault_hook_{nullptr};
+  std::atomic<DataFaultHook> data_fault_hook_{nullptr};
   uint32_t next_builtin_address_ = 0xFFFF0000u;
 
   // Maps thread ID to state. Updated on thread create, and threads are never

@@ -672,9 +672,15 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
       }
     }
   }
-  auto fn = thread_state->processor()->ResolveFunction(
-      static_cast<uint32_t>(target_address));
-  assert_not_null(fn);
+  // Where there is no code the call faults on the instruction fetch, which
+  // the guest's exception handlers can continue elsewhere.
+  uint32_t address = static_cast<uint32_t>(target_address);
+  auto fn =
+      thread_state->processor()->ResolveCallTarget(guest_context, &address);
+  if (!fn) {
+    XELOGE("No guest code at {:08X} for a call", address);
+    return 0;
+  }
   auto x64_fn = static_cast<X64Function*>(fn);
   uint64_t addr = reinterpret_cast<uint64_t>(x64_fn->machine_code());
 

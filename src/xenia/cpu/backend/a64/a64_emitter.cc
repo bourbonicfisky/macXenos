@@ -464,12 +464,39 @@ void A64Emitter::CallIndirect(const hir::Instr* instr, int reg_index) {
     // IMPORTANT: keep the guest address in x16 for the resolve-thunk default
     // path (it reads x16 as the guest address); compute the slot in x17.
     mov(w16, target_w);  // x16 = guest address (also used by the resolve thunk)
+    // A target the table doesn't cover, or one in it that no module's code
+    // range committed (the slot reads zero), goes to the resolve thunk, where
+    // the call faults on the instruction fetch for the guest's handlers.
+    // Returns, the most common sites, aren't checked.
+    Label* slot_ready = nullptr;
+    Label* uncovered = nullptr;
+    if (!(instr->flags & hir::CALL_POSSIBLE_RETURN)) {
+      // The table covers the addresses whose top three bits are 100.
+      slot_ready = &NewCachedLabel();
+      const uint64_t resolve_thunk =
+          reinterpret_cast<uint64_t>(backend()->resolve_function_thunk());
+      // Bound in the tail code; the tail's own label isn't kept, since another
+      // tail entry would move it.
+      uncovered = &NewCachedLabel();
+      AddToTail([slot_ready, uncovered, resolve_thunk](A64Emitter& e, Label&) {
+        e.L(*uncovered);
+        e.mov(e.x9, resolve_thunk);
+        e.b(*slot_ready);
+      });
+      eor(w14, w16, 0x80000000);
+      tst(w14, 0xE0000000);
+      BranchIf(NE, *uncovered);
+    }
     const uint64_t radj =
         reinterpret_cast<uint64_t>(code_cache_->indirection_table_base()) -
         (0x80000000ull << 1);
     mov(x17, radj);
     add(x17, x17, target_w, UXTW, 1);  // x17 = radj + (zext(G) << 1) = slot addr
     ldr(x9, ptr(x17, static_cast<uint32_t>(0)));  // x9 = full host code address
+    if (slot_ready) {
+      BranchIfZero(x9, *uncovered);
+      L(*slot_ready);
+    }
 #else
     mov(w16, target_w);  // w16 = guest address (also used by resolve thunk)
     ldr(w9, ptr(x16, static_cast<uint32_t>(

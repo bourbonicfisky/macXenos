@@ -478,8 +478,11 @@ inline void AppendParam(StringBuffer* string_buffer,
 }
 inline void AppendParam(StringBuffer* string_buffer,
                         pointer_t<X_EXCEPTION_RECORD> record) {
-  string_buffer->AppendFormat("{:08X}({:08X})", record.guest_address(),
-                              uint32_t(record->code));
+  // RtlUnwind takes no record for an unwind that isn't for an exception.
+  string_buffer->AppendFormat("{:08X}", record.guest_address());
+  if (record) {
+    string_buffer->AppendFormat("({:08X})", uint32_t(record->code));
+  }
 }
 template <typename T>
 void AppendParam(StringBuffer* string_buffer, pointer_t<T> param) {
