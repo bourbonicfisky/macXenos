@@ -9,10 +9,16 @@
 
 #include "xenia/cpu/backend/a64/a64_sequences.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
+#include "xenia/base/platform.h"
+#include "xenia/base/threading.h"
 #include "xenia/cpu/backend/a64/a64_backend.h"
 #include "xenia/cpu/backend/a64/a64_emitter.h"
 #include "xenia/cpu/backend/a64/a64_op.h"
@@ -22,6 +28,32 @@
 #include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/xex_module.h"
+
+#if XE_PLATFORM_MAC
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_switch.h>
+#else
+#include <thread>
+#endif
+
+DEFINE_int32(
+    a64_delay_backoff_us, 0,
+    "Guest spin-wait backoff. The guest's pause instruction (db16cyc) marks "
+    "its spin loops: the Direct3D fence wait runs 32 of them between two "
+    "reads of the fence. Once a guest thread has paused without a break for "
+    "this many microseconds, every further 32 pauses give the core to any "
+    "other runnable thread (a priority-depressing switch on macOS, a yield "
+    "elsewhere) and continue at once when none is waiting. 0 = off: a pause "
+    "is the host's yield instruction and nothing else.",
+    "a64");
+DEFINE_int32(
+    a64_delay_backoff_sleep_us, 0,
+    "With a64_delay_backoff_us: sleep this many microseconds per 32 pauses "
+    "instead of offering the core, so a long guest spin stops using a core "
+    "even when the host has idle ones. The guest then sees what it waits for "
+    "up to this much later. 0 = offer the core only.",
+    "a64");
 
 DECLARE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses);
 DECLARE_bool(emit_inline_mmio_checks);
@@ -53,9 +85,151 @@ static bool IsPossibleMMIOInstruction(A64Emitter& e, const hir::Instr* i) {
 // ============================================================================
 // OPCODE_DELAY_EXECUTION
 // ============================================================================
+// XE_A64_DELAY_CENSUS=1 measures the guest's pause-marked spinning without
+// changing it: how much thread time goes to continuous pause runs, by run
+// length, logged every five seconds. A run's time includes its backoffs, so
+// with the sleeping backoff the cores still spinning are spin minus backoff.
+static bool DelayCensusEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_A64_DELAY_CENSUS");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return s_enabled;
+}
+
+// Pauses between two calls of DelayExecutionSlow. One pass of the Direct3D
+// fence wait is 32 pauses.
+static constexpr uint32_t kDelayBatch = 32;
+// Two batches further apart than this belong to different spins.
+static constexpr uint64_t kDelayRunGapNs = 50 * 1000;
+
+// Finished spin runs by duration: under 100 us, 1 ms, 4 ms, 16 ms, and longer.
+static constexpr size_t kDelayCensusBins = 5;
+static std::atomic<uint64_t> delay_census_runs_[kDelayCensusBins];
+static std::atomic<uint64_t> delay_census_run_ns_[kDelayCensusBins];
+static std::atomic<uint64_t> delay_census_batches_;
+static std::atomic<uint64_t> delay_census_backoffs_;
+static std::atomic<uint64_t> delay_census_backoff_ns_;
+static std::atomic<uint64_t> delay_census_next_log_ns_;
+static std::atomic<uint64_t> delay_census_last_log_ns_;
+
+static uint64_t DelayNowNs() {
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+}
+
+static void DelayCensusLog(uint64_t now_ns) {
+  uint64_t next = delay_census_next_log_ns_.load(std::memory_order_relaxed);
+  if (now_ns < next || !delay_census_next_log_ns_.compare_exchange_strong(
+                           next, now_ns + 5'000'000'000ull,
+                           std::memory_order_relaxed)) {
+    return;
+  }
+  uint64_t last =
+      delay_census_last_log_ns_.exchange(now_ns, std::memory_order_relaxed);
+  if (!last) {
+    return;
+  }
+  uint64_t runs[kDelayCensusBins], run_ns[kDelayCensusBins], total_ns = 0;
+  for (size_t i = 0; i < kDelayCensusBins; ++i) {
+    runs[i] = delay_census_runs_[i].exchange(0, std::memory_order_relaxed);
+    run_ns[i] = delay_census_run_ns_[i].exchange(0, std::memory_order_relaxed);
+    total_ns += run_ns[i];
+  }
+  double wall_ms = double(now_ns - last) / 1e6;
+  XELOGI(
+      "A64DelayCensus wall={:.0f}ms batches={} spin={:.0f}ms ({:.2f} cores) "
+      "runs/ms by length <100us={}/{:.0f} <1ms={}/{:.0f} <4ms={}/{:.0f} "
+      "<16ms={}/{:.0f} longer={}/{:.0f} backoffs={} backoff={:.0f}ms",
+      wall_ms, delay_census_batches_.exchange(0, std::memory_order_relaxed),
+      double(total_ns) / 1e6, double(total_ns) / 1e6 / wall_ms, runs[0],
+      double(run_ns[0]) / 1e6, runs[1], double(run_ns[1]) / 1e6, runs[2],
+      double(run_ns[2]) / 1e6, runs[3], double(run_ns[3]) / 1e6, runs[4],
+      double(run_ns[4]) / 1e6,
+      delay_census_backoffs_.exchange(0, std::memory_order_relaxed),
+      double(delay_census_backoff_ns_.exchange(0, std::memory_order_relaxed)) /
+          1e6);
+}
+
+// Every kDelayBatch pauses of a guest thread. x0 = PPCContext*.
+static void DelayExecutionSlow(void* raw_context) {
+  auto* bctx = reinterpret_cast<A64BackendContext*>(
+      reinterpret_cast<intptr_t>(raw_context) - sizeof(A64BackendContext));
+  const bool census = DelayCensusEnabled();
+  uint64_t now_ns = DelayNowNs();
+  if (now_ns - bctx->delay_last_ns > kDelayRunGapNs) {
+    if (census && bctx->delay_last_ns) {
+      uint64_t run_ns = bctx->delay_last_ns - bctx->delay_run_start_ns;
+      size_t bin = run_ns < 100'000      ? 0
+                   : run_ns < 1'000'000  ? 1
+                   : run_ns < 4'000'000  ? 2
+                   : run_ns < 16'000'000 ? 3
+                                         : 4;
+      delay_census_runs_[bin].fetch_add(1, std::memory_order_relaxed);
+      delay_census_run_ns_[bin].fetch_add(run_ns, std::memory_order_relaxed);
+    }
+    bctx->delay_run_start_ns = now_ns;
+  }
+  const int64_t backoff_us = cvars::a64_delay_backoff_us;
+  if (backoff_us > 0 &&
+      now_ns - bctx->delay_run_start_ns >= uint64_t(backoff_us) * 1000) {
+    const int64_t sleep_us = cvars::a64_delay_backoff_sleep_us;
+#if XE_PLATFORM_MAC
+    if (sleep_us > 0) {
+      static const mach_timebase_info_data_t s_timebase = [] {
+        mach_timebase_info_data_t info;
+        mach_timebase_info(&info);
+        return info;
+      }();
+      mach_wait_until(mach_absolute_time() + uint64_t(sleep_us) * 1000 *
+                                                 s_timebase.denom /
+                                                 s_timebase.numer);
+    } else {
+      // As the Sleep(0) backoff in XThread::Delay: any runnable thread gets
+      // the core, and with none waiting the spinner continues immediately.
+      thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+    }
+#else
+    if (sleep_us > 0) {
+      std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+    } else {
+      xe::threading::MaybeYield();
+    }
+#endif
+    uint64_t after_ns = DelayNowNs();
+    if (census) {
+      delay_census_backoffs_.fetch_add(1, std::memory_order_relaxed);
+      delay_census_backoff_ns_.fetch_add(after_ns - now_ns,
+                                         std::memory_order_relaxed);
+    }
+    now_ns = after_ns;
+  }
+  bctx->delay_last_ns = now_ns;
+  if (census) {
+    delay_census_batches_.fetch_add(1, std::memory_order_relaxed);
+    DelayCensusLog(now_ns);
+  }
+}
+
 struct DELAY_EXECUTION
     : Sequence<DELAY_EXECUTION, I<OPCODE_DELAY_EXECUTION, VoidOp>> {
-  static void Emit(A64Emitter& e, const EmitArgType& i) { e.yield(); }
+  static void Emit(A64Emitter& e, const EmitArgType& i) {
+    e.yield();
+    if (cvars::a64_delay_backoff_us <= 0 && !DelayCensusEnabled()) {
+      return;
+    }
+    const uint32_t count_offset =
+        static_cast<uint32_t>(offsetof(A64BackendContext, delay_count));
+    auto& done = e.NewCachedLabel();
+    e.ldr(e.w17, ptr(e.GetBackendCtxReg(), count_offset));
+    e.add(e.w17, e.w17, 1);
+    e.str(e.w17, ptr(e.GetBackendCtxReg(), count_offset));
+    e.and_(e.w17, e.w17, kDelayBatch - 1);
+    e.cbnz(e.w17, done);
+    e.CallNativeSafe(reinterpret_cast<void*>(DelayExecutionSlow));
+    e.L(done);
+  }
 };
 EMITTER_OPCODE_TABLE(OPCODE_DELAY_EXECUTION, DELAY_EXECUTION);
 

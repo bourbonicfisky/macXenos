@@ -105,6 +105,13 @@ struct A64BackendContext {
   // a live frame: the stackpoint depth that frame restores (its index + 1).
   // The stack synchronization check after each guest call consumes it.
   unsigned int pending_stackpoint_sync_depth;
+  // Guest pause instructions (OPCODE_DELAY_EXECUTION) this thread has run,
+  // and the continuous spin they belong to: when the previous batch ended and
+  // when the run started, in steady-clock nanoseconds. Maintained only when
+  // the pause backoff or its census is on.
+  unsigned int delay_count;
+  uint64_t delay_last_ns;
+  uint64_t delay_run_start_ns;
 };
 
 // Default FPCR for FPU mode (round to nearest, no flush to zero).
