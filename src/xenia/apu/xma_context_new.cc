@@ -52,7 +52,6 @@ int XmaContextNew::Setup(uint32_t id, Memory* memory, uint32_t guest_ptr) {
   // Allocate ffmpeg stuff:
   av_packet_ = av_packet_alloc();
   assert_not_null(av_packet_);
-  av_packet_->buf = av_buffer_alloc(128 * 1024);
 
   // find the XMA2 audio decoder
   av_codec_ = avcodec_find_decoder(AV_CODEC_ID_XMAFRAMES);
@@ -61,15 +60,10 @@ int XmaContextNew::Setup(uint32_t id, Memory* memory, uint32_t guest_ptr) {
     return 1;
   }
 
-  av_context_ = avcodec_alloc_context3(av_codec_);
-  if (!av_context_) {
-    XELOGE("XmaContext {}: Couldn't allocate context", id);
-    return 1;
-  }
-
-  // Initialize these to 0. They'll actually be set later.
-  av_context_->ch_layout = AVChannelLayout{};
-  av_context_->sample_rate = 0;
+  // The codec context and the packet buffer are allocated by PrepareDecoder
+  // on the first frame this context decodes. The decoder owns 320 contexts
+  // and a title uses a few of them; the codec's private data alone is 464 KB
+  // of zeroed memory per context (145 MB for the set).
 
   av_frame_ = av_frame_alloc();
   if (!av_frame_) {
@@ -916,15 +910,24 @@ int XmaContextNew::PrepareDecoder(int sample_rate, bool is_two_channel) {
 
   // Re-initialize the context with new sample rate and channels.
   uint32_t channels = is_two_channel ? 2 : 1;
-  if (av_context_->sample_rate != sample_rate ||
+  if (!av_packet_->buf) {
+    av_packet_->buf = av_buffer_alloc(128 * 1024);
+  }
+  if (!av_context_ || av_context_->sample_rate != sample_rate ||
       av_context_->ch_layout.nb_channels != (int)channels) {
     XELOGAPU("XmaContext {}: Codec reinit: rate {} -> {}, channels {} -> {}",
-             id(), av_context_->sample_rate, sample_rate,
-             av_context_->ch_layout.nb_channels, channels);
+             id(), av_context_ ? av_context_->sample_rate : 0, sample_rate,
+             av_context_ ? av_context_->ch_layout.nb_channels : 0, channels);
     // We have to recreate the codec context so it'll realloc whatever data it
     // needs.
-    avcodec_free_context(&av_context_);
+    if (av_context_) {
+      avcodec_free_context(&av_context_);
+    }
     av_context_ = avcodec_alloc_context3(av_codec_);
+    if (!av_context_) {
+      XELOGE("XmaContext {}: Couldn't allocate context", id());
+      return -1;
+    }
 
     av_context_->sample_rate = sample_rate;
     av_channel_layout_default(&av_context_->ch_layout, channels);
@@ -953,6 +956,10 @@ void XmaContextNew::PreparePacket(const uint32_t frame_size,
 
 bool XmaContextNew::DecodePacket(AVCodecContext* av_context,
                                  const AVPacket* av_packet, AVFrame* av_frame) {
+  if (!av_context) {
+    // PrepareDecoder could not allocate or open the codec.
+    return false;
+  }
   auto ret = avcodec_send_packet(av_context, av_packet);
   if (ret < 0) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE];
