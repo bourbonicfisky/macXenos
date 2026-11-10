@@ -2,6 +2,7 @@
 # Parallels ui/vulkan: vends the GraphicsProvider + Presenter + ImmediateDrawer
 # the Metal graphics backend presents through.
 add_library(xenia-ui-metal STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/metal_alloc_census.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_immediate_drawer.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_presenter.mm
   ${CMAKE_CURRENT_SOURCE_DIR}/metal_provider.mm

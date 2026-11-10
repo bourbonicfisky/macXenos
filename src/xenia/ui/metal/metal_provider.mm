@@ -15,6 +15,7 @@
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/ui/metal/metal_alloc_census.h"
 #include "xenia/ui/metal/metal_immediate_drawer.h"
 #include "xenia/ui/metal/metal_presenter.h"
 
@@ -56,6 +57,7 @@ void* MetalProvider::SelectedDevice() {
              "the system default",
              want);
     }
+    MetalAllocCensusInstall((__bridge void*)chosen);
     return chosen;
   }();
   return (__bridge void*)s_device;
