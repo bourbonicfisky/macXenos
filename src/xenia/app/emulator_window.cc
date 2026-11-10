@@ -1298,8 +1298,7 @@ void EmulatorWindow::ExportScreenshot(const xe::ui::RawImage& image,
     return;
   }
 
-  // Find where xenia.exe or xenia_canary.exe is located and create a
-  // screenshots folder
+  // Create a screenshots folder beside the executable unless one is set.
   auto screenshot_path =
       (cvars::screenshot_path.empty()
            ? xe::filesystem::GetExecutableFolder() / "screenshots"

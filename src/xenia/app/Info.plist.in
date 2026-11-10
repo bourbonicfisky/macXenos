@@ -11,7 +11,7 @@
 	<key>CFBundleIdentifier</key>
 	<string>com.greggant.macxenos</string>
 	<key>CFBundleExecutable</key>
-	<string>xenia_canary</string>
+	<string>macXenos</string>
 	<key>CFBundleIconFile</key>
 	<string>xenia.icns</string>
 	<key>CFBundlePackageType</key>

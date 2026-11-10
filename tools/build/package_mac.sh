@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # package_mac.sh - Assemble a distributable, Developer-ID-signed macOS app bundle
-# (macXenos.app) and a .dmg from an already-built bare xenia_canary binary.
+# (macXenos.app) and a .dmg from an already-built bare macXenos binary.
 #
 # This is a release-time step; it does NOT change the dev build. The bare binary
 # produced by `cmake --build` keeps working as-is. See
@@ -13,7 +13,7 @@
 #                              [--feed-url <url>] [--no-sparkle]
 #
 #   --config       Build config to package (default: Release).
-#   --version      CFBundleShortVersionString (default: 1.0-canary), e.g. 1.0-rc1.
+#   --version      CFBundleShortVersionString (default: 1.0-dev), e.g. 1.0-rc1.
 #                  CFBundleVersion is the built commit's count (git rev-list
 #                  --count): Sparkle orders releases by it, so it only grows.
 #   --feed-url     The Sparkle appcast the app checks for updates (default:
@@ -24,7 +24,7 @@
 #                  APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID from .env.
 #   --adhoc        Sign ad-hoc instead of Developer ID (no .env identity required).
 #   --x86_64 <bin> Build a Universal 2 bundle: lipo the natively-built slice in
-#                  build/bin/... together with this prebuilt x86_64 xenia_canary.
+#                  build/bin/... together with this prebuilt x86_64 macXenos.
 #                  (The x86_64 slice must be built on/for an Intel toolchain — it
 #                  cannot be produced from an arm64-only Homebrew install.)
 #   --x86_64-libs <prefix>
@@ -67,7 +67,7 @@ UNIVERSAL=0
 [[ -n "${X86_BIN}" ]] && UNIVERSAL=1
 
 APP_NAME="macXenos"
-BUNDLE_EXEC="xenia_canary"
+BUNDLE_EXEC="macXenos"
 BIN_DIR="${REPO_ROOT}/build/bin/macOS/${CONFIG}"
 BIN_PATH="${BIN_DIR}/${BUNDLE_EXEC}"
 VERSION_H="${REPO_ROOT}/build/version.h"
@@ -99,7 +99,7 @@ get_define() { sed -n "s/^#define $1 \"\\(.*\\)\"/\\1/p" "${VERSION_H}" 2>/dev/n
 COMMIT_SHORT="$(get_define XE_BUILD_COMMIT_SHORT)"; COMMIT_SHORT="${COMMIT_SHORT:-unknown}"
 BRANCH="$(get_define XE_BUILD_BRANCH)"; BRANCH="${BRANCH:-unknown}"
 COMMIT_FULL="$(get_define XE_BUILD_COMMIT)"
-SHORT_VERSION="${SHORT_VERSION_OVERRIDE:-1.0-canary}"
+SHORT_VERSION="${SHORT_VERSION_OVERRIDE:-1.0-dev}"
 # Sparkle compares CFBundleVersion to decide what is newer, so it must grow
 # with every release: the built commit's position in history. (It was the
 # short hash, which has no order.)
@@ -286,7 +286,7 @@ JSON
 MVK_VER="$(basename "$(dirname "$(dirname "${MVK_SRC}")")")"
 VKL_VER="$(basename "${VK_LOADER_SRC}" .dylib)"; VKL_VER="${VKL_VER#libvulkan.}"
 cat > "${CONTENTS}/Resources/VERSIONS.txt" <<EOF
-macXenos (unofficial macOS port) — Xenia Canary ${SHORT_VERSION} (${BRANCH} ${COMMIT_SHORT})
+macXenos ${SHORT_VERSION} (${BRANCH} ${COMMIT_SHORT})
 Bundled MoltenVK : ${MVK_SRC} (${MVK_VER})
 Bundled loader   : ${VK_LOADER_SRC} (${VKL_VER})
 EOF

@@ -14,7 +14,7 @@ usage:
 --strict          A license file that can't be read is an error (packaging).
                   Without it, such a component is left out with a warning
                   (development builds may lack Sparkle or Homebrew's copies).
---link-ninja      The CMake impl-<config>.ninja holding xenia_canary's link
+--link-ninja      The CMake impl-<config>.ninja holding macXenos's link
                   line: every third-party static library or dylib it links
                   must be named by some entry's "libs", or this fails.
 --bundled         Further shipped binaries to check the same way
@@ -56,11 +56,11 @@ def read_source(spec, args):
 
 
 def linked_third_party(ninja_path):
-    """Third-party libraries on xenia_canary's link line."""
+    """Third-party libraries on macXenos's link line."""
     with open(ninja_path, encoding="utf-8", errors="replace") as f:
         lines = f.read().splitlines()
     for i, line in enumerate(lines):
-        if re.match(r"^build \S*/xenia_canary(\.\S+)?:", line):
+        if re.match(r"^build \S*/macXenos(\.\S+)?:", line):
             for follow in lines[i + 1:i + 40]:
                 if "LINK_LIBRARIES" in follow:
                     names = set()
@@ -69,7 +69,7 @@ def linked_third_party(ninja_path):
                         if base.endswith((".a", ".dylib")) and not base.startswith("libxenia-"):
                             names.add(base)
                     return names
-    raise RuntimeError("no xenia_canary link line in " + ninja_path)
+    raise RuntimeError("no macXenos link line in " + ninja_path)
 
 
 def main():

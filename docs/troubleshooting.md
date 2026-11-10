@@ -58,7 +58,7 @@ to **Controller > Dashboard shortcut** and choose **Back + Start**.
 
 ## Starting over with default settings
 
-Quit macXenos and delete (or rename) `xenia-canary.config.toml` in
+Quit macXenos and delete (or rename) `macXenos.config.toml` in
 `~/Library/Application Support/macXenos`. macXenos writes a fresh one with
 the default settings the next time it starts. Your profiles are kept
 elsewhere in the same folder and your saves in `~/Documents/macXenos/Saves`;

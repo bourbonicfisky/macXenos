@@ -1,8 +1,8 @@
-# src/xenia/app/CMakeLists.txt - Main xenia_canary executable.
+# src/xenia/app/CMakeLists.txt - Main macXenos executable.
 
 add_executable(xenia-app)
 
-set_target_properties(xenia-app PROPERTIES OUTPUT_NAME "xenia_canary")
+set_target_properties(xenia-app PROPERTIES OUTPUT_NAME "macXenos")
 
 # Main source
 target_sources(xenia-app PRIVATE
@@ -142,7 +142,7 @@ if(APPLE)
     COMMAND codesign -s - --entitlements
             ${CMAKE_CURRENT_SOURCE_DIR}/xenia.entitlements --force
             $<TARGET_FILE:xenia-app>
-    COMMENT "Ad-hoc signing xenia_canary with JIT entitlements"
+    COMMENT "Ad-hoc signing macXenos with JIT entitlements"
   )
 endif()
 

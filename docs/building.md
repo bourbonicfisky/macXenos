@@ -50,12 +50,10 @@ cmake --preset default -DXENIA_GPU_METAL=ON
 python3 tools/build/generate_version_header.py --source-root . --output build/version.h
 
 # Build the emulator.
-cmake --build build --config Release --target xenia_canary
+cmake --build build --config Release --target macXenos
 ```
 
-The program is written to `build/bin/macOS/Release/xenia_canary`. The
-executable keeps its upstream name; only the packaged app is called
-macXenos.
+The program is written to `build/bin/macOS/Release/macXenos`.
 
 The first build takes a while because it also builds `dxilconv`, the
 library that converts Xbox 360 shaders into a form Apple's Metal Shader
@@ -81,13 +79,13 @@ after each build:
 ```sh
 codesign --force --sign - \
   --entitlements src/xenia/app/xenia.entitlements \
-  build/bin/macOS/Release/xenia_canary
+  build/bin/macOS/Release/macXenos
 ```
 
 Then start it, optionally with a game:
 
 ```sh
-build/bin/macOS/Release/xenia_canary "/path/to/game.iso"
+build/bin/macOS/Release/macXenos "/path/to/game.iso"
 ```
 
 A bare binary writes its log next to itself. The packaged app writes it to
@@ -121,7 +119,7 @@ cmake -S . -B build-x86_64 -G "Ninja Multi-Config" \
   -DCMAKE_SYSTEM_NAME=Darwin -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
   -DCMAKE_OSX_ARCHITECTURES=x86_64 -DXENIA_GPU_METAL=ON
 cp build/version.h build-x86_64/version.h
-cmake --build build-x86_64 --config Release --target xenia_canary
+cmake --build build-x86_64 --config Release --target macXenos
 ```
 
 The configure output should say `XE_TARGET_X86_64=TRUE`. Then package both
@@ -130,7 +128,7 @@ copies of `libMoltenVK.dylib` and `libvulkan.1.dylib`:
 
 ```sh
 tools/build/package_mac.sh \
-  --x86_64 build-x86_64/bin/macOS/Release/xenia_canary \
+  --x86_64 build-x86_64/bin/macOS/Release/macXenos \
   --x86_64-libs <folder with x86_64 Vulkan libraries>
 ```
 

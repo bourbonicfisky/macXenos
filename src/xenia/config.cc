@@ -31,7 +31,9 @@ DEFINE_uint32(
     "Config");
 
 namespace config {
-std::string config_name = "xenia-canary.config.toml";
+std::string config_name = "macXenos.config.toml";
+// The name the config had before macXenos renamed it, adopted on first launch.
+constexpr std::string_view kLegacyConfigName = "xenia-canary.config.toml";
 std::filesystem::path config_folder;
 std::filesystem::path config_path;
 std::string game_config_suffix = ".config.toml";
@@ -306,6 +308,20 @@ void SetupConfig(const std::filesystem::path& config_folder) {
   // let's also load the default config
   if (!config_folder.empty()) {
     config_path = config_folder / config_name;
+    const auto legacy_path = config_folder / kLegacyConfigName;
+    if (!std::filesystem::exists(config_path) &&
+        std::filesystem::exists(legacy_path)) {
+      std::error_code ec;
+      std::filesystem::rename(legacy_path, config_path, ec);
+      if (ec) {
+        // Read the old file in place; SaveConfig below writes the new name.
+        XELOGW("Failed to rename '{}' to '{}': {}", legacy_path, config_path,
+               ec.message());
+        ReadConfig(legacy_path, true);
+      } else {
+        XELOGI("Renamed '{}' to '{}'", legacy_path, config_path);
+      }
+    }
     if (std::filesystem::exists(config_path)) {
       ReadConfig(config_path, true);
     }

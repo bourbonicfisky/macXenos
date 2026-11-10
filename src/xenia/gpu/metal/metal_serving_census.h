@@ -36,7 +36,7 @@ namespace metal {
 // GPU-side and never read RAM for it, yet the declaration still registered a
 // resolve range, which can cost a full consumer boundary (commit + wait).
 //
-// Counters are process-lifetime and dumped PERIODICALLY: xenia_canary ignores
+// Counters are process-lifetime and dumped PERIODICALLY: macXenos ignores
 // SIGTERM and is killed, so no shutdown emission would ever run.
 struct ServingCensus {
   static std::atomic<uint64_t>& Bucket(ResolvedFetchService service,

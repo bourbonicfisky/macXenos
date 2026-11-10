@@ -154,7 +154,7 @@ it.
 
 Inside it:
 
-- `xenia-canary.config.toml` is the main settings file. The dashboard writes
+- `macXenos.config.toml` is the main settings file. The dashboard writes
   to it for you. You only need to open it for the rare setting that isn't on
   a blade.
 - `config/<title ID>.config.toml` holds settings for a single game, if you

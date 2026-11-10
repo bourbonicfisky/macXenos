@@ -102,7 +102,7 @@ bool MetalPipelineCache::Initialize() {
   // on it instead of trusting that a flag was applied.
   //
   // Two ways a requested mode silently fails to take effect, both hit in
-  // practice: `xenia_canary` reads a persisted config that OVERRIDES
+  // practice: `macXenos` reads a persisted config that OVERRIDES
   // command-line cvars (while the trace-dump tool has no config, so there the
   // command line wins), and `store_shaders=false` makes
   // GraphicsSystem::InitializeShaderStorage return before any backend is
