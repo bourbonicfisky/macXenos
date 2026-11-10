@@ -10,9 +10,11 @@
 #ifndef XENIA_GPU_RENDER_TARGET_CACHE_H_
 #define XENIA_GPU_RENDER_TARGET_CACHE_H_
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -681,27 +683,41 @@ class RenderTargetCache {
   // EDRAM memory are committed with a memory barrier.
   void PixelShaderInterlockFullEdramBarrierPlaced();
 
-  // Diagnostics: calls fn(render_target, owned_tiles) for every host render
-  // target, with the EDRAM tiles it currently owns (0 for one ClearCache would
-  // destroy).
+  // Diagnostics: calls fn(render_target, owned_tiles, owned_end_tiles) for
+  // every host render target, with the EDRAM tiles it currently owns (0 for
+  // one ClearCache would destroy) and the end of the last of them as an
+  // offset from the target's base (its rows hold tiles up to there).
   template <typename Fn>
   void ForEachRenderTargetWithOwnedTiles(Fn&& fn) const {
-    std::unordered_map<uint32_t, uint32_t> owned_tiles;
+    // Tiles owned, end offset.
+    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> owned;
     for (const auto& [start_tiles, range] : ownership_ranges_) {
+      if (range.end_tiles <= start_tiles) {
+        continue;
+      }
       uint32_t length_tiles = range.end_tiles - start_tiles;
-      for (RenderTargetKey key :
-           {range.render_target, range.depth_bits_target,
-            range.host_depth_render_target_unorm24,
-            range.host_depth_render_target_float24}) {
-        if (!key.IsEmpty()) {
-          owned_tiles[key.key] += length_tiles;
+      const RenderTargetKey keys[] = {range.render_target,
+                                      range.depth_bits_target,
+                                      range.host_depth_render_target_unorm24,
+                                      range.host_depth_render_target_float24};
+      for (size_t i = 0; i < std::size(keys); ++i) {
+        RenderTargetKey key = keys[i];
+        // The depth bits are usually the owner's.
+        if (!key.IsEmpty() &&
+            std::find(keys, keys + i, key) == keys + i) {
+          std::pair<uint32_t, uint32_t>& entry = owned[key.key];
+          entry.first += length_tiles;
+          entry.second = std::max(
+              entry.second, key.GetNonWrappedTileIndex(range.end_tiles - 1) +
+                                1 - key.base_tiles);
         }
       }
     }
     for (const auto& [key, render_target] : render_targets_) {
       if (render_target) {
-        auto found = owned_tiles.find(key.key);
-        fn(render_target, found != owned_tiles.end() ? found->second : 0);
+        auto found = owned.find(key.key);
+        fn(render_target, found != owned.end() ? found->second.first : 0,
+           found != owned.end() ? found->second.second : 0);
       }
     }
   }

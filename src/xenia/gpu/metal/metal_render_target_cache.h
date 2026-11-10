@@ -639,11 +639,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   class MetalRenderTarget final : public RenderTarget {
    public:
     MetalRenderTarget(RenderTargetKey key, MetalRenderTargetCache& cache,
-                      void* texture, uint64_t pixel_format)
+                      void* texture, uint64_t pixel_format,
+                      uint32_t texture_height)
         : RenderTarget(key),
           cache_(cache),
           texture_(texture),
-          pixel_format_(pixel_format) {}
+          pixel_format_(pixel_format),
+          texture_height_(texture_height) {}
     // Destruction retires the texture to the cache's deferred-release list:
     // the base class can destroy render targets mid-frame while the open
     // frame command buffer still references the texture (attachment of an
@@ -653,6 +655,15 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     ~MetalRenderTarget();
     void* texture() const { return texture_; }  // id<MTLTexture>, retained.
     uint64_t pixel_format() const { return pixel_format_; }
+    // Host rows of texture_. Below the full height of the key while the
+    // target grows on demand (EnsureCurrentRenderTargetHeights).
+    uint32_t texture_height() const { return texture_height_; }
+    void* ReplaceTexture(void* texture, uint32_t height) {
+      void* old_texture = texture_;
+      texture_ = texture;
+      texture_height_ = height;
+      return old_texture;
+    }
     // Optional real MSAA attachment (sample-accurate path, gated). When set,
     // draws render per-sample into this and resolve to texture_ (the 1x
     // companion) so the collapsed consumers stay unchanged; the samples feed
@@ -674,6 +685,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     MetalRenderTargetCache& cache_;
     void* texture_;
     uint64_t pixel_format_;
+    uint32_t texture_height_;
     void* msaa_texture_ = nullptr;  // id<MTLTexture>, retained when set.
     uint32_t sample_count_ = 1;
     uint32_t msaa_texture_height_ = 0;
@@ -685,8 +697,32 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // debugging.
   void ClearTextureAtCreation(void* texture, bool is_depth);
 
-  // Allocates real-MSAA working views at the full single-sample companion
-  // dimensions required by Metal resolve attachments. Replacement first makes
+  // Render target height growth (default on with the sample EDRAM,
+  // XE_METAL_RT_GROW=0 restores full-height allocation). A key's full height
+  // is every row its pitch can address in one EDRAM period -- 8192 rows for an
+  // 80-wide target -- and a private texture is resident in full once it is
+  // used at all, while draws reach a small part of it (RDR: 971 MB of render
+  // targets, 119 MB in rows a draw had reached). A target is created one tile
+  // row tall and grown to the rows of the ranges it is used with; growth
+  // copies the old rows, so the tile authority state is unaffected. Every
+  // attachment of a pass is at least as tall as the rows the pass uses (the
+  // render extent is their minimum), and a multisample companion is as tall
+  // as its target. A destroyed target's height is kept for its key, so a
+  // cache clear does not repeat the growth.
+  bool render_target_growth_enabled_ = false;
+  std::unordered_map<uint32_t, uint32_t> render_target_grown_heights_;
+  uint32_t GetFullRenderTargetTextureHeight(RenderTargetKey key) const;
+  // id<MTLTexture>, retained for the caller; nullptr on failure.
+  void* NewRenderTargetTexture(RenderTargetKey key, uint64_t pixel_format,
+                               uint32_t height);
+  void* NewMsaaCompanionTexture(RenderTargetKey key, uint64_t pixel_format,
+                                uint32_t sample_count, uint32_t height);
+  bool GrowRenderTarget(MetalRenderTarget* target, uint32_t height);
+  bool EnsureCurrentRenderTargetHeights();
+  uint64_t render_target_growth_count_ = 0;
+
+  // Allocates real-MSAA working views at the single-sample companion's
+  // dimensions, as Metal resolve attachments require. Replacement first makes
   // canonical EDRAM authoritative, then retires old views by submission.
   bool EnsureCurrentMsaaCompanions();
   // Last binding EnsureCurrentMsaaCompanions found already satisfied. Only

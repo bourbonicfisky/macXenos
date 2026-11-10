@@ -312,6 +312,13 @@ bool MetalRenderTargetCache::Initialize() {
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_RASTER", true);
   sample_edram_raster_enabled_ =
       sample_edram_enabled_ && sample_edram_raster_configured;
+  // Only the canonical path is range-bounded everywhere a render target is
+  // read or written; the collapsed rollback keeps full-height targets.
+  // A window offset in the EDRAM bases (an experiment, off) starts ranges past
+  // the base and adds next-period keys; not sized here.
+  render_target_growth_enabled_ =
+      sample_edram_enabled_ && !IsWindowOffsetInEdramSupported() &&
+      IsMetalEnvironmentFlagEnabled("XE_METAL_RT_GROW", true);
   const bool sample_edram_raster_explicitly_requested =
       std::getenv("XE_METAL_SAMPLE_EDRAM_RASTER") &&
       IsMetalEnvironmentFlagEnabled("XE_METAL_SAMPLE_EDRAM_RASTER");
@@ -386,6 +393,7 @@ bool MetalRenderTargetCache::Initialize() {
           canonical_edram_size() / (1024 * 1024));
       sample_edram_enabled_ = false;
       sample_edram_raster_enabled_ = false;
+      render_target_growth_enabled_ = false;
       canonical_depth_enabled_ = false;
     } else {
       buffer.label = @"xe_canonical_edram";
@@ -654,7 +662,6 @@ void MetalRenderTargetCache::ClearTextureAtCreation(void* texture,
 RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
     RenderTargetKey key) {
   ++render_target_epoch_;
-  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLPixelFormat pixel_format =
       key.is_depth ? (MTLPixelFormat)kDepthFormat
                    : ColorResourceFormatToMetal(key.GetColorFormat());
@@ -681,15 +688,53 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
   // sample coordinates to pixels with the key's shifts. Host textures are the
   // guest size times the draw resolution scale.
   uint32_t width = key.GetWidth() * draw_resolution_scale_x();
-  uint32_t height =
-      GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples) *
-      draw_resolution_scale_y();
+  uint32_t height = GetFullRenderTargetTextureHeight(key);
   if (!width || !height) {
     return nullptr;
   }
+  if (render_target_growth_enabled_) {
+    // One tile row, or what the key had grown to; the first Update binding
+    // the target sizes it to the rows in use.
+    uint32_t initial_height =
+        (xenos::kEdramTileHeightSamples >>
+         uint32_t(key.msaa_samples >= xenos::MsaaSamples::k2X)) *
+        draw_resolution_scale_y();
+    auto grown_it = render_target_grown_heights_.find(key.key);
+    if (grown_it != render_target_grown_heights_.end()) {
+      initial_height = std::max(initial_height, grown_it->second);
+    }
+    height = std::min(height, initial_height);
+  }
+  id<MTLTexture> texture =
+      (__bridge_transfer id<MTLTexture>)NewRenderTargetTexture(
+          key, uint64_t(pixel_format), height);
+  if (!texture) {
+    XELOGE("MetalRenderTargetCache: failed to create RT {}",
+           key.GetDebugName());
+    return nullptr;
+  }
+  XELOGI("MetalRenderTargetCache: new RT {} ({}x{} mtl={})", key.GetDebugName(),
+         width, height, uint32_t(pixel_format));
+  ClearTextureAtCreation((__bridge void*)texture, key.is_depth != 0);
+  auto* rt = new MetalRenderTarget(key, *this, (__bridge_retained void*)texture,
+                                   uint64_t(pixel_format), height);
+  return rt;
+}
+
+uint32_t MetalRenderTargetCache::GetFullRenderTargetTextureHeight(
+    RenderTargetKey key) const {
+  return GetRenderTargetHeight(key.pitch_tiles_at_32bpp, key.msaa_samples) *
+         draw_resolution_scale_y();
+}
+
+void* MetalRenderTargetCache::NewRenderTargetTexture(RenderTargetKey key,
+                                                     uint64_t pixel_format,
+                                                     uint32_t height) {
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   MTLTextureDescriptor* desc = [MTLTextureDescriptor
-      texture2DDescriptorWithPixelFormat:pixel_format
-                                   width:width
+      texture2DDescriptorWithPixelFormat:(MTLPixelFormat)pixel_format
+                                   width:key.GetWidth() *
+                                         draw_resolution_scale_x()
                                   height:height
                                mipmapped:NO];
   // Sampled by the depth-convert / snapshot-blit paths and by transfers.
@@ -709,17 +754,189 @@ RenderTargetCache::RenderTarget* MetalRenderTargetCache::CreateRenderTarget(
   }
   desc.storageMode = MTLStorageModePrivate;
   id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
-  if (!texture) {
-    XELOGE("MetalRenderTargetCache: failed to create RT {}",
-           key.GetDebugName());
-    return nullptr;
+  return (__bridge_retained void*)texture;
+}
+
+void* MetalRenderTargetCache::NewMsaaCompanionTexture(RenderTargetKey key,
+                                                      uint64_t pixel_format,
+                                                      uint32_t sample_count,
+                                                      uint32_t height) {
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
+  descriptor.textureType = MTLTextureType2DMultisample;
+  descriptor.pixelFormat = (MTLPixelFormat)pixel_format;
+  descriptor.width = key.GetWidth() * draw_resolution_scale_x();
+  descriptor.height = height;
+  descriptor.sampleCount = sample_count;
+  descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+  if (key.is_depth || IsCanonicalColorRawViewFormat(key.GetColorFormat())) {
+    // Depth MSAA pack reads stencil through an X32_Stencil8 view; raw color
+    // MSAA pack uses the corresponding canonical uint view.
+    descriptor.usage |= MTLTextureUsagePixelFormatView;
   }
-  XELOGI("MetalRenderTargetCache: new RT {} ({}x{} mtl={})", key.GetDebugName(),
-         width, height, uint32_t(pixel_format));
+  descriptor.storageMode = MTLStorageModePrivate;
+  id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+  if (texture) {
+    texture.label = [NSString
+        stringWithFormat:@"xe_rt_msaa_%ux_%u", sample_count, height];
+  }
+  return (__bridge_retained void*)texture;
+}
+
+bool MetalRenderTargetCache::GrowRenderTarget(MetalRenderTarget* target,
+                                              uint32_t height) {
+  const RenderTargetKey key = target->key();
+  const uint32_t old_height = target->texture_height();
+  if (height <= old_height) {
+    return true;
+  }
+  id<MTLTexture> old_texture = (__bridge id<MTLTexture>)target->texture();
+  id<MTLTexture> old_msaa_texture =
+      (__bridge id<MTLTexture>)target->msaa_texture();
+  id<MTLTexture> texture =
+      (__bridge_transfer id<MTLTexture>)NewRenderTargetTexture(
+          key, target->pixel_format(), height);
+  id<MTLTexture> msaa_texture = nil;
+  if (texture && old_msaa_texture) {
+    msaa_texture = (__bridge_transfer id<MTLTexture>)NewMsaaCompanionTexture(
+        key, target->pixel_format(), target->sample_count(), height);
+  }
+  if (!texture || (old_msaa_texture && !msaa_texture)) {
+    XELOGE("MetalRenderTargetCache: failed to grow RT {} to {} rows",
+           key.GetDebugName(), height);
+    return false;
+  }
+  // Ends a render encoder the old textures may be attached to; the old rows
+  // are then final in command buffer order.
   ClearTextureAtCreation((__bridge void*)texture, key.is_depth != 0);
-  auto* rt = new MetalRenderTarget(key, *this, (__bridge_retained void*)texture,
-                                   uint64_t(pixel_format));
-  return rt;
+  if (msaa_texture) {
+    ClearTextureAtCreation((__bridge void*)msaa_texture, key.is_depth != 0);
+  }
+  id<MTLCommandBuffer> command_buffer = (__bridge id<MTLCommandBuffer>)
+      command_processor_.PrepareTransferCommandBuffer(
+          uint32_t(MetalTransferSite::kRenderTargetGrowth));
+  if (!command_buffer) {
+    XELOGE("MetalRenderTargetCache: no command buffer to grow RT {}",
+           key.GetDebugName());
+    return false;
+  }
+  // Raw copies: every row the old textures hold, bit for bit (depth and
+  // stencil planes, each sample of a multisample texture).
+  id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+  blit.label = @"rtcache:grow";
+  MTLSize copy_size = MTLSizeMake(old_texture.width, old_height, 1);
+  [blit copyFromTexture:old_texture
+            sourceSlice:0
+            sourceLevel:0
+           sourceOrigin:MTLOriginMake(0, 0, 0)
+             sourceSize:copy_size
+              toTexture:texture
+       destinationSlice:0
+       destinationLevel:0
+      destinationOrigin:MTLOriginMake(0, 0, 0)];
+  if (msaa_texture) {
+    [blit copyFromTexture:old_msaa_texture
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:copy_size
+                toTexture:msaa_texture
+         destinationSlice:0
+         destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+  }
+  [blit endEncoding];
+
+  uint64_t submission = MetalCommandProcessor::S7TagsOff()
+                            ? 0
+                            : command_processor_.CurrentEncodingSubmission();
+  void* retired = target->ReplaceTexture((__bridge_retained void*)texture,
+                                         height);
+  if (presentable_color_target_ == retired) {
+    presentable_color_target_ = target->texture();
+  }
+  deferred_texture_releases_.emplace_back(submission, retired);
+  if (msaa_texture) {
+    void* retired_msaa = target->ReplaceMsaaTexture(
+        (__bridge_retained void*)msaa_texture, target->sample_count(), height);
+    // Extracted stencil is cached by texture pointer: the old pointer may be
+    // reused and the new one may have been.
+    for (void* replaced : {retired_msaa, target->msaa_texture()}) {
+      auto it = msaa_stencil_caches_.find(replaced);
+      if (it != msaa_stencil_caches_.end()) {
+        it->second.valid = false;
+        it->second.why = kMsaaStencilReplace;
+      }
+    }
+    deferred_texture_releases_.emplace_back(submission, retired_msaa);
+  }
+  // Texture pointers changed under the same RenderTarget addresses.
+  ++render_target_epoch_;
+  ++render_target_growth_count_;
+  render_target_grown_heights_[key.key] = height;
+  XELOGI("MetalRenderTargetCache: RT {} height {} -> {} (full {})",
+         key.GetDebugName(), old_height, height,
+         GetFullRenderTargetTextureHeight(key));
+  return true;
+}
+
+bool MetalRenderTargetCache::EnsureCurrentRenderTargetHeights() {
+  if (!render_target_growth_enabled_) {
+    return true;
+  }
+  RenderTarget* const* used = last_update_used_render_targets();
+  RenderTarget* const* accumulated = last_update_accumulated_render_targets();
+  const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+  const uint32_t* starts = last_update_used_render_target_starts_tiles();
+  // Rows of the ranges this draw uses. Every range operation on a target
+  // (materialize, pack, transfer, the draw itself) stays inside a range the
+  // target was bound with, so these are the rows that can ever hold content.
+  uint32_t required_height = 0;
+  for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
+    RenderTarget* target = used[slot];
+    if (!target || !lengths[slot]) {
+      continue;
+    }
+    const RenderTargetKey key = target->key();
+    required_height = std::max(
+        required_height,
+        ComputeCanonicalRangeTextureHeight(
+            key.base_tiles, key.GetPitchTiles(),
+            uint32_t(key.msaa_samples >= xenos::MsaaSamples::k2X),
+            key.base_tiles + starts[slot] + lengths[slot],
+            GetFullRenderTargetTextureHeight(key),
+            draw_resolution_scale_y()));
+  }
+  // The pass's attachments, each at least that tall (the render area is the
+  // smallest of them): the accumulated targets, and the used ones in case a
+  // slot's binding is not accumulated.
+  for (RenderTarget* const* set : {accumulated, used}) {
+    for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
+      auto* target = static_cast<MetalRenderTarget*>(set[slot]);
+      if (!target || target->texture_height() >= required_height) {
+        continue;
+      }
+      const RenderTargetKey key = target->key();
+      const uint32_t tile_row_height =
+          (xenos::kEdramTileHeightSamples >>
+           uint32_t(key.msaa_samples >= xenos::MsaaSamples::k2X)) *
+          draw_resolution_scale_y();
+      uint32_t height = required_height;
+      if (target->texture_height() > tile_row_height) {
+        // A target already sized by use is outgrown: leave a quarter of
+        // headroom so a range creeping down a row of tiles at a time does not
+        // copy the target for each.
+        height += height / 4;
+      }
+      height =
+          (height + tile_row_height - 1) / tile_row_height * tile_row_height;
+      height = std::min(height, GetFullRenderTargetTextureHeight(key));
+      if (!GrowRenderTarget(target, height)) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
@@ -749,10 +966,8 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
     std::memcpy(memo.lengths, lengths, kSlots * sizeof(uint32_t));
   };
   uint32_t requested_height = 0;
-  uint32_t current_height = 0;
   uint32_t full_height = 0;
   uint32_t sample_count = 0;
-  uint32_t tile_row_height = 1;
 
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
     auto* target = static_cast<MetalRenderTarget*>(used[slot]);
@@ -774,8 +989,6 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
     uint32_t x_shift, y_shift;
     GetMsaaShifts(uint32_t(key.msaa_samples), x_shift, y_shift);
     (void)x_shift;
-    tile_row_height = (xenos::kEdramTileHeightSamples >> y_shift) *
-                      draw_resolution_scale_y();
     requested_height = std::max(
         requested_height,
         ComputeCanonicalRangeTextureHeight(
@@ -803,17 +1016,16 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
       XELOGE("MetalRenderTargetCache: incompatible accumulated MSAA target");
       return false;
     }
-    current_height = std::max(current_height, target->msaa_texture_height());
     target_storage[target_count++] = target;
   }
   const std::span<MetalRenderTarget* const> targets(target_storage,
                                                     target_count);
-  uint32_t allocation_height = ComputeMsaaCompanionAllocationHeight(
-      current_height, requested_height, full_height, tile_row_height);
+  // A companion resolves into its target's texture and holds the same rows
+  // (all of the guest surface's, unless targets grow with use).
   bool allocation_needed = false;
   for (MetalRenderTarget* target : targets) {
     if (!target->msaa_texture() ||
-        target->msaa_texture_height() < allocation_height) {
+        target->msaa_texture_height() < target->texture_height()) {
       allocation_needed = true;
       break;
     }
@@ -837,28 +1049,16 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
     void* texture;
   };
   std::vector<PendingCompanion> pending;
-  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
   for (MetalRenderTarget* target : targets) {
+    const uint32_t allocation_height = target->texture_height();
     if (target->msaa_texture() &&
         target->msaa_texture_height() >= allocation_height) {
       continue;
     }
     const RenderTargetKey& key = target->key();
-    MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
-    descriptor.textureType = MTLTextureType2DMultisample;
-    descriptor.pixelFormat = (MTLPixelFormat)target->pixel_format();
-    descriptor.width = key.GetWidth() * draw_resolution_scale_x();
-    descriptor.height = allocation_height;
-    descriptor.sampleCount = sample_count;
-    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-    if (key.is_depth ||
-        IsCanonicalColorRawViewFormat(key.GetColorFormat())) {
-      // Depth MSAA pack reads stencil through an X32_Stencil8 view; raw color
-      // MSAA pack uses the corresponding canonical uint view.
-      descriptor.usage |= MTLTextureUsagePixelFormatView;
-    }
-    descriptor.storageMode = MTLStorageModePrivate;
-    id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+    id<MTLTexture> texture =
+        (__bridge_transfer id<MTLTexture>)NewMsaaCompanionTexture(
+            key, target->pixel_format(), sample_count, allocation_height);
     if (!texture) {
       XELOGW(
           "MetalRenderTargetCache: {}x MSAA companion alloc failed for {} "
@@ -874,9 +1074,6 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
       }
       return false;
     }
-    texture.label =
-        [NSString stringWithFormat:@"xe_rt_msaa_%ux_%u", sample_count,
-                                   allocation_height];
     ClearTextureAtCreation((__bridge void*)texture, key.is_depth != 0);
     pending.push_back({target, (__bridge_retained void*)texture});
   }
@@ -888,6 +1085,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
   for (const PendingCompanion& entry : pending) {
     MetalRenderTarget* target = entry.target;
     uint32_t old_height = target->msaa_texture_height();
+    const uint32_t allocation_height = target->texture_height();
     void* old_texture = target->ReplaceMsaaTexture(
         entry.texture, sample_count, allocation_height);
     for (void* replaced : {old_texture, entry.texture}) {
@@ -906,7 +1104,7 @@ bool MetalRenderTargetCache::EnsureCurrentMsaaCompanions() {
         "MetalRenderTargetCache: RT {} {}x MSAA companion height {} -> {} "
         "(full {})",
         target->key().GetDebugName(), sample_count, old_height,
-        allocation_height, full_height);
+        allocation_height, GetFullRenderTargetTextureHeight(target->key()));
   }
   return true;
 }
@@ -922,7 +1120,7 @@ bool MetalRenderTargetCache::Update(bool is_rasterization_done,
                                  window_offset_tiles)) {
     return false;
   }
-  if (!EnsureCurrentMsaaCompanions()) {
+  if (!EnsureCurrentRenderTargetHeights() || !EnsureCurrentMsaaCompanions()) {
     return false;
   }
   static const bool s_rt_census = std::getenv("XE_METAL_RT_CENSUS") != nullptr;
@@ -1011,7 +1209,7 @@ void MetalRenderTargetCache::ReportRenderTargetCensus(uint64_t now_ms) {
     uint64_t bytes;
     uint64_t used_bytes;
     uint32_t owned_tiles;
-    uint32_t width, height, used_height, samples;
+    uint32_t width, height, used_height, owned_height, samples;
     // Seconds since a draw used it; UINT32_MAX if none has (transfers only).
     uint32_t idle_s;
   };
@@ -1020,8 +1218,12 @@ void MetalRenderTargetCache::ReportRenderTargetCensus(uint64_t now_ms) {
   // 60 s, never drawn to, and what the rows draws have reached would take.
   uint64_t total = 0, unowned = 0, idle_10 = 0, idle_60 = 0, never = 0,
            reached = 0;
+  // Targets whose texture is shorter than the rows of a range they were used
+  // with or own: none, if growth keeps its invariant.
+  uint32_t short_targets = 0;
   ForEachRenderTargetWithOwnedTiles(
-      [&](RenderTarget* render_target, uint32_t owned_tiles) {
+      [&](RenderTarget* render_target, uint32_t owned_tiles,
+          uint32_t owned_end_tiles) {
         auto* rt = static_cast<MetalRenderTarget*>(render_target);
         id<MTLTexture> texture = (__bridge id<MTLTexture>)rt->texture();
         id<MTLTexture> msaa = (__bridge id<MTLTexture>)rt->msaa_texture();
@@ -1035,18 +1237,28 @@ void MetalRenderTargetCache::ReportRenderTargetCensus(uint64_t now_ms) {
         row.height = uint32_t(texture.height);
         row.samples = msaa ? rt->sample_count() : 1;
         row.idle_s = UINT32_MAX;
+        const uint32_t full_height = GetFullRenderTargetTextureHeight(key);
+        const uint32_t y_shift =
+            uint32_t(key.msaa_samples >= xenos::MsaaSamples::k2X);
+        row.owned_height = ComputeCanonicalRangeTextureHeight(
+            key.base_tiles, key.GetPitchTiles(), y_shift,
+            key.base_tiles + owned_end_tiles, full_height,
+            draw_resolution_scale_y());
         auto found = rt_census_.find(key.key);
         if (found != rt_census_.end()) {
           row.idle_s = uint32_t((now_ms - found->second.last_used_ms) / 1000);
-          uint32_t x_shift, y_shift;
-          GetMsaaShifts(uint32_t(key.msaa_samples), x_shift, y_shift);
           row.used_height = ComputeCanonicalRangeTextureHeight(
               key.base_tiles, key.GetPitchTiles(), y_shift,
-              key.base_tiles + found->second.max_end_tiles, row.height,
+              key.base_tiles + found->second.max_end_tiles, full_height,
               draw_resolution_scale_y());
         }
-        row.used_bytes =
-            row.height ? row.bytes * row.used_height / row.height : 0;
+        if (std::max(row.used_height, row.owned_height) > row.height) {
+          ++short_targets;
+        }
+        row.used_bytes = row.height ? row.bytes *
+                                          std::min(row.used_height, row.height) /
+                                          row.height
+                                    : 0;
         total += row.bytes;
         reached += row.used_bytes;
         if (!owned_tiles) {
@@ -1069,15 +1281,16 @@ void MetalRenderTargetCache::ReportRenderTargetCensus(uint64_t now_ms) {
   constexpr double kMb = 1.0 / (1024.0 * 1024.0);
   XELOGI("MetalRtCensus {} targets {:.1f} MB | owning no EDRAM {:.1f} | not "
          "drawn to for 10 s {:.1f}, 60 s {:.1f}, ever {:.1f} | rows draws "
-         "reached {:.1f}",
+         "reached {:.1f} | {} shorter than their rows, {} grown",
          rows.size(), total * kMb, unowned * kMb, idle_10 * kMb, idle_60 * kMb,
-         never * kMb, reached * kMb);
+         never * kMb, reached * kMb, short_targets,
+         render_target_growth_count_);
   for (size_t i = 0; i < rows.size() && i < 48; ++i) {
     const Row& row = rows[i];
     XELOGI("MetalRtCensus #{} {:.1f} MB {}x{} x{} reached {} rows owns {}t "
-           "idle {} | {}",
+           "to row {} idle {} | {}",
            i, row.bytes * kMb, row.width, row.height, row.samples,
-           row.used_height, row.owned_tiles,
+           row.used_height, row.owned_tiles, row.owned_height,
            row.idle_s == UINT32_MAX ? std::string("never drawn")
                                     : fmt::format("{} s", row.idle_s),
            row.key.GetDebugName());
@@ -8372,6 +8585,11 @@ void MetalRenderTargetCache::RestoreEdramSnapshot(const void* snapshot) {
     return;
   }
   auto* rt = static_cast<MetalRenderTarget*>(full_rt);
+  // The restore target owns, and is uploaded, every tile.
+  if (!GrowRenderTarget(rt, GetFullRenderTargetTextureHeight(rt->key()))) {
+    XELOGW("MetalRenderTargetCache: EDRAM snapshot restore RT unavailable");
+    return;
+  }
   id<MTLTexture> texture = (__bridge id<MTLTexture>)rt->texture();
   if (IsDrawResolutionScaled()) {
     // The canonical restore below marks every tile canonical, so the host
