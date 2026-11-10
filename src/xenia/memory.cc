@@ -36,6 +36,11 @@
 
 DEFINE_bool(protect_zero, true, "Protect the zero page from reads and writes.",
             "Memory");
+DEFINE_bool(null_page_census, false,
+            "On hosts with pages larger than 4 KB the guest's first 64 KB "
+            "stays readable and writable, so a guest null access goes "
+            "unnoticed. This logs each such access and then lets it through.",
+            "Memory");
 DEFINE_bool(emit_inline_mmio_checks, false,
             "Emit inline MMIO range checks for all I32 loads/stores instead "
             "of relying on exception-based MMIO detection.",
@@ -291,6 +296,17 @@ bool Memory::Initialize() {
                            : kMemoryProtectNoAccess);
   heaps_.physical.AllocFixed(0x1FFF0000, 0x10000, 0x10000,
                              kMemoryAllocationReserve, kMemoryProtectNoAccess);
+  // The heap's 4 KB pages can't be protected one by one on a host with larger
+  // pages, so the allocation above left these readable and writable. The
+  // whole 64 KB is host-page-aligned and can be.
+  if (cvars::protect_zero && cvars::null_page_census &&
+      ShouldSkipHostCommit(heaps_.v00000000)) {
+    null_page_guarded_ = xe::memory::Protect(
+        virtual_membase_, kNullPageSize, xe::memory::PageAccess::kNoAccess,
+        nullptr);
+    XELOGI("Memory: null page census {}",
+           null_page_guarded_ ? "on" : "failed to protect the page");
+  }
 
   // GPU writeback.
   // 0xC... is physical, 0x7F... is virtual. We may need to overlay these.
@@ -768,6 +784,30 @@ bool Memory::AccessViolationCallback(
   return physical_heap->TriggerCallbacks(
       std::move(global_lock_locked_once), virtual_address, 1, is_write,
       cvars::exact_write_fault_invalidation, true, false, false, false);
+}
+
+bool Memory::OpenNullPageForFault(const void* host_address) {
+  if (!null_page_guarded_) {
+    return false;
+  }
+  const uintptr_t offset = reinterpret_cast<uintptr_t>(host_address) -
+                           reinterpret_cast<uintptr_t>(virtual_membase_);
+  if (offset >= kNullPageSize) {
+    return false;
+  }
+  // Runs in the fault handler: nothing but the mprotect.
+  xe::memory::Protect(virtual_membase_, kNullPageSize,
+                      xe::memory::PageAccess::kReadWrite, nullptr);
+  null_page_open_.store(true, std::memory_order_release);
+  return true;
+}
+
+void Memory::RearmNullPage() {
+  if (null_page_guarded_ &&
+      null_page_open_.exchange(false, std::memory_order_acq_rel)) {
+    xe::memory::Protect(virtual_membase_, kNullPageSize,
+                        xe::memory::PageAccess::kNoAccess, nullptr);
+  }
 }
 
 bool Memory::AccessViolationCallbackThunk(

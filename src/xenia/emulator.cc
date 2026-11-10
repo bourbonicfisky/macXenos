@@ -1581,6 +1581,37 @@ bool Emulator::ExceptionCallback(Exception* ex) {
     return processor()->OnUnhandledException(ex);
   }
 
+  // Null page census: note the access and let it through.
+  if (ex->code() == Exception::Code::kAccessViolation &&
+      memory()->OpenNullPageForFault(
+          reinterpret_cast<const void*>(ex->fault_address()))) {
+    static std::atomic<uint32_t> null_page_accesses{0};
+    constexpr uint32_t kLoggedAccesses = 64;
+    const uint32_t n = null_page_accesses.fetch_add(1) + 1;
+    if (n <= kLoggedAccesses || !(n & (n - 1))) {
+      const bool is_write = ex->access_violation_operation() ==
+                            Exception::AccessViolationOperation::kWrite;
+      const uint32_t address = uint32_t(
+          ex->fault_address() -
+          reinterpret_cast<uint64_t>(memory()->virtual_membase()));
+      auto* thread = kernel::XThread::GetCurrentThread();
+      auto* function = ex->pc() >= code_base && ex->pc() < code_end
+                           ? code_cache->LookupFunction(ex->pc())
+                           : nullptr;
+      if (thread && function) {
+        XELOGW("NullPage #{}: {} at {:08X} by guest pc {:08X} lr {:08X}", n,
+               is_write ? "write" : "read", address,
+               function->MapMachineCodeToGuestAddress(ex->pc()),
+               uint32_t(thread->thread_state()->context()->lr));
+      } else {
+        XELOGW("NullPage #{}: {} at {:08X} by host pc {:016X}{}", n,
+               is_write ? "write" : "read", address, ex->pc(),
+               thread ? " on a guest thread" : "");
+      }
+    }
+    return true;
+  }
+
   // Only bail to the host/default handler when this isn't a guest thread at
   // all. A guest thread that faults outside the mapped [code_base, code_end)
   // range still has a valid guest context worth dumping: a null/garbage

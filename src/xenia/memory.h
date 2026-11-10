@@ -10,6 +10,7 @@
 #ifndef XENIA_MEMORY_H_
 #define XENIA_MEMORY_H_
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -395,6 +396,13 @@ class Memory {
   // mapping to the file system fails.
   bool Initialize();
 
+  // Null page census (null_page_census): the guest's first 64 KB is kept
+  // inaccessible on the host. A fault there is let through by opening the
+  // page, which stays open until the next RearmNullPage. Returns whether
+  // host_address was in the page.
+  bool OpenNullPageForFault(const void* host_address);
+  void RearmNullPage();
+
   // Resets all memory to zero and resets all allocations.
   void Reset();
 
@@ -662,6 +670,10 @@ class Memory {
 
   bool AccessViolationCallback(global_unique_lock_type global_lock_locked_once,
                                void* host_address, bool is_write);
+
+  static constexpr size_t kNullPageSize = 0x10000;
+  bool null_page_guarded_ = false;
+  std::atomic<bool> null_page_open_{false};
   static bool AccessViolationCallbackThunk(
       global_unique_lock_type global_lock_locked_once, void* context,
       void* host_address, bool is_write);

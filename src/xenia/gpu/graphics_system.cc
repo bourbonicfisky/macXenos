@@ -460,6 +460,9 @@ void GraphicsSystem::MarkVblank() {
     }
   }
 
+  // Null page census: an access opened the page; close it for the next one.
+  memory_->RearmNullPage();
+
   // Increment vblank counter (so the game sees us making progress).
   command_processor_->increment_counter();
   vblank_count_.fetch_add(1, std::memory_order_release);
