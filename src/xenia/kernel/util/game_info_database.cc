@@ -66,6 +66,10 @@ std::string GameInfoDatabase::GetTitleName(const XLanguage language) const {
 std::vector<uint8_t> GameInfoDatabase::GetIcon() const {
   std::vector<uint8_t> data;
 
+  if (!is_valid_) {
+    return data;
+  }
+
   const auto icon = spa_gamedata_->title_icon();
   data.insert(data.begin(), icon.begin(), icon.end());
   return data;
