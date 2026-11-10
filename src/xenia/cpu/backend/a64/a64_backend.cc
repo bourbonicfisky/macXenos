@@ -642,6 +642,33 @@ void* A64HelperEmitter::EmitReservedStoreHelper(
   // publish the next even value, odd snapshots always fail
   ldr(w15, bctx(offsetof(A64BackendContext, reserve_generation)));
   tbnz(w15, 0, fail);
+  ldr(x16, bctx(offsetof(A64BackendContext, cached_reserve_value_)));
+
+  // A pair that puts back the value it read has nothing to write: it holds if
+  // memory still has the value and no reserved store reached the granule since
+  // the lwarx, in that order. Job systems poll a queue head this way (USF4
+  // exchanges it with zero from five threads); claiming for each poll bounced
+  // the generation between them and every claim failed the others' pairs.
+  Label changes_memory;
+  if (bit64) {
+    cmp(x2, x16);
+    b(NE, changes_memory);
+    ldar(x14, ptr(x1));
+    cmp(x14, x16);
+  } else {
+    cmp(w2, w16);
+    b(NE, changes_memory);
+    ldar(w14, ptr(x1));
+    cmp(w14, w16);
+  }
+  b(NE, fail);
+  ldar(w14, ptr(x11));
+  cmp(w14, w15);
+  b(NE, fail);
+  mov(w0, 1);
+  ret();
+
+  L(changes_memory);
   add(w17, w15, 1);
 
   // a fault here leaves the claim in x11 and w17 for the handler
@@ -653,7 +680,6 @@ void* A64HelperEmitter::EmitReservedStoreHelper(
     cmp(w14, w15);
     b(NE, fail);
 
-    ldr(x16, bctx(offsetof(A64BackendContext, cached_reserve_value_)));
     // casal returns the old value in the compare register, so keep a copy
     mov(x3, x16);
     first_access = getSize();
@@ -675,7 +701,6 @@ void* A64HelperEmitter::EmitReservedStoreHelper(
     stlxr(w13, w17, ptr(x11));
     cbnz(w13, claim_retry);
 
-    ldr(x16, bctx(offsetof(A64BackendContext, cached_reserve_value_)));
     L(cas_retry);
     first_access = getSize();
     if (bit64) {

@@ -532,6 +532,101 @@ TEST_CASE("RESERVED_HOST_OTHER_GRANULE_SURVIVES", "[reserve]") {
 }
 
 // =============================================================================
+// Stores of the value the pair read
+// =============================================================================
+// Nothing changes in memory, so the pair holds without a claim.
+TEST_CASE("RESERVED_HOST_SAME_VALUE_STORE", "[reserve]") {
+  ScopedAtomicsMode atomics_mode(GENERATE(XE_RESERVE_ATOMICS_MODES));
+  TestFunction test([](HIRBuilder& b) { b.Return(); });
+  test.Run(
+      [&test](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        GuestWrite32(test.memory.get(), addr, 0x11223344u);
+
+        auto* backend = ctx->processor->backend();
+        REQUIRE(backend->ReservedLoad32(ctx, addr) == 0x11223344u);
+        REQUIRE(backend->ReservedStore32(ctx, addr, 0x11223344u));
+        REQUIRE(GuestRead32(test.memory.get(), addr) == 0x11223344u);
+        // the reservation is spent all the same
+        REQUIRE_FALSE(backend->ReservedStore32(ctx, addr, 0x11223344u));
+
+        *test.memory->TranslateVirtual<uint64_t*>(addr) =
+            xe::byte_swap(uint64_t(0x1122334455667788ull));
+        REQUIRE(backend->ReservedLoad64(ctx, addr) == 0x1122334455667788ull);
+        REQUIRE(backend->ReservedStore64(ctx, addr, 0x1122334455667788ull));
+        // only the high word matches
+        REQUIRE(backend->ReservedLoad64(ctx, addr) == 0x1122334455667788ull);
+        REQUIRE(backend->ReservedStore64(ctx, addr, 0x1122334400000000ull));
+        REQUIRE(xe::byte_swap(*test.memory->TranslateVirtual<uint64_t*>(
+                    addr)) == 0x1122334400000000ull);
+      },
+      [&test](PPCContext* ctx) { FreeScratch(test.memory.get(), ctx); });
+}
+
+// Two reserved stores that put the old value back (ABA) still fail it.
+TEST_CASE("RESERVED_HOST_SAME_VALUE_STORE_AFTER_ABA", "[reserve]") {
+  TestFunction test([](HIRBuilder& b) { b.Return(); });
+  SecondThread other(test.processors[0].get(), test.memory.get());
+  test.Run(
+      [&test, &other](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        GuestWrite32(test.memory.get(), addr, 0u);
+
+        auto* backend = ctx->processor->backend();
+        backend->ReservedLoad32(ctx, addr);
+        backend->ReservedLoad32(other.context(), addr);
+        REQUIRE(backend->ReservedStore32(other.context(), addr, 1u));
+        backend->ReservedLoad32(other.context(), addr);
+        REQUIRE(backend->ReservedStore32(other.context(), addr, 0u));
+        REQUIRE_FALSE(backend->ReservedStore32(ctx, addr, 0u));
+      },
+      [&test](PPCContext* ctx) { FreeScratch(test.memory.get(), ctx); });
+}
+
+// A plain store between the pair fails it.
+TEST_CASE("RESERVED_HOST_SAME_VALUE_STORE_VALUE_CHANGED", "[reserve]") {
+  TestFunction test([](HIRBuilder& b) { b.Return(); });
+  test.Run(
+      [&test](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        GuestWrite32(test.memory.get(), addr, 0u);
+
+        auto* backend = ctx->processor->backend();
+        backend->ReservedLoad32(ctx, addr);
+        GuestWrite32(test.memory.get(), addr, 0x99999999u);
+        REQUIRE_FALSE(backend->ReservedStore32(ctx, addr, 0u));
+        REQUIRE(GuestRead32(test.memory.get(), addr) == 0x99999999u);
+      },
+      [&test](PPCContext* ctx) { FreeScratch(test.memory.get(), ctx); });
+}
+
+#if XE_ARCH_ARM64
+// It leaves the granule alone, so a pair on another thread is not failed by a
+// store that changed nothing. (x64 still claims for it.)
+TEST_CASE("RESERVED_HOST_SAME_VALUE_STORE_KEEPS_OTHERS", "[reserve]") {
+  TestFunction test([](HIRBuilder& b) { b.Return(); });
+  SecondThread other(test.processors[0].get(), test.memory.get());
+  test.Run(
+      [&test, &other](PPCContext* ctx) {
+        uint32_t addr = AllocScratch(test.memory.get());
+        ctx->r[4] = addr;
+        GuestWrite32(test.memory.get(), addr, 0u);
+
+        auto* backend = ctx->processor->backend();
+        backend->ReservedLoad32(other.context(), addr);
+        backend->ReservedLoad32(ctx, addr);
+        REQUIRE(backend->ReservedStore32(ctx, addr, 0u));
+        REQUIRE(backend->ReservedStore32(other.context(), addr, 0x12345678u));
+        REQUIRE(GuestRead32(test.memory.get(), addr) == 0x12345678u);
+      },
+      [&test](PPCContext* ctx) { FreeScratch(test.memory.get(), ctx); });
+}
+#endif  // XE_ARCH_ARM64
+
+// =============================================================================
 // Host and JIT sharing one reservation domain
 // =============================================================================
 // A host store completes a reservation the JIT took.
