@@ -53,11 +53,9 @@ static void ShowMacAboutPanel() {
   add_line(@"Official website:\n", @"https://macxenos.com");
   add_line(@"Original project:\n",
            @"https://github.com/xenia-canary/xenia-canary");
-  add_line(@"Project homepage:\n", @"https://xenia.jp/about/");
+  add_line(@"Xenia project:\n", @"https://xenia.jp/about/");
   add_line(@"Game compatibility:\n",
            @"https://xenia-manager.github.io/compatibility");
-  add_line(@"Report game compatibility:\n",
-           @"https://github.com/xenia-project/game-compatibility/issues");
 
   [NSApp orderFrontStandardAboutPanel:@{
     NSAboutPanelOptionApplicationName : @"macXenos",

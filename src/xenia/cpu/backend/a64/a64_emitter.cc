@@ -649,7 +649,7 @@ void A64Emitter::HandleStackpointOverflowError(ppc::PPCContext* context) {
   }
   xe::FatalError(
       "Overflowed stackpoints! Please report this error for this title to "
-      "Xenia developers.");
+      "macXenos developers.");
 }
 
 void A64Emitter::PushStackpoint() {

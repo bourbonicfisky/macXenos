@@ -198,7 +198,7 @@ UPDATE_from_bool(texture_alpha_test_lod_snap, 2026, 7, 7, 12, true);
 
 DEFINE_bool(
     texture_decompress_bc, false,
-    "Decompress BC1/BC2/BC3 (DXT) textures to RGBA8 at upload with Xenia's "
+    "Decompress BC1/BC2/BC3 (DXT) textures to RGBA8 at upload with macXenos's "
     "own compute shaders instead of sampling the compressed blocks - the "
     "hardware BC decoders' interpolation precision is vendor-specific "
     "(notably the BC3/DXT5 3-bit interpolated alpha), which flips "

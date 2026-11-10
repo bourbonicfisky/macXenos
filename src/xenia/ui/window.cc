@@ -16,8 +16,8 @@
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/ui/presenter.h"
 
-DEFINE_int32(window_size_x, 1280, "Xenia window width", "UI");
-DEFINE_int32(window_size_y, 720, "Xenia window height", "UI");
+DEFINE_int32(window_size_x, 1280, "macXenos window width", "UI");
+DEFINE_int32(window_size_y, 720, "macXenos window height", "UI");
 DEFINE_string(
     window_guest_resolution_mode, "scaled",
     "How the window is sized from the guest resolution when a title launches: "

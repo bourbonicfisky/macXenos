@@ -147,7 +147,7 @@ A64CodeCache::UnwindReservation PosixA64CodeCache::RequestUnwindReservation(
   if (unwind_table_count_ >= kMaximumFunctionCount) {
     xe::FatalError(
         "Unwind table count exceeded maximum! Please report this to "
-        "Xenia developers");
+        "macXenos developers");
   }
 #else
   assert_false(unwind_table_count_ >= kMaximumFunctionCount);

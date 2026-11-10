@@ -164,7 +164,7 @@ DEFINE_uint32(
     "but may be reduced on resolutions like 4K or 8K in case the performance "
     "impact of multiple FSR upsampling passes is too high, or if softer edges "
     "are desired.\n"
-    "The default value is the maximum internally supported by Xenia.",
+    "The default value is the maximum internally supported by macXenos.",
     "Display");
 DEFINE_double(
     postprocess_ffx_fsr_sharpness_reduction,
@@ -211,7 +211,7 @@ DEFINE_int32(log_fps_interval, 0,
              "General");
 DEFINE_bool(disable_doubleclick_fullscreen, false,
             "Allows the user to disable the behavior where a fast double-click "
-            "causes Xenia to enter fullscreen mode.",
+            "causes macXenos to enter fullscreen mode.",
             "General");
 
 namespace xe {
@@ -876,22 +876,8 @@ bool EmulatorWindow::Initialize() {
   auto help_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Help");
   {
     help_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "FA&Q...", "F1",
-                         std::bind(&EmulatorWindow::ShowFAQ, this)));
-    help_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
-    help_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "Game &compatibility...",
-                         std::bind(&EmulatorWindow::ShowCompatibility, this)));
-    help_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
-    help_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "Build commit on GitHub...", "F2",
-        std::bind(&EmulatorWindow::ShowBuildCommit, this)));
-    help_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "Recent changes on GitHub...", []() {
-          LaunchWebBrowser(
-              "https://github.com/xenia-canary/xenia-canary/"
-              "compare/" XE_BUILD_COMMIT "..." XE_BUILD_BRANCH);
-        }));
+        MenuItem::Create(MenuItem::Type::kString, "macXenos &Website...", "F1",
+                         std::bind(&EmulatorWindow::ShowWebsite, this)));
     help_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
     help_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&About...",
@@ -1080,11 +1066,7 @@ void EmulatorWindow::OnKeyDown(ui::KeyEvent& e) {
     } break;
 
     case ui::VirtualKey::kF1: {
-      ShowFAQ();
-    } break;
-
-    case ui::VirtualKey::kF2: {
-      ShowBuildCommit();
+      ShowWebsite();
     } break;
 
     case ui::VirtualKey::kF9: {
@@ -1774,10 +1756,10 @@ void EmulatorWindow::CpuTimeScalarSetDouble() {
 
 void EmulatorWindow::CpuBreakIntoDebugger() {
   if (!cvars::debug) {
-    xe::ui::ImGuiDialog::ShowMessageBox(imgui_drawer_.get(), "Xenia Debugger",
-                                        "Xenia must be launched with the "
-                                        "--debug flag in order to enable "
-                                        "debugging.");
+    xe::ui::ImGuiDialog::ShowMessageBox(
+        imgui_drawer_.get(), "macXenos Debugger",
+        "macXenos must be launched with the --debug flag in order to enable "
+        "debugging.");
     return;
   }
   auto processor = emulator()->processor();
@@ -2076,32 +2058,8 @@ void EmulatorWindow::ToggleControllerVibration() {
   }
 }
 
-void EmulatorWindow::ShowCompatibility() {
-  const std::string_view base_url =
-      "https://github.com/xenia-canary/game-compatibility/issues";
-  std::string url;
-  // Avoid searching for a title ID of "00000000".
-  uint32_t title_id = emulator_->title_id();
-  if (!title_id) {
-    url = base_url;
-  } else {
-    url = fmt::format("{}?q=is%3Aissue+is%3Aopen+{:08X}", base_url, title_id);
-  }
-  LaunchWebBrowser(url);
-}
-
-void EmulatorWindow::ShowFAQ() {
-  LaunchWebBrowser("https://github.com/xenia-canary/xenia-canary/wiki/FAQ");
-}
-
-void EmulatorWindow::ShowBuildCommit() {
-#ifdef XE_BUILD_IS_PR
-  LaunchWebBrowser(
-      "https://github.com/xenia-canary/xenia-canary/pull/" XE_BUILD_PR_NUMBER);
-#else
-  LaunchWebBrowser(
-      "https://github.com/xenia-canary/xenia-canary/commit/" XE_BUILD_COMMIT);
-#endif
+void EmulatorWindow::ShowWebsite() {
+  LaunchWebBrowser("https://macxenos.com");
 }
 
 void EmulatorWindow::UpdateTitle() {
@@ -2744,7 +2702,8 @@ xe::X_STATUS EmulatorWindow::RunTitle(
         xe::SimpleMessageBoxType::Error,
         fmt::format(
             "Unsupported format!\n"
-            "Xenia does not support running software in an archived format."));
+            "macXenos does not support running software in an archived "
+            "format."));
 
     return X_STATUS_UNSUCCESSFUL;
   }

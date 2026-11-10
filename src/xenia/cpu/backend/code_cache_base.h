@@ -550,8 +550,8 @@ class CodeCacheBase : public CodeCache {
   static void CheckCapacity(size_t high_mark) {
     if (high_mark > kGeneratedCodeSize) {
       xe::FatalError(fmt::format(
-          "JIT code cache is full ({} MiB). Please report this game to Xenia "
-          "developers.",
+          "JIT code cache is full ({} MiB). Please report this game to "
+          "macXenos developers.",
           (kGeneratedCodeSize + 1) >> 20));
     }
   }

@@ -53,7 +53,7 @@ void DebugWindow::DebugDialog::OnDraw(ImGuiIO& io) {
   debug_window_.DrawFrame(io);
 }
 
-static constexpr std::string_view kBaseTitle = "Xenia Debugger";
+static constexpr std::string_view kBaseTitle = "macXenos Debugger";
 
 DebugWindow::DebugWindow(Emulator* emulator,
                          xe::ui::WindowedAppContext& app_context)

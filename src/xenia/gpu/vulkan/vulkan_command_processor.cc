@@ -2878,7 +2878,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 "Vertex fetch constant {} ({:08X} {:08X}) has \"invalid\" "
                 "type! "
                 "This is incorrect behavior, but you can try bypassing this by "
-                "launching Xenia with "
+                "launching macXenos with "
                 "--gpu_allow_invalid_fetch_constants=true.",
                 vfetch_index, vfetch_constant.dword_0, vfetch_constant.dword_1);
             return false;

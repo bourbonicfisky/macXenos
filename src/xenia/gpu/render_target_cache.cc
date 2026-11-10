@@ -117,7 +117,7 @@ DEFINE_bool(
     "evicted from the EDRAM to the RAM back to the EDRAM, but the EDRAM region "
     "that previously contained that depth buffer was overwritten by another "
     "depth buffer, or the game loads it to a different location in the EDRAM "
-    "than it was previously placed at, thus Xenia is unable to restore the "
+    "than it was previously placed at, thus macXenos is unable to restore the "
     "depth data with the original precision, and instead falls back to "
     "converting the lower-precision values, so in subsequent rendering passes "
     "for the same geometry, the actual depth values of the surfaces don't "

@@ -19,8 +19,9 @@
 DEFINE_bool(
     vulkan_validation, false,
     "Enable the Vulkan validation layer (VK_LAYER_KHRONOS_validation). "
-    "Messages will be written to the Xenia log if 'vulkan_log_debug_messages' "
-    "is enabled, or to the OS debug output otherwise.",
+    "Messages will be written to the macXenos log if "
+    "'vulkan_log_debug_messages' is enabled, or to the OS debug output "
+    "otherwise.",
     "Vulkan");
 
 DEFINE_int32(vulkan_device, -1,

@@ -167,11 +167,11 @@ DEFINE_transient_string(launch_data, "",
                         "General");
 #ifndef XE_PLATFORM_WIN32
 DEFINE_transient_bool(portable, false,
-                      "Specifies if Xenia should run in portable mode.",
+                      "Specifies if macXenos should run in portable mode.",
                       "General");
 #else
 DEFINE_transient_bool(portable, true,
-                      "Specifies if Xenia should run in portable mode.",
+                      "Specifies if macXenos should run in portable mode.",
                       "General");
 #endif
 
@@ -521,7 +521,7 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
         "Also, ensure that you have the latest driver installed for your GPU.\n"
         "\n"
 #endif  // XE_PLATFORM_ANDROID
-        "See https://xenia.jp/faq/ for more information and the system "
+        "See https://macxenos.com for more information and the system "
         "requirements.");
   }
   return gpu_implementation;

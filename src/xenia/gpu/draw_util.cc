@@ -1084,7 +1084,7 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
       rb_copy_control.copy_command != xenos::CopyCommand::kConvert &&
       !is_convert_to_1111) {
     XELOGE(
-        "Unsupported resolve copy command {}. Report the game to Xenia "
+        "Unsupported resolve copy command {}. Report the game to macXenos "
         "developers",
         uint32_t(rb_copy_control.copy_command));
     assert_always();

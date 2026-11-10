@@ -94,7 +94,7 @@ X64Emitter::X64Emitter(X64Backend* backend, XbyakAllocator* allocator)
       allocator_(allocator) {
   if (!cpu_.has(Xbyak::util::Cpu::tAVX)) {
     xe::FatalError(
-        "Your CPU does not support AVX, which is required by Xenia. See the "
+        "Your CPU does not support AVX, which is required by macXenos. See the "
         "FAQ for system requirements at https://xenia.jp");
     return;
   }
@@ -1737,7 +1737,7 @@ void X64Emitter::HandleStackpointOverflowError(ppc::PPCContext* context) {
   // todo: show lr in message?
   xe::FatalError(
       "Overflowed stackpoints! Please report this error for this title to "
-      "Xenia developers.");
+      "macXenos developers.");
 }
 
 void X64Emitter::PushStackpoint() {

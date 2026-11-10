@@ -222,7 +222,7 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     if (!opcode_info.emit || opcode_info.emit(*this, i)) {
       auto& disasm_info = GetOpcodeDisasmInfo(opcode);
       XELOGE(
-          "Unimplemented instr {:08X} {:08X} {} - report the game to Xenia "
+          "Unimplemented instr {:08X} {:08X} {} - report the game to macXenos "
           "developers; to skip, disable break_on_unimplemented_instructions",
           address, code, disasm_info.name);
       Comment("UNIMPLEMENTED!");

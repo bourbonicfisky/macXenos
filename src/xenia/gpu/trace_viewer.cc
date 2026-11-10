@@ -183,7 +183,8 @@ void TraceViewer::TraceViewerDialog::OnDraw(ImGuiIO& io) {
 }
 
 bool TraceViewer::Load(const std::string_view trace_file_path) {
-  window_->SetTitle("Xenia GPU Trace Viewer: " + std::string(trace_file_path));
+  window_->SetTitle("macXenos GPU Trace Viewer: " +
+                    std::string(trace_file_path));
 
   if (!player_->Open(trace_file_path)) {
     XELOGE("Could not load trace file");

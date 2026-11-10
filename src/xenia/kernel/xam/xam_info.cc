@@ -386,7 +386,7 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
 
     title = "Title was restarted";
     message =
-        "Title closed with new launch data. \nPlease restart Xenia. "
+        "Title closed with new launch data. \nPlease restart macXenos. "
         "Game will be loaded automatically.";
   } else {
     title = "Title terminated";

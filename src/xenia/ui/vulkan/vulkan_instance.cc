@@ -35,8 +35,8 @@
 
 DEFINE_bool(
     vulkan_log_debug_messages, true,
-    "Write Vulkan VK_EXT_debug_utils messages to the Xenia log, as opposed to "
-    "the OS debug output.",
+    "Write Vulkan VK_EXT_debug_utils messages to the macXenos log, as opposed "
+    "to the OS debug output.",
     "Vulkan");
 
 #if XE_PLATFORM_MAC

@@ -50,7 +50,7 @@
 "type": "int",
 "value": 0,
 "defaultValue": 0,
-"description": "Forces Xenia to use different process priority than default one. It might affect performance and cause unexpected bugs. Possible values: 0 - Normal, 1 - Above normal, 2 - High",
+"description": "Forces macXenos to use different process priority than default one. It might affect performance and cause unexpected bugs. Possible values: 0 - Normal, 1 - Above normal, 2 - High",
 "changed": false
 },
 "protect_zero": {
@@ -230,7 +230,7 @@
 "type": "int",
 "value": 1280,
 "defaultValue": 1280,
-"description": "Xenia window width",
+"description": "macXenos window width",
 "changed": false
 },
 "window_size_y": {
@@ -239,7 +239,7 @@
 "type": "int",
 "value": 720,
 "defaultValue": 720,
-"description": "Xenia window height",
+"description": "macXenos window height",
 "changed": false
 },
 "window_guest_resolution_mode": {
@@ -266,7 +266,7 @@
 "type": "bool",
 "value": true,
 "defaultValue": true,
-"description": "Write Vulkan VK_EXT_debug_utils messages to the Xenia log, as opposed to the OS debug output.",
+"description": "Write Vulkan VK_EXT_debug_utils messages to the macXenos log, as opposed to the OS debug output.",
 "changed": false
 },
 "mvk_config_defaults": {
@@ -293,7 +293,7 @@
 "type": "bool",
 "value": false,
 "defaultValue": false,
-"description": "Enable the Vulkan validation layer (VK_LAYER_KHRONOS_validation). Messages will be written to the Xenia log if 'vulkan_log_debug_messages' is enabled, or to the OS debug output otherwise.",
+"description": "Enable the Vulkan validation layer (VK_LAYER_KHRONOS_validation). Messages will be written to the macXenos log if 'vulkan_log_debug_messages' is enabled, or to the OS debug output otherwise.",
 "changed": false
 },
 "vulkan_device": {
@@ -392,7 +392,7 @@
 "type": "bool",
 "value": false,
 "defaultValue": false,
-"description": "Whether to convert the depth values to 24-bit floating-point (20e4) from the host precision (32-bit floating point) directly in the pixel shaders of guest draws when using a host depth buffer.\nThis prevents visual artifacts (interleaved stripes of parts of surfaces rendered and parts not rendered, having either the same width in case of the \"greater or equal\" depth test function, or the former being much thinner than the latter with the \"equal\" function) if the full host precision depth data is lost.\nThis issue may happen if the game reloads the depth data previously evicted from the EDRAM to the RAM back to the EDRAM, but the EDRAM region that previously contained that depth buffer was overwritten by another depth buffer, or the game loads it to a different location in the EDRAM than it was previously placed at, thus Xenia is unable to restore the depth data with the original precision, and instead falls back to converting the lower-precision values, so in subsequent rendering passes for the same geometry, the actual depth values of the surfaces don't match those stored in the depth buffer anymore.\nThis is a costly option because it makes the GPU unable to use depth buffer compression, and also with MSAA, forces the pixel shader to run for every subpixel sample rather than for the entire pixel, making pixel shading 2 or 4 times heavier depending on the MSAA sample count.\nThe rounding direction is controlled by the depth_float24_round configuration variable.\nNote that with depth_float24_round = true, this becomes even more costly because pixel shaders must be executed regardless of whether the surface is behind the previously drawn surfaces. With depth_float24_round = false, conservative depth output is used, however, so depth rejection before the pixel shader may still work.\nIf sample-rate shading is not supported by the host GPU, the conversion in the pixel shader is done only when MSAA is not used.\nWhen the depth buffer is emulated in software (via the fragment shader interlock / rasterizer-ordered view), this is ignored because 24-bit depth is always used directly.",
+"description": "Whether to convert the depth values to 24-bit floating-point (20e4) from the host precision (32-bit floating point) directly in the pixel shaders of guest draws when using a host depth buffer.\nThis prevents visual artifacts (interleaved stripes of parts of surfaces rendered and parts not rendered, having either the same width in case of the \"greater or equal\" depth test function, or the former being much thinner than the latter with the \"equal\" function) if the full host precision depth data is lost.\nThis issue may happen if the game reloads the depth data previously evicted from the EDRAM to the RAM back to the EDRAM, but the EDRAM region that previously contained that depth buffer was overwritten by another depth buffer, or the game loads it to a different location in the EDRAM than it was previously placed at, thus macXenos is unable to restore the depth data with the original precision, and instead falls back to converting the lower-precision values, so in subsequent rendering passes for the same geometry, the actual depth values of the surfaces don't match those stored in the depth buffer anymore.\nThis is a costly option because it makes the GPU unable to use depth buffer compression, and also with MSAA, forces the pixel shader to run for every subpixel sample rather than for the entire pixel, making pixel shading 2 or 4 times heavier depending on the MSAA sample count.\nThe rounding direction is controlled by the depth_float24_round configuration variable.\nNote that with depth_float24_round = true, this becomes even more costly because pixel shaders must be executed regardless of whether the surface is behind the previously drawn surfaces. With depth_float24_round = false, conservative depth output is used, however, so depth rejection before the pixel shader may still work.\nIf sample-rate shading is not supported by the host GPU, the conversion in the pixel shader is done only when MSAA is not used.\nWhen the depth buffer is emulated in software (via the fragment shader interlock / rasterizer-ordered view), this is ignored because 24-bit depth is always used directly.",
 "changed": false
 },
 "depth_float24_convert_auto": {
@@ -1103,7 +1103,7 @@
 "type": "bool",
 "value": false,
 "defaultValue": false,
-"description": "Decompress BC1/BC2/BC3 (DXT) textures to RGBA8 at upload with Xenia's own compute shaders instead of sampling the compressed blocks - the hardware BC decoders' interpolation precision is vendor-specific (notably the BC3/DXT5 3-bit interpolated alpha), which flips alpha-test verdicts at threshold-adjacent pixels across GPUs.",
+"description": "Decompress BC1/BC2/BC3 (DXT) textures to RGBA8 at upload with macXenos's own compute shaders instead of sampling the compressed blocks - the hardware BC decoders' interpolation precision is vendor-specific (notably the BC3/DXT5 3-bit interpolated alpha), which flips alpha-test verdicts at threshold-adjacent pixels across GPUs.",
 "changed": false
 },
 "texture_trilinear_ramp_match_amd": {
@@ -1850,7 +1850,7 @@
 "type": "uint",
 "value": 0,
 "defaultValue": 0,
-"description": "Maximum number of upsampling passes performed in AMD FidelityFX Super Resolution 1.0 (FSR) before falling back to bilinear stretching after the final pass.\nEach pass upscales only to up to 2x2 the previous size. If the game outputs a 1280x720 image, 1 pass will upscale it to up to 2560x1440 (below 4K), after 2 passes it will be upscaled to a maximum of 5120x2880 (including 3840x2160 for 4K), and so on.\nThis variable has no effect if the display resolution isn't very high, but may be reduced on resolutions like 4K or 8K in case the performance impact of multiple FSR upsampling passes is too high, or if softer edges are desired.\nThe default value is the maximum internally supported by Xenia.",
+"description": "Maximum number of upsampling passes performed in AMD FidelityFX Super Resolution 1.0 (FSR) before falling back to bilinear stretching after the final pass.\nEach pass upscales only to up to 2x2 the previous size. If the game outputs a 1280x720 image, 1 pass will upscale it to up to 2560x1440 (below 4K), after 2 passes it will be upscaled to a maximum of 5120x2880 (including 3840x2160 for 4K), and so on.\nThis variable has no effect if the display resolution isn't very high, but may be reduced on resolutions like 4K or 8K in case the performance impact of multiple FSR upsampling passes is too high, or if softer edges are desired.\nThe default value is the maximum internally supported by macXenos.",
 "changed": false
 },
 "postprocess_ffx_fsr_sharpness_reduction": {
@@ -1922,7 +1922,7 @@
 "type": "bool",
 "value": false,
 "defaultValue": false,
-"description": "Allows the user to disable the behavior where a fast double-click causes Xenia to enter fullscreen mode.",
+"description": "Allows the user to disable the behavior where a fast double-click causes macXenos to enter fullscreen mode.",
 "changed": false
 },
 "apu": {

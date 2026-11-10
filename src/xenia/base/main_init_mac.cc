@@ -24,8 +24,8 @@ class StartupCpuFeatureCheck {
     Xbyak::util::Cpu cpu;
     if (!cpu.has(Xbyak::util::Cpu::tAVX)) {
       std::fputs(
-          "Your CPU does not support AVX, which is required by Xenia. See the "
-          "FAQ for system requirements at https://xenia.jp\n",
+          "Your CPU does not support AVX, which is required by macXenos. See "
+          "https://macxenos.com for system requirements.\n",
           stderr);
       exit(1);
     }

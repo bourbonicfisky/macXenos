@@ -1428,7 +1428,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3Draw(
       // TODO(Triang3l): VGT_IMMED_DATA.
       XELOGE(
           "{}: Using immediate vertex indices, which are not supported yet. "
-          "Report the game to Xenia developers!",
+          "Report the game to macXenos developers!",
           opcode_name, uint32_t(vgt_draw_initiator.source_select));
       draw_succeeded = false;
       assert_always();

@@ -337,9 +337,7 @@ class EmulatorWindow {
   void FreezeGame(bool freeze);
   void PreferencesButtonListener();
   void ToggleControllerVibration();
-  void ShowCompatibility();
-  void ShowFAQ();
-  void ShowBuildCommit();
+  void ShowWebsite();
 
   EmulatorWindow::ControllerHotKey ProcessControllerHotkey(int buttons);
   void VibrateController(xe::hid::InputSystem* input_sys, uint32_t user_index,

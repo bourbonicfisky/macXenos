@@ -856,8 +856,8 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
   }
 
   desc +=
-      "\nNote that since Xenia cannot access Xbox Marketplace, any DLC must be "
-      "installed manually using File -> Install Content.";
+      "\nNote that since macXenos cannot access Xbox Marketplace, any DLC must "
+      "be installed manually using File -> Install Content.";
 
   switch (ui_type) {
     case X_MARKETPLACE_ENTRYPOINT::ContentList:
@@ -868,8 +868,8 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
       if (is_xbla_unlock_offer) {
         desc +=
             "\n\nTo start trial games in full mode, set license_mask to 1 in "
-            "Xenia config file.\n\nDo you wish to change license_mask to 1 for "
-            "*this session*?";
+            "macXenos config file.\n\nDo you wish to change license_mask to 1 "
+            "for *this session*?";
         buttons.push_back("Yes");
         buttons.push_back("No");
       } else {
@@ -958,7 +958,7 @@ dword_result_t XamShowMarketplaceDownloadItemsUI_entry(
   }
 
   desc +=
-      "\n\nNote that since Xenia cannot access Xbox Marketplace, any DLC "
+      "\n\nNote that since macXenos cannot access Xbox Marketplace, any DLC "
       "must "
       "be installed manually using File -> Install Content.";
 
