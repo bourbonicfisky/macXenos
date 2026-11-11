@@ -4821,7 +4821,8 @@ void MetalCommandProcessor::OnLazyRead(uint32_t physical_address_start,
   }
   // Discrete mirror: bring the faulting pages' VRAM-only bytes into the CPU
   // mirror first (OnAccess copies owner coverage from it, page by page).
-  if (discrete_mirror_) {
+  if (discrete_mirror_ &&
+      lazy_publication_.OwnsAny(physical_address_start, length)) {
     const uint32_t page_mask = metal::MetalLazyPublication::kPageSize - 1;
     const uint32_t page_start = physical_address_start & ~page_mask;
     const uint64_t page_end =
@@ -19592,6 +19593,8 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       }
       continue;
     }
+    // Pages the record owned when its copy began (race census at retire).
+    uint32_t lazy_drain_snapshot_pages = 0;
     std::optional<metal::GuestRange> wb_range =
         metal::GuestRange::FromBaseLength(wb.guest_addr, wb.range_bytes());
     if (!wb_range) {
@@ -19728,6 +19731,10 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       std::vector<std::pair<uint32_t, uint32_t>> owned;
       if (wb.lazy_armed) {
         lazy_publication_.OwnedRangesOf(wb.authority_sequence, &owned);
+        for (const auto& owned_range : owned) {
+          lazy_drain_snapshot_pages +=
+              owned_range.second >> metal::MetalLazyPublication::kPageShift;
+        }
       }
       if (!aliased) {
         // Per-row copy, parallelized exactly like the CPU scatter (rows
@@ -20312,8 +20319,24 @@ metal::ProducerDrainOutcome MetalCommandProcessor::DrainPendingWritebacks(
       }
     }
     if (wb.lazy_armed) {
-      lazy_publication_.Retire(wb.authority_sequence);
+      const uint32_t still_owned =
+          lazy_publication_.Retire(wb.authority_sequence);
       wb.lazy_armed = 0u;
+      // Pages that left the table while this drain copied them from its
+      // earlier snapshot (a fault published them, or the guest released
+      // them): the drain's copy may have landed over the CPU write that
+      // fault let through. Counted to learn whether titles hit it.
+      if (still_owned < lazy_drain_snapshot_pages) {
+        static std::atomic<uint64_t> s_raced{0};
+        const uint64_t n = ++s_raced;
+        if (n <= 8 || (n & 1023) == 0) {
+          XELOGW("MetalLazyRace drain #{}: {} of {} pages of seq={} "
+                 "({:08X}+{:X}) left the table during the drain",
+                 n, lazy_drain_snapshot_pages - still_owned,
+                 lazy_drain_snapshot_pages, wb.authority_sequence,
+                 wb.guest_addr, wb.range_bytes());
+        }
+      }
     }
     published_ranges.emplace_back(wb.guest_addr, wb.range_bytes());
     id<MTLBuffer> released_staging =

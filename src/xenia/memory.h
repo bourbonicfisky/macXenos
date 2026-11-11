@@ -318,6 +318,11 @@ class PhysicalHeap : public BaseHeap {
   // fault, the pages the range only partly covers, so the write lands over what
   // they are still waiting for.
   void ProvideReadWatchedEdgePages(uint32_t virtual_address, uint32_t length);
+  // A guest protection change is about to make [virtual_address,
+  // virtual_address + length) writable: lets the read callbacks publish what
+  // they still owe there with the global lock released (see Protect).
+  void ProvideReadWatchedRange(global_unique_lock_type& global_lock_locked_once,
+                               uint32_t virtual_address, uint32_t length);
   // Diagnostic: the watch flags, host protection and guest page state of the
   // host page holding a physical address in this view.
   std::string DescribeAccessState(uint32_t physical_address) const;

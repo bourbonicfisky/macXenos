@@ -99,6 +99,17 @@ class MetalLazyPublication {
     }();
     return s_enabled;
   }
+  // XE_METAL_LAZY_BULK=0: an access over many pages copies them one by one
+  // (the previous behavior).
+  static bool BulkPublishEnabled() {
+    static const bool s_enabled = [] {
+      const char* v = std::getenv("XE_METAL_LAZY_BULK");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    return s_enabled;
+  }
+  // A fault touches one host page (four of these on a 16 KB host).
+  static constexpr size_t kBulkPages = 16;
   static constexpr uint32_t kPageShift = 12;
   static constexpr uint32_t kPageSize = 1u << kPageShift;
 
@@ -135,6 +146,11 @@ class MetalLazyPublication {
     // read sees the newest finished producer, as on hardware).
     uint64_t stale_partial_pages = 0;
     uint64_t retired_records = 0;
+    // Pages an access copied whose owner had left the table meanwhile:
+    // published by a drain or a second access (raced), or replaced by a
+    // newer record that still owns the page (superseded).
+    uint64_t raced_copies = 0;
+    uint64_t superseded_copies = 0;
   };
 
   // Arms `owner`: records page ownership for [guest_addr, guest_addr +
@@ -305,6 +321,24 @@ class MetalLazyPublication {
     }
   }
 
+  // Whether any page of [phys_start, phys_start + length) still has an owner.
+  bool OwnsAny(uint32_t phys_start, uint32_t length) const {
+    if (!length) {
+      return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint32_t first = phys_start >> kPageShift;
+    uint32_t last =
+        uint32_t((uint64_t(phys_start) + length - 1) >> kPageShift);
+    for (uint32_t page = first; page <= last; ++page) {
+      const std::vector<Owner>* owners = FindPageOwners(page);
+      if (owners && !owners->empty()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Returns the oldest armed owner registered before `sequence` whose byte
   // range overlaps [phys_start, phys_start + length), or 0. Such an owner's
   // first-access copy would land over a newer record's bytes published to RAM
@@ -372,16 +406,32 @@ class MetalLazyPublication {
     if (touched.empty()) {
       return 0;
     }
-    uint32_t remaining = 0;
-    for (const auto& [page, owners] : touched) {
-      // Owners are in arm (producer) order. Publish the completed prefix:
-      // a newer owner that cannot be waited for is still uncommitted, so the
-      // GPU has not run it and the shared buffer holds exactly the completed
-      // owners' results -- what hardware would show a CPU read issued before
-      // the newer producer executes. The page stays armed for the rest.
-      size_t done = 0;
+    // One answer per submission for the whole access: a range over many pages
+    // of one record waits once, and a submission that cannot be waited for is
+    // not waited for again page after page.
+    std::vector<std::pair<uint64_t, bool>> waited;
+    auto wait_once = [&](uint64_t submission) {
+      for (const auto& w : waited) {
+        if (w.first == submission) {
+          return w.second;
+        }
+      }
+      bool completed = wait_for_submission(submission);
+      waited.emplace_back(submission, completed);
+      return completed;
+    };
+    // Owners are in arm (producer) order. Publish the completed prefix:
+    // a newer owner that cannot be waited for is still uncommitted, so the
+    // GPU has not run it and the shared buffer holds exactly the completed
+    // owners' results -- what hardware would show a CPU read issued before
+    // the newer producer executes. The page stays armed for the rest.
+    std::vector<uint32_t> done_counts(touched.size(), 0);
+    uint32_t max_done = 0;
+    for (size_t t = 0; t < touched.size(); ++t) {
+      const std::vector<Owner>& owners = touched[t].second;
+      uint32_t done = 0;
       for (const Owner& owner : owners) {
-        if (!owner.submission || !wait_for_submission(owner.submission)) {
+        if (!owner.submission || !wait_once(owner.submission)) {
           break;
         }
         ++done;
@@ -390,25 +440,107 @@ class MetalLazyPublication {
       if (done != owners.size() && !PartialPublishEnabled()) {
         done = 0;
       }
-      uint64_t bytes = 0;
-      for (size_t i = 0; i < done; ++i) {
-        bytes += CopyPage(owners[i], page, shared_contents, translate_physical);
-      }
-      std::lock_guard<std::mutex> lock(mutex_);
-      for (size_t i = 0; i < done; ++i) {
-        RemoveOwnerFromPage(page, owners[i].authority_sequence);
-        ForgetPage(owners[i].authority_sequence, page);
-      }
-      if (done) {
-        ++stats_.fault_pages_copied;
-        stats_.fault_bytes_copied += bytes;
-      }
-      if (done != owners.size()) {
-        ++stats_.stale_reads;
-        if (done) {
-          ++stats_.stale_partial_pages;
+      done_counts[t] = done;
+      max_done = std::max(max_done, done);
+    }
+    std::vector<uint64_t> page_bytes(touched.size(), 0);
+    uint64_t bulk_bytes = 0;
+    if (touched.size() < kBulkPages || !BulkPublishEnabled()) {
+      for (size_t t = 0; t < touched.size(); ++t) {
+        for (uint32_t i = 0; i < done_counts[t]; ++i) {
+          page_bytes[t] += CopyPage(touched[t].second[i], touched[t].first,
+                                    shared_contents, translate_physical);
         }
-        ++remaining;
+      }
+    } else {
+      // A range of pages (a guest protection change over an arena, a large
+      // host read): CopyPage walks a whole 32-row tile band for every page,
+      // ~40 us each for a 1280-wide target -- 70 ms for one 7 MB range of
+      // LEGO Indiana Jones' frame targets. Walk every record once instead.
+      // Round k copies the k-th owner of each page, so a page's owners still
+      // land in producer order.
+      struct Group {
+        const Owner* owner;
+        std::vector<uint32_t> pages;
+      };
+      for (uint32_t k = 0; k < max_done; ++k) {
+        std::vector<Group> groups;
+        std::unordered_map<uint64_t, size_t> group_of;
+        for (size_t t = 0; t < touched.size(); ++t) {
+          if (done_counts[t] <= k) {
+            continue;
+          }
+          const Owner& owner = touched[t].second[k];
+          auto found = group_of.find(owner.authority_sequence);
+          if (found == group_of.end()) {
+            found =
+                group_of.emplace(owner.authority_sequence, groups.size()).first;
+            groups.push_back({&owner, {}});
+          }
+          // `touched` is in ascending page order, and so is each group.
+          groups[found->second].pages.push_back(touched[t].first);
+        }
+        std::vector<uint64_t> selected;
+        for (const Group& group : groups) {
+          uint32_t first_page = group.pages.front();
+          uint32_t last_page = group.pages.back();
+          selected.assign(((last_page - first_page) >> 6) + 1, 0);
+          for (uint32_t page : group.pages) {
+            uint32_t bit = page - first_page;
+            selected[bit >> 6] |= uint64_t(1) << (bit & 63);
+          }
+          bulk_bytes += CopyPages(*group.owner, first_page, last_page,
+                                  selected.data(), shared_contents,
+                                  translate_physical);
+        }
+      }
+    }
+    uint32_t remaining = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stats_.fault_bytes_copied += bulk_bytes;
+      for (size_t t = 0; t < touched.size(); ++t) {
+        const uint32_t page = touched[t].first;
+        const std::vector<Owner>& owners = touched[t].second;
+        const uint32_t done = done_counts[t];
+        for (uint32_t i = 0; i < done; ++i) {
+          if (!RemoveOwnerFromPage(page, owners[i].authority_sequence)) {
+            // The owner left the page between the snapshot and here. With
+            // a newer owner on the page it was superseded (a resolve to the
+            // same destination every frame: Just Cause 2 thousands of times
+            // a run, LEGO Indiana Jones' arena at every boot) and the newer
+            // record's publication covers the copy above. With no owner
+            // left, a drain or a second fault on the host page published it,
+            // and the copy above may have covered a CPU write the other one
+            // let through (Rise of the Tomb Raider: over 10,000 pages in a
+            // three-minute route; Crysis 3: one page every few frames).
+            const std::vector<Owner>* left = FindPageOwners(page);
+            if (left && !left->empty()) {
+              ++stats_.superseded_copies;
+            } else {
+              const uint64_t n = ++stats_.raced_copies;
+              if (n <= 8 || (n & 1023) == 0) {
+                XELOGW("MetalLazyRace #{}: page {:08X} of seq={} was "
+                       "published by a drain or a second access while this "
+                       "access copied it ({} superseded copies so far)",
+                       n, page << kPageShift, owners[i].authority_sequence,
+                       stats_.superseded_copies);
+              }
+            }
+          }
+          ForgetPage(owners[i].authority_sequence, page);
+        }
+        if (done) {
+          ++stats_.fault_pages_copied;
+          stats_.fault_bytes_copied += page_bytes[t];
+        }
+        if (done != owners.size()) {
+          ++stats_.stale_reads;
+          if (done) {
+            ++stats_.stale_partial_pages;
+          }
+          ++remaining;
+        }
       }
     }
     return remaining;
@@ -534,6 +666,37 @@ class MetalLazyPublication {
                   shared_contents + c0, c1 - c0);
       return c1 - c0;
     }
+    const uint64_t selected = 1;
+    return CopyTiledPages(o, page, page, &selected, shared_contents, ram);
+  }
+
+  // CopyPage for the pages of [first_page, last_page] whose bit is set in
+  // `selected` (bit i = first_page + i), in one walk of the record.
+  static uint64_t CopyPages(
+      const Owner& o, uint32_t first_page, uint32_t last_page,
+      const uint64_t* selected, const uint8_t* shared_contents,
+      const std::function<uint8_t*(uint32_t)>& translate_physical) {
+    if (o.linear) {
+      uint64_t copied = 0;
+      for (uint32_t page = first_page; page <= last_page; ++page) {
+        uint32_t bit = page - first_page;
+        if (selected[bit >> 6] & (uint64_t(1) << (bit & 63))) {
+          copied += CopyPage(o, page, shared_contents, translate_physical);
+        }
+      }
+      return copied;
+    }
+    uint8_t* ram = translate_physical(o.guest_addr);
+    if (!ram || !shared_contents) {
+      return 0;
+    }
+    return CopyTiledPages(o, first_page, last_page, selected, shared_contents,
+                          ram);
+  }
+
+  static uint64_t CopyTiledPages(const Owner& o, uint32_t first_page,
+                                 uint32_t last_page, const uint64_t* selected,
+                                 const uint8_t* shared_contents, uint8_t* ram) {
     if (!o.bpp) {
       return 0;
     }
@@ -547,17 +710,19 @@ class MetalLazyPublication {
     // Same run geometry as the eager publication walk.
     const uint32_t run_texels = TiledPublishRunTexels(o.bpp);
     const uint64_t band_bytes = uint64_t(pitch_aligned) * 32u * o.bpp;
-    const uint64_t page_lo = uint64_t(page_start) + 8192u;  // slack applied
-    const uint64_t page_hi = uint64_t(page_end) + 8192u;    // symmetrically
+    // The pages' span, with slack applied symmetrically.
+    const uint64_t span_lo = (uint64_t(first_page) << kPageShift) + 8192u;
+    const uint64_t span_hi = (uint64_t(last_page + 1) << kPageShift) + 8192u;
     uint64_t copied = 0;
     for (uint32_t y = 0; y < o.height;) {
       const uint32_t tiled_y = o.dest_offset_y + y;
       const uint32_t band = tiled_y >> 5;
       const uint64_t band_start = uint64_t(o.guest_addr) + band * band_bytes;
       const uint64_t band_end = band_start + band_bytes;
-      // Band span [band_start - 4 KiB, band_end + 4 KiB) vs the page, both
+      // Band span [band_start - 4 KiB, band_end + 4 KiB) vs the pages, both
       // shifted by 8 KiB so the comparison never underflows.
-      if (band_end + 4096u + 8192u <= page_lo || band_start + 8192u - 4096u >= page_hi) {
+      if (band_end + 4096u + 8192u <= span_lo ||
+          band_start + 8192u - 4096u >= span_hi) {
         // Skip to the first row of the next band.
         const uint32_t next_tiled_y = (band + 1u) << 5;
         y = next_tiled_y - o.dest_offset_y;
@@ -578,14 +743,23 @@ class MetalLazyPublication {
           run_bytes = fit * o.bpp;
         }
         if (run_bytes) {
-          uint32_t abs0 = o.guest_addr + off;
-          uint32_t abs1 = abs0 + run_bytes;
-          uint32_t c0 = std::max(abs0, page_start);
-          uint32_t c1 = std::min(abs1, page_end);
-          if (c0 < c1) {
-            std::memcpy(ram + (c0 - o.guest_addr),
-                        src_base + (c0 - o.guest_addr), c1 - c0);
-            copied += c1 - c0;
+          const uint64_t abs0 = uint64_t(o.guest_addr) + off;
+          const uint64_t abs1 = abs0 + run_bytes;
+          const uint64_t run_first_page = abs0 >> kPageShift;
+          const uint64_t run_last_page = (abs1 - 1) >> kPageShift;
+          for (uint64_t page = std::max<uint64_t>(run_first_page, first_page);
+               page <= run_last_page && page <= last_page; ++page) {
+            const uint64_t bit = page - first_page;
+            if (!(selected[bit >> 6] & (uint64_t(1) << (bit & 63)))) {
+              continue;
+            }
+            const uint64_t c0 = std::max(abs0, page << kPageShift);
+            const uint64_t c1 = std::min(abs1, (page + 1) << kPageShift);
+            if (c0 < c1) {
+              std::memcpy(ram + (c0 - o.guest_addr),
+                          src_base + (c0 - o.guest_addr), size_t(c1 - c0));
+              copied += c1 - c0;
+            }
           }
         }
         x += run;

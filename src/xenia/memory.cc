@@ -2306,6 +2306,7 @@ bool PhysicalHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
         invalidate_size = uint32_t(end - first);
       }
     }
+    ProvideReadWatchedRange(global_lock, invalidate_address, invalidate_size);
     TriggerCallbacks(std::move(global_lock), invalidate_address,
                      invalidate_size, true, true, false,
                      InvalidateUnwatchedEnabled());
@@ -2688,6 +2689,85 @@ void PhysicalHeap::ProvideReadWatchedEdgePages(uint32_t virtual_address,
   }
 }
 
+void PhysicalHeap::ProvideReadWatchedRange(
+    global_unique_lock_type& global_lock_locked_once, uint32_t virtual_address,
+    uint32_t length) {
+  // The locked pass that follows (TriggerCallbacks) publishes under the
+  // global lock, where a record still in the GPU's open command buffer can
+  // neither be committed nor waited for, and every other guest thread that
+  // makes a kernel call stalls behind the copy. LEGO Indiana Jones turns its
+  // 40 MB frame-target arena into a heap this way at a scene change: the
+  // locked pass spent 70 ms publishing 7 MB of resolves, the thread that
+  // feeds the ring buffer sat behind it, and the frame's last resolve into
+  // the arena then executed after the game had built the heap there (on the
+  // console it executes within microseconds of the call) and was published
+  // over the heap header. Publishing here first is what a write fault does
+  // (ProvideReadWatchedPage). XE_PROTECT_UNLOCKED_PUBLISH=0 is the rollback.
+  static const bool s_enabled = [] {
+    const char* value = std::getenv("XE_PROTECT_UNLOCKED_PUBLISH");
+    return !(value && value[0] == '0' && !value[1]);
+  }();
+  if (!s_enabled || !length || virtual_address < heap_base_ ||
+      virtual_address - heap_base_ >= heap_size_) {
+    return;
+  }
+  uint32_t heap_relative_address = virtual_address - heap_base_;
+  length = std::min(length, heap_size_ - heap_relative_address);
+  uint32_t system_page_first =
+      (heap_relative_address + host_address_offset()) >> system_page_shift_;
+  uint32_t system_page_last = std::min(
+      (heap_relative_address + length - 1 + host_address_offset()) >>
+          system_page_shift_,
+      system_page_count_ - 1);
+  auto any_read_watched = [&]() {
+    for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
+      if (system_page_flags_[i >> 6].notify_on_read &
+          (uint64_t(1) << (i & 63))) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (!any_read_watched()) {
+    return;
+  }
+  std::shared_lock<std::shared_mutex> calls_lock(
+      memory_->physical_memory_read_callback_calls_mutex_);
+  // Copied, as the list may change once the global lock is released.
+  std::pair<Memory::PhysicalMemoryReadCallback, void*> callbacks[4];
+  size_t callback_count = memory_->physical_memory_read_callbacks_.size();
+  if (!callback_count || callback_count > xe::countof(callbacks)) {
+    return;
+  }
+  for (size_t i = 0; i < callback_count; ++i) {
+    callbacks[i] = *memory_->physical_memory_read_callbacks_[i];
+  }
+  uint32_t physical_address_offset = GetPhysicalAddress(heap_base_);
+  uint32_t physical_address_start =
+      xe::sat_sub(system_page_first << system_page_shift_,
+                  host_address_offset()) +
+      physical_address_offset;
+  uint32_t physical_length =
+      std::min(xe::sat_sub((system_page_last + 1) << system_page_shift_,
+                           host_address_offset()),
+               heap_size_) +
+      physical_address_offset - physical_address_start;
+  // A second pass takes what the GPU thread armed while the first one waited
+  // and copied; anything later is left to the locked pass.
+  for (uint32_t pass = 0; pass < 2; ++pass) {
+    global_lock_locked_once.unlock();
+    for (size_t i = 0; i < callback_count; ++i) {
+      callbacks[i].first(callbacks[i].second, physical_address_start,
+                         physical_length,
+                         Memory::PhysicalAccess::kWriteUnlocked);
+    }
+    global_lock_locked_once.lock();
+    if (!any_read_watched()) {
+      break;
+    }
+  }
+}
+
 void PhysicalHeap::ReconcileHostProtection(uint32_t address, uint32_t size) {
   // On a host whose page is larger than the guest page, BaseHeap skips host
   // commits and protection changes for this heap (ShouldSkipHostCommit, the
@@ -2708,9 +2788,42 @@ void PhysicalHeap::ReconcileHostProtection(uint32_t address, uint32_t size) {
   uint32_t system_page_last = std::min(
       (heap_relative_end + host_address_offset()) >> system_page_shift_,
       system_page_count_ - 1);
+  // One host call per run of pages with the same target (a 40 MB range is
+  // 2560 host pages).
+  uint8_t* protect_base = membase_ + heap_base_;
+  uint32_t run_first = UINT32_MAX;
+  xe::memory::PageAccess run_target = xe::memory::PageAccess::kNoAccess;
+  auto flush = [&](uint32_t run_end) {
+    if (run_first != UINT32_MAX) {
+      xe::memory::Protect(protect_base + (size_t(run_first) << system_page_shift_),
+                          size_t(run_end - run_first) << system_page_shift_,
+                          run_target);
+      run_first = UINT32_MAX;
+    }
+  };
   for (uint32_t i = system_page_first; i <= system_page_last; ++i) {
-    RestoreUnwatchedSystemPage(i, false);
+    // As RestoreUnwatchedSystemPage: a read-watched page keeps its
+    // protection, a write-watched one stays read-only.
+    uint64_t bit = uint64_t(1) << (i & 63);
+    const SystemPageFlagsBlock& flags = system_page_flags_[i >> 6];
+    if (flags.notify_on_read & bit) {
+      flush(i);
+      continue;
+    }
+    xe::memory::PageAccess target = SystemPageGuestAccess(i);
+    if ((flags.notify_on_invalidation & bit) &&
+        target == xe::memory::PageAccess::kReadWrite) {
+      target = xe::memory::PageAccess::kReadOnly;
+    }
+    if (run_first != UINT32_MAX && target != run_target) {
+      flush(i);
+    }
+    if (run_first == UINT32_MAX) {
+      run_first = i;
+      run_target = target;
+    }
   }
+  flush(system_page_last + 1);
 }
 
 void PhysicalHeap::RestoreUnwatchedSystemPage(uint32_t system_page,
