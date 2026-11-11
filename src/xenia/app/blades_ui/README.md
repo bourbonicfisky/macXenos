@@ -1,5 +1,9 @@
 # Preferences blades
 
+Original interface by Greg Gant: its design, artwork and code. Reuse requires
+credit to Greg Gant as its creator (see the top-level README's License
+section).
+
 The app's Preferences, drawn as the Xbox 360 Blades dashboard (2005–08):
 metal tabs stacked down both edges, one saturated blade open in the middle, a
 focus list on the left of it and a pane on the right that follows the cursor.

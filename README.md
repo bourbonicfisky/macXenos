@@ -119,6 +119,8 @@ More for developers is in the
   project is built on
 - [Xenia Edge](https://github.com/has207/xenia-edge), for several fixes
   and ideas
+- The macXenos icon and the Blades dashboard interface (its design, artwork
+  and code) are original work by Greg Gant
 - Third-party libraries and their licenses are listed in the app under
   System > About > Acknowledgements; the license texts macXenos ships are in
   [docs/acknowledgements](docs/acknowledgements/)
@@ -127,6 +129,10 @@ More for developers is in the
 
 macXenos is released under the same BSD license as Xenia. See
 [LICENSE](LICENSE).
+
+The macXenos icon and the Blades dashboard interface are original work by
+Greg Gant. If you reuse either one, or anything based on it, credit Greg
+Gant as its creator.
 
 ## Disclaimer
 

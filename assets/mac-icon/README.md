@@ -1,5 +1,8 @@
 # macXenos app icon
 
+Original artwork by Greg Gant. Reuse requires credit to Greg Gant as its
+creator (see the README's License section).
+
 `macxenos_ring_dark_2048.png` / `macxenos_ring_light_2048.png` are the source
 artwork (full-bleed squares). `src/xenia/app/xenia.icns`, which
 `tools/build/package_mac.sh` bundles, is generated from the dark variant:
