@@ -1583,7 +1583,9 @@ dword_result_t NtReleaseMutant_entry(dword_t mutant_handle,
   auto mutant =
       kernel_state()->object_table()->LookupObject<XMutant>(mutant_handle);
   if (mutant) {
-    mutant->ReleaseMutant(priority_increment, abandon, wait);
+    // A release by a thread that does not own the mutant fails
+    // (STATUS_MUTANT_NOT_OWNED). Titles test for ownership this way.
+    result = mutant->ReleaseMutant(priority_increment, abandon, wait);
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
