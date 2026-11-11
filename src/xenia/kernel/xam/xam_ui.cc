@@ -11,7 +11,10 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <chrono>
 #include <cstdlib>
+#include <mutex>
+#include <string>
 
 #include "xenia/app/emulator_window.h"
 #include "xenia/base/logging.h"
@@ -386,15 +389,43 @@ static dword_result_t XamShowMessageBoxUi(
     buttons.push_back("OK");
   }
 
-  XELOGI("XamShowMessageBoxUI: '{}' ({} buttons, focused {}){}", title,
-         buttons.size(), uint32_t(active_button),
-         cvars::headless ? "; headless, answering the focused button" : "");
+  std::string button_list;
+  for (const std::string& button : buttons) {
+    button_list += (button_list.empty() ? "'" : ", '") + button + "'";
+  }
+  // Headless: answer with the focused button. A box that comes straight back
+  // was answered with a button that reopens it ("Select storage device" with
+  // no selector to show): each repeat steps to the next button, so an
+  // unattended run gets past it.
+  uint32_t headless_button = active_button;
+  if (cvars::headless) {
+    static std::mutex repeat_mutex;
+    static std::string repeat_text;
+    static std::chrono::steady_clock::time_point repeat_time;
+    static uint32_t repeat_step = 0;
+    std::lock_guard<std::mutex> lock(repeat_mutex);
+    auto now = std::chrono::steady_clock::now();
+    if (text == repeat_text && now - repeat_time < std::chrono::seconds(5)) {
+      ++repeat_step;
+    } else {
+      repeat_step = 0;
+    }
+    repeat_text = text;
+    repeat_time = now;
+    headless_button =
+        (uint32_t(active_button) + repeat_step) % uint32_t(buttons.size());
+  }
+
+  XELOGI("XamShowMessageBoxUI: '{}' / '{}' (buttons {}, focused {}){}", title,
+         text, button_list, uint32_t(active_button),
+         cvars::headless
+             ? fmt::format("; headless, answering button {}", headless_button)
+             : std::string());
 
   X_RESULT result;
   if (cvars::headless) {
-    // Auto-pick the focused button.
-    auto run = [result_ptr, active_button]() -> X_RESULT {
-      result_ptr->ButtonPressed = static_cast<uint32_t>(active_button);
+    auto run = [result_ptr, headless_button]() -> X_RESULT {
+      result_ptr->ButtonPressed = headless_button;
       return X_ERROR_SUCCESS;
     };
 
