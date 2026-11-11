@@ -2014,6 +2014,35 @@ const char* MetalSharedTextureCache::UnservedReason(
   return "served";
 }
 
+std::string MetalSharedTextureCache::DescribeServeState(
+    uint32_t fetch_constant_index, bool is_signed) {
+  const char* why = UnservedReason(fetch_constant_index, is_signed);
+  if (fetch_constant_index >= xenos::kTextureFetchConstantCount) {
+    return why;
+  }
+  const BindingSlot& binding_slot = binding_slots_[fetch_constant_index];
+  const TextureBinding* binding = GetValidTextureBinding(fetch_constant_index);
+  const MetalTexture* texture =
+      binding ? static_cast<const MetalTexture*>(binding->texture) : nullptr;
+  uint64_t submission = submission_provider_ ? submission_provider_() : 0;
+  bool faulted = false;
+  if (texture && submission_fault_query_) {
+    faulted = (texture->last_load_submission &&
+               submission_fault_query_(texture->last_load_submission)) ||
+              (texture->last_mip_load_submission &&
+               submission_fault_query_(texture->last_mip_load_submission));
+  }
+  return fmt::format(
+      "{} prep_current={} base_outdated={} mips_outdated={} load_sub={} "
+      "mip_load_sub={} cur_sub={} faulted={}",
+      why, binding_slot.prep_current ? 1 : 0,
+      texture && texture->base_outdated_lockless() ? 1 : 0,
+      texture && texture->mips_outdated_lockless() ? 1 : 0,
+      texture ? texture->last_load_submission : 0,
+      texture ? texture->last_mip_load_submission : 0, submission,
+      faulted ? 1 : 0);
+}
+
 bool MetalSharedTextureCache::FindResolveForward(
     uint32_t dest_base, uint32_t dest_pitch, uint32_t bpp_log2,
     uint32_t offset_x, uint32_t offset_y, uint32_t width, uint32_t height,

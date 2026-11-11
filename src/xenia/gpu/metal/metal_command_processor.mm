@@ -12030,6 +12030,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // fetch's ranges are drained here -- still before the consuming
       // encoder opens -- so the legacy path reads converged RAM instead of
       // the draw being skipped.
+      draw_route_verify_submission_ = CurrentEncodingSubmission();
       uint32_t bits = draw_shared_route_mask_;
       uint32_t index;
       metal::GuestRangeSet& unserved_ranges = unserved_ranges_scratch_;
@@ -12070,7 +12071,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
               uint32_t(fetch.mip_min_level), uint32_t(fetch.mip_max_level),
               uint32_t(fetch.mip_address) << 12, is_signed ? 1 : 0,
               trace_draw_index_, draw_gpu_ordering_active_ ? 1 : 0,
-              shared_texture_cache_->UnservedReason(index, is_signed));
+              shared_texture_cache_->DescribeServeState(index, is_signed));
         }
       }
       if (!unserved_ranges.empty() && draw_gpu_ordering_active_) {
@@ -13552,6 +13553,18 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             // Ordering elided this draw's consumer wait on the strength of
             // buffer serving; a legacy fallback here would read unconverged
             // RAM. Fail closed, counted.
+            static uint32_t s_fallback_logs = 0;
+            if (s_fallback_logs++ < 32) {
+              XELOGW(
+                  "MetalSharedTex ORDERING-FALLBACK fc={} fmt={} base={:08X} "
+                  "{}x{} signed={} draw={} verify_sub={} state: {}",
+                  binding.fetch_constant, uint32_t(fetch.format),
+                  fetch.base_address << 12, fetch.size_2d.width + 1,
+                  fetch.size_2d.height + 1, binding.is_signed ? 1 : 0,
+                  trace_draw_index_, draw_route_verify_submission_,
+                  shared_texture_cache_->DescribeServeState(
+                      binding.fetch_constant, binding.is_signed));
+            }
             RecordDrawSkip(MetalDrawSkipReason::kResourceFailure,
                            "ordering-route-fallback");
             return false;

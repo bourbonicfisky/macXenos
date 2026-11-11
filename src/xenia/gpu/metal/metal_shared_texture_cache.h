@@ -14,6 +14,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -146,6 +147,11 @@ class MetalSharedTextureCache : public TextureCache {
   // Diagnostic: why GetServedSlot returned 0 for this binding (static
   // string; "served" when it would not have).
   const char* UnservedReason(uint32_t fetch_constant_index, bool is_signed);
+  // Diagnostic: the state GetServedSlot's answer for this binding rests on
+  // (the reason, whether prep found it current, and the submissions of its
+  // loads against the one being encoded).
+  std::string DescribeServeState(uint32_t fetch_constant_index,
+                                 bool is_signed);
 
   // Resolve forwarding (XE_METAL_RESOLVE_FORWARD=0 disables): a GPU-resident
   // resolve into one of this cache's single-level tiled 2D textures (same
