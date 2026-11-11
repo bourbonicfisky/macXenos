@@ -315,3 +315,57 @@ checks, data hidden past the file system) would break, so test the routed
 titles on trimmed copies before offering this to users. A trimmed image
 also no longer matches the Redump checksums people use to verify dumps;
 keep trimming opt-in and say so where the action is offered.
+
+## 5.1 surround sound on the Mac
+
+Recorded 2026-11-11.
+
+**Goal:** games that mix in 5.1 play in 5.1 on a Mac with surround
+speakers: an HDMI receiver or soundbar, a multichannel USB interface, or
+speakers set up as 5.1 in Audio MIDI Setup. On headphones and AirPods the
+same 5.1 mix plays as virtual surround through macOS spatial audio, instead
+of a plain stereo downmix. An Audio blade setting chooses Automatic, Stereo
+or 5.1, and the dashboard shows what the Mac is outputting.
+
+**State (checked 2026-11-11 by reading the source; nothing tested on a
+surround device yet):**
+- The emulated console already tells games it has 5.1: the default
+  xconfig audio flags are Dolby Digital plus Pro Logic
+  (`src/xenia/kernel/xconfig.cc`), and `XAudioGetSpeakerConfig` returns
+  them. The dashboard's console flags already list Dolby Pro Logic, Dolby
+  Digital and Dolby Digital with WMA Pro (`src/xenia/app/blades_model.cc`).
+- The audio system hands the driver 6 channels in the console's order
+  (front left, front right, centre, LFE, back left, back right).
+- The SDL driver (`src/xenia/apu/sdl/sdl_audio_driver.cc`) asks SDL 2.32
+  for 6 channels and allows SDL to change that. On macOS, SDL's CoreAudio
+  backend keeps the 6 channels it was asked for (only its iOS path asks the
+  device), tags the queue `kAudioChannelLayoutTag_DVD_6`, and leaves the
+  mapping to the speakers, or the downmix to stereo, to macOS. So the
+  driver's own 6-to-2 downmix (`sequential_6_BE_to_interleaved_2_LE`)
+  probably never runs on a Mac. Check `sdl_device_channels_` on a stereo
+  Mac to confirm.
+- Open question: whether `kAudioChannelLayoutTag_DVD_6` describes the same
+  channel order as SDL's 5.1 (L R C LFE Ls Rs). If not, the centre and
+  surround channels reach the wrong speakers today.
+
+**Rough shape:**
+1. Test what works now: a 5.1 HDMI receiver or a USB interface set to 5.1,
+   a speaker test signal routed through a game's audio, and a game with a
+   known 5.1 mix. Fix the channel layout if it's wrong.
+2. Talk to CoreAudio directly for output (an AudioUnit or AVAudioEngine
+   instead of SDL), so macXenos reads the device's real channel layout,
+   follows device changes, and passes the 5.1 channels through untouched.
+3. Spatial audio on headphones: render the 5.1 bed through
+   `AVAudioEnvironmentNode` or the spatial mixer audio unit, with head
+   tracking where the headphones support it. Check which macOS version
+   first has the pieces needed.
+4. The Audio blade setting and a status line. Set the console's audio
+   flags from it, so a Mac on stereo can tell games to mix in stereo, which
+   some games do better than a downmix of their 5.1 mix.
+
+**Risk:** optical (S/PDIF) and some HDMI paths carry 5.1 only as a Dolby
+Digital bitstream, which macOS doesn't encode on the fly, so those setups
+would need a live AC-3 encoder (FFmpeg, already used for XMA, has one).
+Spatial audio APIs and their head-tracking support have changed across
+macOS releases. Testing needs real surround hardware. Related: the
+dialogue enhance moonshot above works on the same centre channel.
