@@ -83,8 +83,8 @@ export function graphics(state: NativeState): BladeDef {
         <>
           <p>
             Metal draws every frame natively on your Mac&rsquo;s GPU and is the
-            fastest. Vulkan runs through MoltenVK and is kept for comparison
-            when a game looks wrong.
+            fastest. Vulkan runs through MoltenVK, is slower, and is kept for
+            developers to compare against.
           </p>
           <Options name="gpu" title="Renderer" options={RENDERERS} current={renderer} />
           <NextLaunchNote names={["gpu"]} />

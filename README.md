@@ -37,7 +37,8 @@ macXenos.
   player profiles and an in-game dashboard, plus automatic updates.
 - **Frame generation through Metal 4** is planned.
 
-The Vulkan renderer (through MoltenVK) is still included as a fallback.
+The older Vulkan renderer (through MoltenVK) is kept for developers to compare
+against; use Metal.
 
 ## Requirements
 

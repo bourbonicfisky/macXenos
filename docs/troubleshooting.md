@@ -29,14 +29,37 @@ to **Controller > Dashboard shortcut** and choose **Back + Start**.
 
 ## A game looks wrong
 
-- Try the other renderer: **Graphics > Renderer > Vulkan (MoltenVK)**, then
-  restart the game. If it looks right on Vulkan, please report it. That
-  helps narrow the problem down.
-- If you raised **Internal resolution**, set it back to **1x** and see
-  whether the problem goes away.
-- A game may have known problems in Xenia generally. The community
-  [compatibility list](https://xenia-manager.github.io/compatibility) is a
-  good place to check.
+First put back anything you changed, then try the switches made for this.
+They're all on the **Graphics** blade. Some only take effect the next time the
+game starts; the pane says so when that's the case.
+
+1. **Internal resolution** back to **1x**. Some games draw shadows,
+   reflections or effects that only line up at the console's own resolution.
+2. **Upscaling** back to **Bilinear**. This rules out a sharpening filter
+   (CAS, FSR or MetalFX) as the cause of halos or shimmering edges.
+3. **Unset shader inputs**: *Auto*, *On* or *Off*. Some games draw with a
+   value they never set, and the Xbox 360 simply used whatever was left there,
+   so no one choice suits every game. *Auto* covers the games known to need
+   it. If shadows flicker or lighting looks off, try *On* and *Off*.
+4. **Troubleshooting**, under *Metal renderer*:
+   - **Memory exports from drawing shaders**: *Auto*, *On* or *Off*. A few
+     games write data from shaders that also draw; without it Child of Eden's
+     videos stay a flat green. *Auto* turns it on for the games known to need
+     it. If something is missing or stuck on one colour, try *On*. It costs
+     some speed, so go back to *Auto* if it doesn't help.
+   - **Wait for the GPU before signalling the game** removes brief
+     whole-screen colour flashes, as seen in Rise of the Tomb Raider. It costs
+     frame rate on M1 and M2 Macs, so leave it off unless a game flashes.
+   - **The six switches above those** are speed shortcuts in the Metal
+     renderer, all on by default. If a glitch appeared after an update, turn
+     them off one at a time and restart the game after each. If one makes the
+     glitch go away, please report which, then turn it back on. **Reset**
+     puts every switch back to its default.
+
+Check the [compatibility list](compatibility.md) for problems already known in
+the games we test. If none of this helps, please
+[report it](#reporting-a-problem) with a screenshot and say which switches you
+tried.
 
 ## A game runs slowly
 
@@ -45,12 +68,23 @@ to **Controller > Dashboard shortcut** and choose **Back + Start**.
 - **Internal resolution** above 1x costs a lot of GPU time. Try 1x.
 - Close other heavy apps, and run only one copy of macXenos at a time.
 - Intel Macs, especially those with AMD graphics, are slower and less tested
-  than Apple silicon. If a game misbehaves there, try the Vulkan renderer.
+  than Apple silicon.
+- **Performance cores** on the Graphics blade should be on **Every thread**
+  (the default). With it off, macOS parks most of a game's threads on the
+  slower efficiency cores.
 
 ## Controller isn't detected
 
 - Make sure macOS sees it: **System Settings > Game Controllers** should list
-  it.
+  it. If it doesn't, pair it first. Apple's guides walk through it:
+  - [Connect a game controller to Mac](https://support.apple.com/guide/games/devf8cec167c/mac)
+  - [Connect an Xbox wireless controller](https://support.apple.com/111101)
+  - [Connect a PlayStation wireless controller](https://support.apple.com/111100)
+  - [Connect any other wireless controller](https://support.apple.com/111099),
+    including which controllers macOS supports
+- If macOS says the controller needs a firmware update, update it with the
+  maker's tools (for Xbox controllers, Microsoft's instructions), then pair
+  it again.
 - Check **Controller > Input system** in the dashboard is set to
   **Automatic** or **Game controllers (SDL)**.
 - Unplug and reconnect it, or re-pair it over Bluetooth, while macXenos is
