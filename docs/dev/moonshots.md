@@ -251,7 +251,9 @@ touching the rest of the mix. Off by default, with a small strength choice
   `sequential_6_BE_to_interleaved_2_LE` folds half the centre into left and
   right and drops the LFE; for a 6-channel device the channels pass through.
   The centre channel is still separate at that point, so this is where a
-  gain and EQ would go.
+  gain and EQ would go. (Possibly not on a Mac: see 5.1 surround below;
+  SDL may hand macOS all six channels and let it downmix, in which case the
+  gain goes before that.)
 - The `volume_` path in the same callback only runs when no conversion is
   needed, so it doesn't apply to the usual 6-to-2 case either. Worth fixing
   while there.
@@ -365,7 +367,8 @@ surround device yet):**
 
 **Risk:** optical (S/PDIF) and some HDMI paths carry 5.1 only as a Dolby
 Digital bitstream, which macOS doesn't encode on the fly, so those setups
-would need a live AC-3 encoder (FFmpeg, already used for XMA, has one).
+would need a live AC-3 encoder. FFmpeg has one, but the build of it
+bundled for XMA (`third_party/ffmpeg-xenia`) enables no encoders.
 Spatial audio APIs and their head-tracking support have changed across
 macOS releases. Testing needs real surround hardware. Related: the
 dialogue enhance moonshot above works on the same centre channel.
