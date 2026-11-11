@@ -7735,11 +7735,16 @@ void* MetalRenderTargetCache::GetResolveSnapshot(uint32_t dest_base) const {
 }
 
 void* MetalRenderTargetCache::FindContainingSnapshot(
-    uint32_t dest_base, uint32_t* y_offset_out) const {
+    uint32_t dest_base, uint64_t pixel_format, uint32_t* y_offset_out) const {
+  static const bool s_match_format = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_STRIP_PARENT_FORMAT"), true);
   for (const auto& pair : resolve_snapshots_) {
     const Snapshot& snap = pair.second;
     if (pair.first & kAssemblySnapshotKeyFlag) {
       // Column assemblies are not vertical-strip parents.
+      continue;
+    }
+    if (s_match_format && snap.pixel_format != pixel_format) {
       continue;
     }
     uint32_t snap_base = uint32_t(pair.first >> 1);

@@ -16152,7 +16152,7 @@ bool MetalCommandProcessor::IssueCopy() {
         }
         uint32_t strip_y_offset = 0;
         void* parent_snap = render_target_cache_->FindContainingSnapshot(
-            resolve_info.copy_dest_base, &strip_y_offset);
+            resolve_info.copy_dest_base, dest_pixel_format, &strip_y_offset);
         // Half-pass placement audit (XE_METAL_RESOLVE_LOG=1): the guest splits
         // 720p into EDRAM-capacity halves; each half's resolve must land at
         // its own dest rows. Log the raw placement inputs for big resolves.
@@ -17215,7 +17215,8 @@ bool MetalCommandProcessor::IssueCopy() {
       // offset — shaders sample the FIRST strip's base as the whole buffer.
       uint32_t strip_y_offset = 0;
       void* parent_snap = render_target_cache_->FindContainingSnapshot(
-          resolve_info.copy_dest_base, &strip_y_offset);
+          resolve_info.copy_dest_base, uint64_t(MTLPixelFormatR32Float),
+          &strip_y_offset);
       static const bool s_resolve_log_d =
           std::getenv("XE_METAL_RESOLVE_LOG") != nullptr;
       if (s_resolve_log_d) {

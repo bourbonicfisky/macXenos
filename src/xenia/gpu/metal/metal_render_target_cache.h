@@ -397,7 +397,17 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* EnsureAssemblySnapshot(uint32_t base, uint32_t width, uint32_t height,
                                uint64_t pixel_format);
   void* GetResolveSnapshot(uint32_t dest_base) const;
-  void* FindContainingSnapshot(uint32_t dest_base, uint32_t* y_offset_out) const;
+  // The snapshot of `pixel_format` that holds `dest_base` a whole number of
+  // rows below its own base: the parent a later vertical strip joins. A
+  // buffer's address says nothing about what it holds: Grand Theft Auto V
+  // cycles three 1280x720 buffers that each take the scene depth (as 384 +
+  // 336 row tiles) in one frame and the final colour in another, so a colour
+  // snapshot and a depth snapshot share a base. The first one found was the
+  // answer whatever its format, the depth strip was then refused as a
+  // mismatch, and the depth texture kept its first 384 rows only.
+  // XE_METAL_STRIP_PARENT_FORMAT=0 restores the search without the format.
+  void* FindContainingSnapshot(uint32_t dest_base, uint64_t pixel_format,
+                               uint32_t* y_offset_out) const;
   // A resolve that FindContainingSnapshot did not place, whose destination
   // starts a whole number of rows into a snapshot of the same width and
   // format (at its end, or inside its padding) and runs past its bottom, is
