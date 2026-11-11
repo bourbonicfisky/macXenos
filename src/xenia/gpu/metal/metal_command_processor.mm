@@ -17273,8 +17273,21 @@ bool MetalCommandProcessor::IssueCopy() {
       // at its x. The later column does not register its own base (it would
       // alias the parent without the x offset). XE_METAL_DEPTH_COLUMN_JOIN=0
       // restores one snapshot per column base.
+      // Quadrants (2026-11-11, NBA Street Homecourt): a 4x MSAA 1280x720
+      // scene is four tiles, 640x384 twice and 640x336 twice, and its depth
+      // resolves as four pieces of one 1280-pitch buffer the depth-of-field
+      // pass fetches from the first piece's base. The lower pair is a strip
+      // too narrow for the vertical join and a column that does not start at
+      // row 0, so each became a snapshot of its own and the parent kept rows
+      // 0 to 383: everything below row 384 was blurred as if far away. A
+      // column that starts on the row where the parent's first column ended
+      // joins the parent there. XE_METAL_DEPTH_QUADRANT_JOIN=0 restores
+      // columns from row 0 only.
       static const bool s_depth_column_join = metal::ParseMetalEnvironmentFlag(
           std::getenv("XE_METAL_DEPTH_COLUMN_JOIN"), true);
+      static const bool s_depth_quadrant_join =
+          metal::ParseMetalEnvironmentFlag(
+              std::getenv("XE_METAL_DEPTH_QUADRANT_JOIN"), true);
       if (!snap && s_depth_column_join &&
           render_target_cache_->sample_edram_raster_enabled() &&
           !resolve_info.copy_dest_info.copy_dest_array) {
@@ -17283,6 +17296,7 @@ bool MetalCommandProcessor::IssueCopy() {
         if (dest_pitch > rw && !dca.offset_x_div_8 && !dca.offset_y_div_8) {
           uint32_t base0 = resolve_info.copy_dest_base;
           uint32_t x = 0;
+          uint32_t y = 0;
           for (const auto& column : depth_column_pitches_) {
             if (column.second != dest_pitch ||
                 resolve_info.copy_dest_base <= column.first) {
@@ -17300,6 +17314,28 @@ bool MetalCommandProcessor::IssueCopy() {
             if (x) {
               break;
             }
+            // The second row of columns. The parent is 1280 wide, so its
+            // snapshot has 720 rows whatever the first column's height.
+            auto first_rows = depth_column_rows_.find(column.first);
+            if (!s_depth_quadrant_join || dest_pitch < 1280 ||
+                first_rows == depth_column_rows_.end() ||
+                !first_rows->second || (first_rows->second & 31) ||
+                first_rows->second + rh > 720) {
+              continue;
+            }
+            for (uint32_t xx = 0; xx < dest_pitch; xx += 32) {
+              if (uint32_t(texture_address::Tiled2D(
+                      int32_t(xx), int32_t(first_rows->second), dest_pitch,
+                      2)) == delta) {
+                base0 = column.first;
+                x = xx;
+                y = first_rows->second;
+                break;
+              }
+            }
+            if (y) {
+              break;
+            }
           }
           if (x + rw <= dest_pitch) {
             void* column_snap = render_target_cache_->EnsureResolveSnapshot(
@@ -17312,12 +17348,23 @@ bool MetalCommandProcessor::IssueCopy() {
                     base0, dest_pitch, rh, rw, rh);
               }
               depth_column_pitches_[base0] = dest_pitch;
+              if (!x && !y) {
+                depth_column_rows_[base0] = rh;
+              } else if (y) {
+                static uint32_t s_quadrant_logs = 0;
+                if (s_quadrant_logs++ < 8) {
+                  XELOGI(
+                      "MetalResolve: depth quadrant {:08X} {}x{} joins the "
+                      "parent at {:08X} at ({}, {})",
+                      resolve_info.copy_dest_base, rw, rh, base0, x, y);
+                }
+              }
               snap = column_snap;
               strip_x_offset = x;
-              strip_y_offset = 0;
+              strip_y_offset = y;
               // The x = 0 column (re)registers the parent base; a later column
               // is a join and must not register.
-              is_new_snapshot = x == 0;
+              is_new_snapshot = !x && !y;
             }
           }
         }

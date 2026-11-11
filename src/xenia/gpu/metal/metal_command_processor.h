@@ -463,6 +463,9 @@ class MetalCommandProcessor : public CommandProcessor {
   // guest resolves as vertical columns (Viva Pinata's 2 x 640x720 strips of a
   // 1280-pitch scene depth, fetched 1280x720 from the first column's base).
   std::unordered_map<uint32_t, uint32_t> depth_column_pitches_;
+  // Rows of the x = 0 column of each such destination: where a second row of
+  // columns starts when the guest resolves the depth as quadrants.
+  std::unordered_map<uint32_t, uint32_t> depth_column_rows_;
   std::unique_ptr<MetalPipelineCache> pipeline_cache_;
   std::unique_ptr<MetalRenderTargetCache> render_target_cache_;
   std::unique_ptr<MetalSharedMemory> shared_memory_;
