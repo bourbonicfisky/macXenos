@@ -1120,11 +1120,12 @@ uint32_t KeDelayExecutionThread(uint32_t processor_mode, uint32_t alertable,
       return stat;
     }
   }
-  X_STATUS result = thread->Delay(processor_mode, alertable, *interval_ptr);
-
-  if (result == X_STATUS_USER_APC) {
-    xeProcessUserApcs(ctx);
-  }
+  // See xeKeWaitForSingleObject for the loop.
+  X_STATUS result;
+  do {
+    result = thread->Delay(processor_mode, alertable, *interval_ptr);
+  } while (result == X_STATUS_USER_APC &&
+           xeProcessUserApcs(ctx) != X_STATUS_USER_APC);
 
   return result;
 }
@@ -1716,13 +1717,15 @@ uint32_t xeKeWaitForSingleObject(void* object_ptr, uint32_t wait_reason,
   if (alertable && xeProcessUserApcs(nullptr) == X_STATUS_USER_APC) {
     return X_STATUS_USER_APC;
   }
-  X_STATUS result =
-      object->Wait(wait_reason, processor_mode, alertable, timeout_ptr);
-  if (alertable) {
-    if (result == X_STATUS_USER_APC) {
-      xeProcessUserApcs(nullptr);
-    }
-  }
+  // A wake for an APC queued from another thread ends the host wait; deliver
+  // it and return. The wake can also outlive its APC (the delivery above took
+  // the APC, the wake arrived after): nothing is delivered then, and the wait
+  // starts over rather than report an APC that never ran.
+  X_STATUS result;
+  do {
+    result = object->Wait(wait_reason, processor_mode, alertable, timeout_ptr);
+  } while (alertable && result == X_STATUS_USER_APC &&
+           xeProcessUserApcs(nullptr) != X_STATUS_USER_APC);
   return result;
 }
 
@@ -1763,13 +1766,11 @@ uint32_t NtWaitForSingleObjectEx(uint32_t object_handle, uint32_t wait_mode,
     if (alertable && xeProcessUserApcs(nullptr) == X_STATUS_USER_APC) {
       return X_STATUS_USER_APC;
     }
-    result =
-        object->Wait(3, wait_mode, alertable, timeout_ptr ? &timeout : nullptr);
-    if (alertable) {
-      if (result == X_STATUS_USER_APC) {
-        xeProcessUserApcs(nullptr);
-      }
-    }
+    do {
+      result = object->Wait(3, wait_mode, alertable,
+                            timeout_ptr ? &timeout : nullptr);
+    } while (alertable && result == X_STATUS_USER_APC &&
+             xeProcessUserApcs(nullptr) != X_STATUS_USER_APC);
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
@@ -1838,14 +1839,14 @@ dword_result_t KeWaitForMultipleObjects_entry(
   if (alertable && xeProcessUserApcs(nullptr) == X_STATUS_USER_APC) {
     return X_STATUS_USER_APC;
   }
-  X_STATUS result = XObject::WaitMultiple(
-      uint32_t(count), reinterpret_cast<XObject**>(&objects[0]), wait_type,
-      wait_reason, processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
-  if (alertable) {
-    if (result == X_STATUS_USER_APC) {
-      xeProcessUserApcs(nullptr);
-    }
-  }
+  X_STATUS result;
+  do {
+    result = XObject::WaitMultiple(
+        uint32_t(count), reinterpret_cast<XObject**>(&objects[0]), wait_type,
+        wait_reason, processor_mode, alertable,
+        timeout_ptr ? &timeout : nullptr);
+  } while (alertable && result == X_STATUS_USER_APC &&
+           xeProcessUserApcs(nullptr) != X_STATUS_USER_APC);
   if (diag) {
     IoLedgerWaitExit();
     LoaderWaitTap("KeWaitMultiple", count ? uint32_t(objects_ptr[0]) : 0u, false,
@@ -1891,14 +1892,13 @@ uint32_t xeNtWaitForMultipleObjectsEx(uint32_t count, xe::be<uint32_t>* handles,
   if (alertable && xeProcessUserApcs(nullptr) == X_STATUS_USER_APC) {
     return X_STATUS_USER_APC;
   }
-  auto result =
-      XObject::WaitMultiple(count, reinterpret_cast<XObject**>(&objects[0]),
-                            wait_type, 6, wait_mode, alertable, timeout_ptr);
-  if (alertable) {
-    if (result == X_STATUS_USER_APC) {
-      xeProcessUserApcs(nullptr);
-    }
-  }
+  X_STATUS result;
+  do {
+    result =
+        XObject::WaitMultiple(count, reinterpret_cast<XObject**>(&objects[0]),
+                              wait_type, 6, wait_mode, alertable, timeout_ptr);
+  } while (alertable && result == X_STATUS_USER_APC &&
+           xeProcessUserApcs(nullptr) != X_STATUS_USER_APC);
   return result;
 }
 
@@ -1953,14 +1953,14 @@ dword_result_t NtSignalAndWaitForSingleObjectEx_entry(dword_t signal_handle,
     result = XObject::SignalAndWait(signal_object.get(), wait_object.get(), 3,
                                     wait_mode, alertable,
                                     timeout_ptr ? &timeout : nullptr);
+    // See xeKeWaitForSingleObject; the signal is not repeated.
+    while (alertable && result == X_STATUS_USER_APC &&
+           xeProcessUserApcs(nullptr) != X_STATUS_USER_APC) {
+      result = wait_object->Wait(3, wait_mode, alertable,
+                                 timeout_ptr ? &timeout : nullptr);
+    }
   } else {
     result = X_STATUS_INVALID_HANDLE;
-  }
-
-  if (alertable) {
-    if (result == X_STATUS_USER_APC) {
-      xeProcessUserApcs(nullptr);
-    }
   }
   return result;
 }

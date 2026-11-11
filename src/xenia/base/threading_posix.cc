@@ -32,6 +32,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <array>
 #include <cstddef>
 #include <ctime>
@@ -118,6 +119,101 @@ struct WaitBlock {
   bool pending = false;
 };
 
+// A thread's user callbacks (Thread::QueueUserCallback) and the wake for its
+// alertable waits. A callback queued while the thread is blocked in an
+// alertable wait ends that wait with kUserCallback, and the thread then runs
+// the queue itself. A signal cannot do this: its handler returns into the
+// pthread_cond_wait it interrupted, so the wait never ended, and a guest APC
+// queued from another thread stayed undelivered until the target began its
+// next alertable wait (Quantum Theory parks its job threads in one for good
+// and wakes them with empty APCs).
+struct ThreadAlert {
+  std::mutex m;
+  std::deque<std::function<void()>> callbacks;  // under m
+  // What the thread is blocked on while inside an alertable wait (under m).
+  // Queue() notifies it holding its mutex, which orders the notify after the
+  // waiter's check of `pending`.
+  std::mutex* wait_mutex = nullptr;
+  std::condition_variable* wait_cv = nullptr;
+  // The thread was terminated from outside; its waits are gone (under m).
+  bool closed = false;
+  std::atomic<bool> pending{false};
+
+  void Queue(std::function<void()> callback) {
+    // m is one a resumer of this thread may need, on either side.
+    SuspendDeferralScope suspend_deferral;
+    std::lock_guard<std::mutex> lock(m);
+    callbacks.push_back(std::move(callback));
+    pending.store(true);
+    if (wait_mutex) {
+      std::lock_guard<std::mutex> wait_lock(*wait_mutex);
+      wait_cv->notify_all();
+    }
+  }
+
+  // Runs the queued callbacks, on the owning thread.
+  void Run() {
+    std::deque<std::function<void()>> run;
+    {
+      SuspendDeferralScope suspend_deferral;
+      std::lock_guard<std::mutex> lock(m);
+      run.swap(callbacks);
+      pending.store(false);
+    }
+    for (auto& callback : run) {
+      callback();
+    }
+  }
+
+  void Close() {
+    SuspendDeferralScope suspend_deferral;
+    std::lock_guard<std::mutex> lock(m);
+    closed = true;
+    wait_mutex = nullptr;
+    wait_cv = nullptr;
+  }
+};
+
+// The calling thread's alert, or null for a thread this layer does not know.
+static ThreadAlert* CurrentThreadAlert();
+
+// The calling thread's alert while it is inside an alertable wait, else null.
+thread_local ThreadAlert* alertable_wait_ = nullptr;
+
+// For its scope, points the calling thread's alert at the mutex/condition pair
+// a wait blocks on. Construct and destroy it holding neither that mutex nor a
+// handle's: Queue() takes them after the alert's own.
+class AlertArm {
+ public:
+  AlertArm(std::mutex* wait_mutex, std::condition_variable* wait_cv)
+      : alert_(alertable_wait_) {
+    if (alert_) {
+      SuspendDeferralScope suspend_deferral;
+      std::lock_guard<std::mutex> lock(alert_->m);
+      if (!alert_->closed) {
+        alert_->wait_mutex = wait_mutex;
+        alert_->wait_cv = wait_cv;
+      }
+    }
+  }
+  ~AlertArm() {
+    if (alert_) {
+      SuspendDeferralScope suspend_deferral;
+      std::lock_guard<std::mutex> lock(alert_->m);
+      alert_->wait_mutex = nullptr;
+      alert_->wait_cv = nullptr;
+    }
+  }
+  AlertArm(const AlertArm&) = delete;
+  AlertArm& operator=(const AlertArm&) = delete;
+
+  // Read under the armed mutex by the wait's predicate.
+  bool pending() const { return alert_ && alert_->pending.load(); }
+
+ private:
+  ThreadAlert* const alert_;
+};
+
 #if XE_PLATFORM_ANDROID
 // May be null if no dynamically loaded functions are required.
 static void* android_libc_;
@@ -161,7 +257,6 @@ timespec DurationToTimeSpec(std::chrono::duration<_Rep, _Period> duration) {
 // lldb tip, for SIG = SIGRTMIN + SignalType : process handle SIG -s false
 enum class SignalType {
   kThreadSuspend,
-  kThreadUserCallback,
 #if XE_PLATFORM_ANDROID
   // pthread_cancel is not available on Android, using a signal handler for
   // simplified PTHREAD_CANCEL_ASYNCHRONOUS-like behavior - not disabling
@@ -172,8 +267,8 @@ enum class SignalType {
 };
 
 #if XE_PLATFORM_MAC
-// macOS has no POSIX realtime signals; map the (two) signal types onto the
-// user signals SIGUSR1/SIGUSR2, which are consecutive.
+// macOS has no POSIX realtime signals; map the signal types onto the user
+// signals SIGUSR1/SIGUSR2, which are consecutive.
 #define XE_THREAD_SIGNAL_BASE SIGUSR1
 #define XE_THREAD_SIGNAL_MAX SIGUSR2
 #else
@@ -340,13 +435,32 @@ void NanoSleep(int64_t duration) {
             static_cast<long>(duration % 1000000000LL)});
 }
 
-// TODO(bwrsandman) Implement by allowing alert interrupts from IO operations
-thread_local bool alertable_state_ = false;
 SleepResult AlertableSleep(std::chrono::microseconds duration) {
-  alertable_state_ = true;
-  Sleep(duration);
-  alertable_state_ = false;
-  return SleepResult::kSuccess;
+  ThreadAlert* alert = CurrentThreadAlert();
+  if (!alert) {
+    Sleep(duration);
+    return SleepResult::kSuccess;
+  }
+  if (!alert->pending.load()) {
+    if (duration.count() <= 0) {
+      Sleep(duration);
+    } else {
+      std::mutex mutex;
+      std::condition_variable cond;
+      alertable_wait_ = alert;
+      {
+        AlertArm arm(&mutex, &cond);
+        std::unique_lock<std::mutex> lock(mutex);
+        cond.wait_for(lock, duration, [&] { return arm.pending(); });
+      }
+      alertable_wait_ = nullptr;
+    }
+    if (!alert->pending.load()) {
+      return SleepResult::kSuccess;
+    }
+  }
+  alert->Run();
+  return SleepResult::kAlerted;
 }
 
 TlsHandle AllocateTlsHandle() {
@@ -402,8 +516,10 @@ class PosixConditionBase {
       return WaitLatched(timeout);
     }
 
-    bool executed;
-    auto predicate = [this] { return this->signaled(); };
+    // An alertable wait also ends when a user callback is queued on the
+    // thread; the object, if signaled as well, is taken first.
+    AlertArm alert(&mutex_, &cond_);
+    auto predicate = [&] { return this->signaled() || alert.pending(); };
 
     // Handle robust mutex locking
     auto native_mutex = static_cast<pthread_mutex_t*>(mutex_.native_handle());
@@ -421,21 +537,18 @@ class PosixConditionBase {
 
     std::unique_lock<std::mutex> lock(mutex_, std::adopt_lock);
 
-    if (predicate()) {
-      executed = true;
-    } else {
+    if (!predicate()) {
       if (timeout == std::chrono::milliseconds::max()) {
         cond_.wait(lock, predicate);
-        executed = true;  // Did not time out;
       } else {
-        executed = cond_.wait_for(lock, timeout, predicate);
+        cond_.wait_for(lock, timeout, predicate);
       }
     }
-    if (executed) {
+    if (signaled()) {
       post_execution();
       return WaitResult::kSuccess;
     }
-    return WaitResult::kTimeout;
+    return alert.pending() ? WaitResult::kUserCallback : WaitResult::kTimeout;
   }
 
   // A single wait through a wait-block: WaitAnyBlocking for one handle whose
@@ -444,11 +557,15 @@ class PosixConditionBase {
   // or the timeout. A poll (zero timeout) only looks, under the lock.
   WaitResult WaitLatched(std::chrono::milliseconds timeout) {
     WaitBlock block;
+    AlertArm alert(&block.m, &block.cv);
     {
       std::lock_guard<std::mutex> hl(mutex_);
       if (signaled()) {
         post_execution();
         return WaitResult::kSuccess;
+      }
+      if (alert.pending()) {
+        return WaitResult::kUserCallback;
       }
       if (timeout == std::chrono::milliseconds::zero()) {
         return WaitResult::kTimeout;
@@ -457,7 +574,7 @@ class PosixConditionBase {
     }
     {
       std::unique_lock<std::mutex> bl(block.m);
-      auto satisfied = [&] { return block.satisfied; };
+      auto satisfied = [&] { return block.satisfied || alert.pending(); };
       if (timeout == std::chrono::milliseconds::max()) {
         block.cv.wait(bl, satisfied);
       } else {
@@ -480,7 +597,10 @@ class PosixConditionBase {
     // the unregistration was handed to (and, for an auto-reset event, consumed
     // for) this wait.
     std::lock_guard<std::mutex> bl(block.m);
-    return block.satisfied ? WaitResult::kSuccess : WaitResult::kTimeout;
+    if (block.satisfied) {
+      return WaitResult::kSuccess;
+    }
+    return alert.pending() ? WaitResult::kUserCallback : WaitResult::kTimeout;
   }
 
   static std::pair<WaitResult, size_t> WaitMultiple(
@@ -596,6 +716,10 @@ class PosixConditionBase {
       // Release locks before sleeping
       locks.clear();
 
+      if (alertable_wait_ && alertable_wait_->pending.load()) {
+        return std::make_pair<WaitResult, size_t>(WaitResult::kUserCallback, 0);
+      }
+
       // Check timeout
       auto now = std::chrono::steady_clock::now();
       if (now >= end_time) {
@@ -619,6 +743,7 @@ class PosixConditionBase {
     const size_t n = handles.size();
     constexpr size_t kNone = std::numeric_limits<size_t>::max();
     WaitBlock block;
+    AlertArm alert(&block.m, &block.cv);
     size_t fired = kNone;
 
     // Try-consume-if-already-signaled, else register, per handle (under its
@@ -658,7 +783,7 @@ class PosixConditionBase {
     const auto end = (timeout == std::chrono::milliseconds::max())
                          ? std::chrono::steady_clock::time_point::max()
                          : std::chrono::steady_clock::now() + timeout;
-    while (fired == kNone) {
+    while (fired == kNone && !alert.pending()) {
       const auto now = std::chrono::steady_clock::now();
       auto backstop = std::chrono::milliseconds(4);
       if (end != std::chrono::steady_clock::time_point::max()) {
@@ -672,8 +797,9 @@ class PosixConditionBase {
       {
         std::unique_lock<std::mutex> bl(block.m);
         if (!block.satisfied && !block.pending) {
-          block.cv.wait_for(bl, backstop,
-                            [&] { return block.satisfied || block.pending; });
+          block.cv.wait_for(bl, backstop, [&] {
+            return block.satisfied || block.pending || alert.pending();
+          });
         }
         if (block.satisfied) {
           fired = static_cast<size_t>(block.fired_index);
@@ -720,7 +846,9 @@ class PosixConditionBase {
     if (fired != kNone) {
       return std::make_pair(WaitResult::kSuccess, fired);
     }
-    return std::make_pair(WaitResult::kTimeout, size_t(0));
+    return std::make_pair(alert.pending() ? WaitResult::kUserCallback
+                                          : WaitResult::kTimeout,
+                          size_t(0));
   }
 
   // Event-driven WaitAll: one notify-only WaitBlock registered with every
@@ -735,6 +863,7 @@ class PosixConditionBase {
     const size_t n = handles.size();
     WaitBlock block;
     block.notify_only = true;
+    AlertArm alert(&block.m, &block.cv);
     std::vector<PosixConditionBase*> sorted(handles);
     std::sort(sorted.begin(), sorted.end());
     sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
@@ -772,6 +901,10 @@ class PosixConditionBase {
           break;
         }
       }
+      if (alert.pending()) {
+        result = WaitResult::kUserCallback;
+        break;
+      }
       const auto now = std::chrono::steady_clock::now();
       auto backstop = std::chrono::milliseconds(1);
       if (end != std::chrono::steady_clock::time_point::max()) {
@@ -784,7 +917,8 @@ class PosixConditionBase {
       }
       std::unique_lock<std::mutex> bl(block.m);
       if (!block.pending) {
-        block.cv.wait_for(bl, backstop, [&] { return block.pending; });
+        block.cv.wait_for(bl, backstop,
+                          [&] { return block.pending || alert.pending(); });
       }
       block.pending = false;
     }
@@ -1401,30 +1535,10 @@ class PosixCondition<Thread> final : public PosixConditionBase {
 
   void QueueUserCallback(std::function<void()> callback) {
     WaitStarted();
-    std::unique_lock lock(callback_mutex_);
-    user_callback_ = std::move(callback);
-#if XE_PLATFORM_MAC
-    // macOS has neither pthread_sigqueue nor sigqueue-to-thread, so no payload
-    // can ride the signal. The handler runs on the target thread and recovers
-    // this object from thread-local current_thread_ instead.
-    pthread_kill(thread_, GetSystemSignal(SignalType::kThreadUserCallback));
-#else
-    sigval value{};
-    value.sival_ptr = this;
-#if XE_PLATFORM_ANDROID
-    sigqueue(pthread_gettid_np(thread_),
-             GetSystemSignal(SignalType::kThreadUserCallback), value);
-#else
-    pthread_sigqueue(thread_, GetSystemSignal(SignalType::kThreadUserCallback),
-                     value);
-#endif
-#endif  // XE_PLATFORM_MAC
+    alert_.Queue(std::move(callback));
   }
 
-  void CallUserCallback() const {
-    std::unique_lock lock(callback_mutex_);
-    user_callback_();
-  }
+  ThreadAlert& alert() { return alert_; }
 
   bool Resume(uint32_t* out_previous_suspend_count = nullptr) {
     if (out_previous_suspend_count) {
@@ -1557,6 +1671,8 @@ class PosixCondition<Thread> final : public PosixConditionBase {
     if (is_current_thread) {
       pthread_exit(reinterpret_cast<void*>(exit_code));
     }
+    // The thread dies inside whatever wait it armed, without unwinding.
+    alert_.Close();
 #ifdef XE_PLATFORM_ANDROID
     if (pthread_kill(thread_, GetSystemSignal(SignalType::kThreadTerminate)) !=
         0) {
@@ -1659,9 +1775,8 @@ class PosixCondition<Thread> final : public PosixConditionBase {
   std::atomic<int32_t> parked_{0};
   SuspendSemaphore suspend_sem_;  // Async-signal-safe suspend/resume
   mutable std::mutex state_mutex_;
-  mutable std::mutex callback_mutex_;
   mutable std::condition_variable state_signal_;
-  std::function<void()> user_callback_;
+  ThreadAlert alert_;
 #if XE_PLATFORM_ANDROID
   // Name accessible via name() on Android before API 26 which added
   // pthread_getname_np.
@@ -1729,12 +1844,12 @@ WaitResult Wait(WaitHandle* wait_handle, bool is_alertable,
   if (posix_wait_handle == nullptr) {
     return WaitResult::kFailed;
   }
-  if (is_alertable) {
-    alertable_state_ = true;
-  }
+  ThreadAlert* alert = is_alertable ? CurrentThreadAlert() : nullptr;
+  alertable_wait_ = alert;
   auto result = posix_wait_handle->condition().Wait(timeout);
-  if (is_alertable) {
-    alertable_state_ = false;
+  alertable_wait_ = nullptr;
+  if (result == WaitResult::kUserCallback) {
+    alert->Run();
   }
   return result;
 }
@@ -1751,14 +1866,14 @@ WaitResult SignalAndWait(WaitHandle* wait_handle_to_signal,
       posix_wait_handle_to_wait_on == nullptr) {
     return WaitResult::kFailed;
   }
-  if (is_alertable) {
-    alertable_state_ = true;
-  }
+  ThreadAlert* alert = is_alertable ? CurrentThreadAlert() : nullptr;
+  alertable_wait_ = alert;
   if (posix_wait_handle_to_signal->condition().Signal()) {
     result = posix_wait_handle_to_wait_on->condition().Wait(timeout);
   }
-  if (is_alertable) {
-    alertable_state_ = false;
+  alertable_wait_ = nullptr;
+  if (result == WaitResult::kUserCallback) {
+    alert->Run();
   }
   return result;
 }
@@ -1776,13 +1891,13 @@ std::pair<WaitResult, size_t> WaitMultiple(WaitHandle* wait_handles[],
     }
     conditions.push_back(&handle->condition());
   }
-  if (is_alertable) {
-    alertable_state_ = true;
-  }
+  ThreadAlert* alert = is_alertable ? CurrentThreadAlert() : nullptr;
+  alertable_wait_ = alert;
   auto result = PosixConditionBase::WaitMultiple(std::move(conditions),
                                                  wait_all, timeout);
-  if (is_alertable) {
-    alertable_state_ = false;
+  alertable_wait_ = nullptr;
+  if (result.first == WaitResult::kUserCallback) {
+    alert->Run();
   }
   return result;
 }
@@ -1978,6 +2093,10 @@ class PosixThread final : public PosixConditionHandle<Thread> {
 
 thread_local PosixThread* current_thread_ = nullptr;
 
+static ThreadAlert* CurrentThreadAlert() {
+  return current_thread_ ? &current_thread_->condition().alert() : nullptr;
+}
+
 // SuspendDeferralScope state. Only the owning thread and its own signal
 // handler touch these; the handler reads the depth and sets the flag.
 thread_local volatile sig_atomic_t suspend_deferral_depth_ = 0;
@@ -2098,7 +2217,6 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
 std::unique_ptr<Thread> Thread::Create(CreationParameters params,
                                        std::function<void()> start_routine) {
   install_signal_handler(SignalType::kThreadSuspend);
-  install_signal_handler(SignalType::kThreadUserCallback);
 #if XE_PLATFORM_ANDROID
   install_signal_handler(SignalType::kThreadTerminate);
 #endif
@@ -2167,24 +2285,6 @@ static void signal_handler(int signal, siginfo_t* info, void* context) {
         return;
       }
       current_thread_->WaitSuspended();
-    } break;
-    case SignalType::kThreadUserCallback: {
-#if XE_PLATFORM_MAC
-      // No sigval payload on macOS; the handler runs on the target thread, so
-      // recover the thread object from thread-local state.
-      assert_not_null(current_thread_);
-      auto p_thread = &current_thread_->condition();
-      if (alertable_state_) {
-        p_thread->CallUserCallback();
-      }
-#else
-      assert_not_null(info->si_value.sival_ptr);
-      auto p_thread =
-          static_cast<PosixCondition<Thread>*>(info->si_value.sival_ptr);
-      if (alertable_state_) {
-        p_thread->CallUserCallback();
-      }
-#endif  // XE_PLATFORM_MAC
     } break;
 #if XE_PLATFORM_ANDROID
     case SignalType::kThreadTerminate: {

@@ -1495,8 +1495,38 @@ TEST_CASE("Test Thread QueueUserCallback", "[thread]") {
   REQUIRE(is_modified == 0);
   REQUIRE(order == 2);
 
-  // TODO(bwrsandman): Test alertable wait returning kUserCallback by using IO
-  // callbacks.
+  // A callback queued to a thread that is already blocked in an alertable
+  // wait ends that wait with kUserCallback, having run on that thread.
+  auto never = Event::CreateManualResetEvent(false);
+  auto never2 = Event::CreateManualResetEvent(false);
+  for (int kind = 0; kind < 3; ++kind) {
+    std::atomic<int> state{0};
+    std::atomic<bool> ran_on_target{false};
+    WaitResult wait_result = WaitResult::kFailed;
+    thread = Thread::Create(params, [&, kind] {
+      state = 1;
+      if (kind == 0) {
+        wait_result = Wait(never.get(), true);
+      } else {
+        std::vector<WaitHandle*> handles = {never.get(), never2.get()};
+        wait_result = kind == 2 ? WaitAll(handles, true)
+                                : WaitAny(handles, true).first;
+      }
+      state = 2;
+    });
+    REQUIRE(spin_wait_for(100ms, [&] { return state == 1; }));
+    Sleep(20ms);
+    REQUIRE(state == 1);
+    auto target = thread.get();
+    thread->QueueUserCallback([&ran_on_target, target] {
+      ran_on_target = Thread::GetCurrentThread() == target;
+    });
+    result = Wait(thread.get(), false, 500ms);
+    REQUIRE(result == WaitResult::kSuccess);
+    REQUIRE(wait_result == WaitResult::kUserCallback);
+    REQUIRE(ran_on_target);
+    REQUIRE(state == 2);
+  }
 }
 
 }  // namespace test
