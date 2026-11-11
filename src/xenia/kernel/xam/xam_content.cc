@@ -300,16 +300,6 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
     return X_ERROR_INVALID_NAME;
   }
 
-  // Check if we have something under provided symlink.
-  std::string symlink_path = root_name.value();
-  if (!symlink_path.ends_with(':')) {
-    symlink_path += ':';
-  }
-
-  if (kernel_state()->file_system()->IsSymbolicLinkRegistered(symlink_path)) {
-    return X_ERROR_INVALID_PARAMETER;
-  }
-
   XCONTENT_AGGREGATE_DATA content_data;
   if (content_data_size == sizeof(XCONTENT_DATA)) {
     content_data = *content_data_ptr.as<XCONTENT_DATA*>();
@@ -334,6 +324,16 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
               content_data, disposition_ptr, license_mask_ptr, overlapped_ptr](
                  uint32_t& extended_error, uint32_t& length) -> X_RESULT {
     X_RESULT result = X_ERROR_INVALID_PARAMETER;
+    // The root is mounted after the content is chosen. A create on a root in
+    // use fails with ERROR_DUP_NAME and an open with ERROR_ALREADY_EXISTS,
+    // without deleting or truncating anything. Titles that mount their
+    // packages again to check an install tell these from a missing package.
+    std::string symlink_path = root_name;
+    if (!symlink_path.ends_with(':')) {
+      symlink_path += ':';
+    }
+    const bool root_in_use =
+        kernel_state()->file_system()->IsSymbolicLinkRegistered(symlink_path);
     kDispositionState disposition = kDispositionState::Unknown;
     switch (flags & 0xF) {
       case vfs::XContentFlag::kCreateNew:
@@ -346,7 +346,8 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
         break;
       case vfs::XContentFlag::kCreateAlways:
         // Overwrite existing, if any.
-        if (content_manager->ContentExists(xuid, content_data)) {
+        if (!root_in_use &&
+            content_manager->ContentExists(xuid, content_data)) {
           content_manager->DeleteContent(xuid, content_data);
         }
         disposition = kDispositionState::Create;
@@ -371,6 +372,8 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
         // Fail if doesn't exist, if does exist delete and recreate.
         if (!content_manager->ContentExists(xuid, content_data)) {
           result = X_ERROR_PATH_NOT_FOUND;
+        } else if (root_in_use) {
+          result = X_ERROR_ALREADY_EXISTS;
         } else {
           content_manager->DeleteContent(xuid, content_data);
           disposition = kDispositionState::Create;
@@ -379,6 +382,13 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
       default:
         assert_unhandled_case(flags & 0xF);
         break;
+    }
+
+    if (root_in_use && disposition != kDispositionState::Unknown) {
+      result = disposition == kDispositionState::Create
+                   ? X_ERROR_DUP_NAME
+                   : X_ERROR_ALREADY_EXISTS;
+      disposition = kDispositionState::Unknown;
     }
 
     uint32_t content_license = 0;
