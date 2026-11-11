@@ -1878,11 +1878,22 @@ void MetalSharedTextureCache::PrepareEligible(uint32_t eligible_mask,
     const bool prep_current = texture && !texture->base_outdated_lockless() &&
                               !texture->mips_outdated_lockless();
     binding_slots_[index].prep_current = prep_current;
+    binding_slots_[index].serve_latched = false;
     if (!prep_current) {
       // An outdated binding's serve depends on later state (the stale-serve
       // rule), so no draw after this prep may reuse an earlier serve.
       ++serve_generation_;
     }
+  }
+}
+
+void MetalSharedTextureCache::LatchServe(uint32_t fetch_constant_index) {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_SERVE_LATCH");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  if (s_enabled && fetch_constant_index < xenos::kTextureFetchConstantCount) {
+    binding_slots_[fetch_constant_index].serve_latched = true;
   }
 }
 
@@ -1910,15 +1921,30 @@ uint32_t MetalSharedTextureCache::GetServedSlot(uint32_t fetch_constant_index,
     // DXT5 page cache) hit that window on most frames: a 2.4 ms CPU untile of
     // the whole page cache per hit. XE_METAL_SHARED_SERVE_STALE=0 restores the
     // strict rule.
-    // Two ways to know the prep-time content is this draw's: the binding was
-    // current when this draw's prep finished (prep_current, the D3D12 rule),
-    // or the outdated region was loaded by this submission.
-    if (!ServeStaleEnabled() ||
-        !(binding_slot.prep_current ||
+    // Three ways to know the prep-time content is this draw's: the binding
+    // was current when this draw's prep finished (prep_current, the D3D12
+    // rule), the outdated region was loaded by this submission, or this
+    // draw's route verification already served it (serve_latched: Far Cry 2
+    // streams into 128x128 DXT1 textures it is drawing with, and a write
+    // landing between the verification and the bind dropped the draw).
+    if (!ServeStaleEnabled()) {
+      return 0;
+    }
+    if (!(binding_slot.prep_current ||
           (submission_provider_ &&
            ServedByCurrentSubmission(*metal_texture,
                                      submission_provider_())))) {
-      return 0;
+      if (!binding_slot.serve_latched) {
+        return 0;
+      }
+      static uint32_t s_latched_serves = 0;
+      if (s_latched_serves++ < 4 || !(s_latched_serves & 1023)) {
+        XELOGI(
+            "MetalSharedTex: fc={} base={:08X} invalidated after its draw "
+            "verified it, served as verified (#{})",
+            fetch_constant_index, texture->key().base_page << 12,
+            s_latched_serves);
+      }
     }
     ++census_served_stale_;
   }
@@ -1997,7 +2023,7 @@ const char* MetalSharedTextureCache::UnservedReason(
   }
   const bool stale_ok =
       ServeStaleEnabled() &&
-      (binding_slot.prep_current ||
+      (binding_slot.prep_current || binding_slot.serve_latched ||
        (submission_provider_ &&
         ServedByCurrentSubmission(
             *static_cast<const MetalTexture*>(binding->texture),

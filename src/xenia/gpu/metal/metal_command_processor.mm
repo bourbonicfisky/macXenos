@@ -12145,6 +12145,7 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         bits = xe::clear_lowest_bit(bits);
         const bool is_signed = (route_signed_mask >> index) & 1u;
         if (shared_texture_cache_->GetServedSlot(index, is_signed)) {
+          shared_texture_cache_->LatchServe(index);
           continue;
         }
         draw_shared_route_mask_ &= ~(1u << index);

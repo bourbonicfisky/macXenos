@@ -144,6 +144,12 @@ class MetalSharedTextureCache : public TextureCache {
   // a binding and retired with the binding slot.
   uint32_t GetServedSlot(uint32_t fetch_constant_index,
                          bool is_signed = false);
+  // Holds GetServedSlot's nonzero answer for this binding until the next
+  // prep: called by the draw's route verification for each binding it found
+  // servable, so the bind that follows serves the same content even when a
+  // CPU write invalidates the texture in between
+  // (XE_METAL_SERVE_LATCH=0 disables).
+  void LatchServe(uint32_t fetch_constant_index);
   // Diagnostic: why GetServedSlot returned 0 for this binding (static
   // string; "served" when it would not have).
   const char* UnservedReason(uint32_t fetch_constant_index, bool is_signed);
@@ -291,6 +297,11 @@ class MetalSharedTextureCache : public TextureCache {
     // it for the NEXT request, and the content loaded at prep is what the
     // D3D12 cache binds too. Set per prep, read by GetServedSlot.
     bool prep_current = false;
+    // The draw being issued verified this binding servable (LatchServe):
+    // an invalidation between that check and the bind must not change the
+    // answer, because the draw has already elided its RAM convergence on
+    // the strength of it. Cleared by the next prep.
+    bool serve_latched = false;
   };
   void ReleaseBindingSlot(BindingSlot& binding_slot);
   // A 2DArray view (full mip range, host swizzle) of `texture` in a bindless
