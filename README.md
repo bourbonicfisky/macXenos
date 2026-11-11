@@ -6,6 +6,8 @@
 
 <p align="center">An Xbox 360 emulator for the Mac.</p>
 
+<p align="center"><a href="https://macxenos.com/macxenos-sizzle-reel-h264.mp4">Watch the sizzle reel</a></p>
+
 macXenos is an unofficial macOS fork and port of
 [Xenia Canary](https://github.com/xenia-canary/xenia-canary), with a few
 tweaks from [Xenia Edge](https://github.com/has207/xenia-edge). Most of the
