@@ -84,7 +84,7 @@ not to the Xenia Canary or Xenia Edge projects.
 ## Building from source
 
 See [Building macXenos](docs/building.md). macXenos builds on macOS only.
-Engineering notes for the Metal renderer are in the
+More for developers is in the
 [developer documentation](docs/dev/README.md).
 
 ## Credits

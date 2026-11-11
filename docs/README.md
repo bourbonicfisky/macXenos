@@ -14,8 +14,8 @@
 
 - [Building macXenos](building.md): building, running and packaging from
   source on a Mac.
-- [Developer documentation](dev/README.md): the Metal renderer, project
-  records, and documentation inherited from Xenia.
+- [Developer documentation](dev/README.md): the app's interface, ideas for
+  later, and documentation inherited from Xenia.
 
 ## Layout
 
@@ -24,8 +24,7 @@
 | `user_guide.md`, `compatibility.md`, `troubleshooting.md` | Documentation for players |
 | `building.md` | Building from source |
 | `releases/` | Release notes, one file per build |
-| `dev/` | Engineering records and inherited Xenia documentation |
+| `dev/` | Developer documentation, including documentation inherited from Xenia |
 | `game_configs/` | Built-in per-game settings, copied into the app by the build |
 | `game_patches/` | Built-in game patches (fixes for bugs in a game's own code), copied into the app by the build; see its README |
 | `acknowledgements/` | Third-party license notices shown in the app |
-| `AGENTS.md` | Rules for coding agents reading these docs |

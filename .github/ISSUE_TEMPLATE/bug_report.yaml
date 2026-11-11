@@ -9,7 +9,7 @@ body:
         Please give the issue a short title that says what goes wrong, for example
         "Halo 3: black screen after the intro video".
 
-        The [troubleshooting guide](https://github.com/bourbonicfisky/xenia-mac/blob/main/docs/troubleshooting.md)
+        The [troubleshooting guide](https://github.com/bourbonicfisky/macXenos/blob/main/docs/troubleshooting.md)
         covers the common problems. Don't ask for help finding games.
   - id: game
     type: input
