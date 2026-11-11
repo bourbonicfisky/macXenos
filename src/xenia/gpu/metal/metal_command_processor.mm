@@ -8542,6 +8542,41 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       }
     }
   }
+  // Diagnostic (XE_METAL_DRAW_LIST=<first>-<last>): one line per draw in the
+  // range (as XE_METAL_DRAW_TRACE counts) with its shaders and depth state,
+  // for finding which draws of a replayed frame make up a pass.
+  {
+    static const std::pair<int64_t, int64_t> s_draw_list = [] {
+      const char* v = std::getenv("XE_METAL_DRAW_LIST");
+      if (!v) {
+        return std::pair<int64_t, int64_t>(-1, -2);
+      }
+      char* end;
+      int64_t first = strtoll(v, &end, 10);
+      int64_t last = *end == '-' ? strtoll(end + 1, nullptr, 10) : first;
+      return std::pair<int64_t, int64_t>(first, last);
+    }();
+    const int64_t draw = int64_t(trace_draw_index_) - 1;
+    if (draw >= s_draw_list.first && draw <= s_draw_list.second) {
+      XELOGW("MetalDrawList draw={} prim={} count={} vs={:016X} ps={:016X} "
+             "depthcontrol={:08X} color_mask={:08X} colorcontrol={:08X} "
+             "window_offset={:08X} su_sc_mode={:08X} ps_rts={:X} ps_kill={} "
+             "ps_depth={} blend0={:08X} stencilrefmask={:08X}",
+             draw, uint32_t(prim_type), index_count,
+             vertex_shader ? vertex_shader->ucode_data_hash() : 0ull,
+             pixel_shader ? pixel_shader->ucode_data_hash() : 0ull,
+             (*register_file_)[XE_GPU_REG_RB_DEPTHCONTROL],
+             (*register_file_)[XE_GPU_REG_RB_COLOR_MASK],
+             (*register_file_)[XE_GPU_REG_RB_COLORCONTROL],
+             (*register_file_)[XE_GPU_REG_PA_SC_WINDOW_OFFSET],
+             (*register_file_)[XE_GPU_REG_PA_SU_SC_MODE_CNTL],
+             pixel_shader ? pixel_shader->writes_color_targets() : 0u,
+             pixel_shader && pixel_shader->kills_pixels() ? 1 : 0,
+             pixel_shader && pixel_shader->writes_depth() ? 1 : 0,
+             (*register_file_)[XE_GPU_REG_RB_BLENDCONTROL0],
+             (*register_file_)[XE_GPU_REG_RB_STENCILREFMASK]);
+    }
+  }
   static const char* const s_draw_trace_env =
       std::getenv("XE_METAL_DRAW_TRACE");
   if (s_draw_trace_env &&
@@ -10828,6 +10863,61 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       const char* value = std::getenv("XE_METAL_EARLY_HINT");
       return !value || std::strcmp(value, "0") != 0;
     }();
+    // Diagnostic (XE_METAL_EARLY_HINT_DRAWS=<first>-<last>): the hint only
+    // inside the draw range (as XE_METAL_DRAW_TRACE counts).
+    static const std::pair<int64_t, int64_t> s_early_hint_draws = [] {
+      const char* v = std::getenv("XE_METAL_EARLY_HINT_DRAWS");
+      if (!v) {
+        return std::pair<int64_t, int64_t>(INT64_MIN, INT64_MAX);
+      }
+      char* end;
+      int64_t first = strtoll(v, &end, 10);
+      int64_t last = *end == '-' ? strtoll(end + 1, nullptr, 10) : first;
+      return std::pair<int64_t, int64_t>(first, last);
+    }();
+    const bool early_hint_in_range =
+        int64_t(trace_draw_index_) - 1 >= s_early_hint_draws.first &&
+        int64_t(trace_draw_index_) - 1 <= s_early_hint_draws.second;
+    // Which early-hint draws keep the alpha test code, so that the function
+    // has a discard and is shaded per triangle (the modification's
+    // early_hint_keep_alpha_test): blended draws by default.
+    // XE_METAL_EARLY_HINT_PER_PRIMITIVE=all: every hinted draw; =none: no
+    // draw (as before 2026-11-10); =nohint: no hint for blended draws.
+    enum class EarlyHintPerPrimitive { kBlended, kAll, kNone, kNoHint };
+    static const EarlyHintPerPrimitive s_early_hint_per_primitive = [] {
+      const char* value = std::getenv("XE_METAL_EARLY_HINT_PER_PRIMITIVE");
+      if (!value) {
+        return EarlyHintPerPrimitive::kBlended;
+      }
+      if (!std::strcmp(value, "all")) {
+        return EarlyHintPerPrimitive::kAll;
+      }
+      if (!std::strcmp(value, "none")) {
+        return EarlyHintPerPrimitive::kNone;
+      }
+      if (!std::strcmp(value, "nohint")) {
+        return EarlyHintPerPrimitive::kNoHint;
+      }
+      return EarlyHintPerPrimitive::kBlended;
+    }();
+    // A colour target the draw writes with anything but a plain replace.
+    bool early_hint_blended = false;
+    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+      if (!((normalized_color_mask >> (i * 4)) & 0xFu)) {
+        continue;
+      }
+      auto blend = regs.Get<reg::RB_BLENDCONTROL>(
+          reg::RB_BLENDCONTROL::rt_register_indices[i]);
+      if (blend.color_srcblend != xenos::BlendFactor::kOne ||
+          blend.color_destblend != xenos::BlendFactor::kZero ||
+          blend.color_comb_fcn != xenos::BlendOp::kAdd ||
+          blend.alpha_srcblend != xenos::BlendFactor::kOne ||
+          blend.alpha_destblend != xenos::BlendFactor::kZero ||
+          blend.alpha_comb_fcn != xenos::BlendOp::kAdd) {
+        early_hint_blended = true;
+        break;
+      }
+    }
     static const MetalF24PsMode s_f24_mode = [] {
       const char* value = std::getenv("XE_METAL_F24_PS");
       MetalF24PsMode mode = EffectiveMetalF24PsMode(
@@ -10861,7 +10951,10 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         XELOGI("MetalF24: engaged mode={} at draw {}",
                round_mode ? "round" : "trunc", trace_draw_index_);
       }
-    } else if (s_early_hint && pixel_shader->implicit_early_z_write_allowed() &&
+    } else if (s_early_hint && early_hint_in_range &&
+               !(early_hint_blended && s_early_hint_per_primitive ==
+                                           EarlyHintPerPrimitive::kNoHint) &&
+               pixel_shader->implicit_early_z_write_allowed() &&
                (!pixel_shader->writes_color_target(0) ||
                 !draw_util::DoesCoverageDependOnAlpha(
                     regs.Get<reg::RB_COLORCONTROL>()))) {
@@ -10878,6 +10971,14 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       // otherwise.
       ps_mod_decoded.pixel.depth_stencil_mode =
           DxbcShaderTranslator::Modification::DepthStencilMode::kEarlyHint;
+      // Blended draws keep the alpha test code: a function without a
+      // discard is shaded once per pixel across the draw's triangles on
+      // Apple GPUs, which gave RDR's hair cards (alpha blended, 2x MSAA)
+      // the wrong mip level and alpha where cards meet (2026-11-10).
+      ps_mod_decoded.pixel.early_hint_keep_alpha_test =
+          s_early_hint_per_primitive == EarlyHintPerPrimitive::kAll ||
+          (early_hint_blended &&
+           s_early_hint_per_primitive == EarlyHintPerPrimitive::kBlended);
     }
     uint64_t ps_mod = ps_mod_decoded.value;
     ps_mod_value = ps_mod;

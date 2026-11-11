@@ -255,6 +255,18 @@ class DxbcShaderTranslator : public ShaderTranslator {
       // bit per fetch constant) naming the fetch constants that take no
       // biased/gamma decode switch after sampling; 0 = full decode for all.
       uint32_t fetch_plain_pattern : 4;
+      // With kEarlyHint: keep the dynamic alpha test in the function (it
+      // never fires in this mode, the hint requires alpha-independent
+      // coverage). Apple GPUs shade a fragment function that has no discard
+      // once per pixel across the triangles of a draw: derivatives are taken
+      // across triangle edges and all samples of a pixel get one value. That
+      // is harmless for opaque meshes, but blended geometry with texture
+      // coordinates that are discontinuous between triangles picks the wrong
+      // mip level and alpha (Red Dead Redemption hair cards, 2026-11-10).
+      // With the discard present the function is shaded per triangle again,
+      // and [earlydepthstencil] still rejects hidden fragments before
+      // shading. Metal backend only sets it.
+      uint32_t early_hint_keep_alpha_test : 1;
     } pixel;
 
     explicit Modification(uint64_t modification_value = 0)
@@ -891,6 +903,12 @@ class DxbcShaderTranslator : public ShaderTranslator {
            !IsDxbcDomainAsVertexShader();
   }
 
+  // Whether the early depth / stencil hint drops the dynamic alpha test code
+  // (the alpha to coverage code is always dropped with the hint).
+  bool IsEarlyHintAlphaTestDropped() const {
+    return IsForceEarlyDepthStencilGlobalFlagEnabled() &&
+           !GetDxbcShaderModification().pixel.early_hint_keep_alpha_test;
+  }
   bool IsForceEarlyDepthStencilGlobalFlagEnabled() const {
     return is_pixel_shader() &&
            GetDxbcShaderModification().pixel.depth_stencil_mode ==

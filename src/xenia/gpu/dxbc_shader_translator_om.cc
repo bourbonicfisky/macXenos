@@ -3252,7 +3252,7 @@ void DxbcShaderTranslator::CompletePixelShader() {
   }
 
   if (current_shader().writes_color_target(0) &&
-      !IsForceEarlyDepthStencilGlobalFlagEnabled()) {
+      !IsEarlyHintAlphaTestDropped()) {
     if (edram_rov_used_) {
       // Check if the render target 0 was written to on the execution path.
       uint32_t rt_0_written_temp = PushSystemTemp();
