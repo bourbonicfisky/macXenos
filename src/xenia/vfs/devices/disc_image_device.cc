@@ -130,6 +130,10 @@ DiscImageDevice::Error DiscImageDevice::Verify(ParseState* state) {
   uint8_t* fs_ptr = state->ptr + state->game_offset + (32 * kXESectorSize);
   state->root_sector = xe::load<uint32_t>(fs_ptr + 20);
   state->root_size = xe::load<uint32_t>(fs_ptr + 24);
+  state->volume_timestamp = xe::load<uint64_t>(fs_ptr + 28);
+  if (!state->volume_timestamp) {
+    state->volume_timestamp = kDiscFallbackTimestamp;
+  }
   state->root_offset =
       state->game_offset + (state->root_sector * kXESectorSize);
   if (state->root_size < 13 || state->root_size > 32_MiB) {
@@ -152,6 +156,9 @@ DiscImageDevice::Error DiscImageDevice::ReadAllEntries(
     ParseState* state, const uint8_t* root_buffer) {
   auto root_entry = new DiscImageEntry(this, nullptr, "", mmap_.get());
   root_entry->attributes_ = kFileAttributeDirectory;
+  root_entry->create_timestamp_ = state->volume_timestamp;
+  root_entry->access_timestamp_ = state->volume_timestamp;
+  root_entry->write_timestamp_ = state->volume_timestamp;
   root_entry_ = std::unique_ptr<Entry>(root_entry);
 
   if (!ReadEntry(state, root_buffer, 0, root_entry)) {
@@ -192,10 +199,13 @@ bool DiscImageDevice::ReadEntry(ParseState* state, const uint8_t* buffer,
   entry->size_ = length;
   entry->allocation_size_ = xe::round_up(length, bytes_per_sector());
 
-  // Set to January 1, 1970 (UTC) in 100-nanosecond intervals
-  entry->create_timestamp_ = 10000 * 11644473600000LL;
-  entry->access_timestamp_ = 10000 * 11644473600000LL;
-  entry->write_timestamp_ = 10000 * 11644473600000LL;
+  // GDFX entries carry no times; the console reports the volume's mastering
+  // time for each. The Unix epoch that stood here reads as time_t 0 through
+  // the guest CRT in any zone at or east of UTC, which Metro 2033 takes for a
+  // missing file.
+  entry->create_timestamp_ = state->volume_timestamp;
+  entry->access_timestamp_ = state->volume_timestamp;
+  entry->write_timestamp_ = state->volume_timestamp;
 
   if (attributes & kFileAttributeDirectory) {
     // Folder.

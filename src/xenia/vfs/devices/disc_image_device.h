@@ -76,6 +76,9 @@ class DiscImageDevice : public Device {
     size_t root_sector;  // Offset (sector) of root.
     size_t root_offset;  // Offset (bytes) of root.
     size_t root_size;    // Size (bytes) of root.
+    // Mastering time from the volume descriptor (FILETIME); every entry
+    // reports it, as the console's driver does.
+    uint64_t volume_timestamp;
   } ParseState;
 
   Error Verify(ParseState* state);

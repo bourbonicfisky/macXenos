@@ -107,10 +107,10 @@ bool DiscZarchiveDevice::ReadAllEntries(const std::string& path,
       entry->handle_ = static_cast<uint32_t>(fileHandle);
       entry->data_offset_ = 0;
 
-      // Set to January 1, 1970 (UTC) in 100-nanosecond intervals
-      entry->create_timestamp_ = 10000 * 11644473600000LL;
-      entry->access_timestamp_ = 10000 * 11644473600000LL;
-      entry->write_timestamp_ = 10000 * 11644473600000LL;
+      // The archive keeps no volume descriptor; see kDiscFallbackTimestamp.
+      entry->create_timestamp_ = kDiscFallbackTimestamp;
+      entry->access_timestamp_ = kDiscFallbackTimestamp;
+      entry->write_timestamp_ = kDiscFallbackTimestamp;
       entry->parent_ = node;
 
       if (dirEntry.isDirectory) {

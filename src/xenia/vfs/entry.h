@@ -62,6 +62,11 @@ enum class FileDisposition {
 // Reuse xe::filesystem definition.
 using FileAccess = xe::filesystem::FileAccess;
 
+// File time (FILETIME, 2005-11-22 UTC) for disc entries whose image carries no
+// mastering time. Not the Unix epoch: the guest CRT turns that into time_t 0,
+// which titles read as "no such file".
+inline constexpr uint64_t kDiscFallbackTimestamp = 127770912000000000ull;
+
 enum FileAttributeFlags : uint32_t {
   kFileAttributeNone = 0x0000,
   kFileAttributeReadOnly = 0x0001,
