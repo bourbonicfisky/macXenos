@@ -7,7 +7,10 @@ most people will want to change. If something isn't working, see
 ## What you need
 
 - macOS 15 Sequoia or later
-- A Mac with Apple silicon (Intel Macs work on a best-effort basis)
+- A Mac with Apple silicon, or an Intel Mac with a dedicated AMD GPU with at
+  least 4 GB of video memory (Radeon RX 580 class or faster). Intel Macs are
+  supported on a best-effort basis, and Intel integrated graphics aren't
+  supported.
 - About 2 to 3 GB of free memory while a game runs
 - A game controller
 - Xbox 360 games

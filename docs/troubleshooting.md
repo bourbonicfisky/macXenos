@@ -67,8 +67,9 @@ tried.
   it a few minutes, or play a second session.
 - **Internal resolution** above 1x costs a lot of GPU time. Try 1x.
 - Close other heavy apps, and run only one copy of macXenos at a time.
-- Intel Macs, especially those with AMD graphics, are slower and less tested
-  than Apple silicon.
+- Intel Macs are slower and less tested than Apple silicon. They need a
+  dedicated AMD GPU with at least 4 GB of video memory (Radeon RX 580 class
+  or faster); Intel integrated graphics aren't supported.
 - **Performance cores** on the Graphics blade should be on **Every thread**
   (the default). With it off, macOS parks most of a game's threads on the
   slower efficiency cores.

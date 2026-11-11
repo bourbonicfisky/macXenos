@@ -29,21 +29,42 @@ macXenos.
 - **A native Metal renderer.** macXenos draws the game directly with Metal,
   Apple's graphics API, ported from Xenia Canary and Edge with a focus on
   stability, compatibility, performance and power use.
-- **Upscaling.** AMD FSR and MetalFX can upscale the picture to your window
-  or display.
+- **Upscaling.** AMD FSR, AMD CAS and Apple MetalFX can upscale and sharpen
+  the picture to your window or display.
 - **Internal resolution scaling.** Games can render at a higher resolution
   than the Xbox 360 did.
-- **A Mac app.** A signed, universal app with a game library, settings,
-  player profiles and an in-game dashboard, plus automatic updates.
 - **Frame generation through Metal 4** is planned.
 
 The older Vulkan renderer (through MoltenVK) is kept for developers to compare
 against; use Metal.
 
+### Only in macXenos
+
+- **A Blades dashboard.** Every setting lives in a dashboard modeled on the
+  Xbox 360's original "Blades" dashboard. Open it over a game with the
+  controller's Guide button, F6 or Cmd-, and the game pauses until you close
+  it.
+- **A game library.** Point macXenos at the folders that hold your games and
+  it lists them all with their icons, plus the ones you played recently.
+- **Profiles with gamer pictures.** Player profiles with gamercards, a set of
+  macXenos gamer pictures, and the original Xbox 360 pictures if you choose
+  to download them.
+- **Controller setup on screen.** Choose which player each controller is,
+  remap buttons on a picture of the pad, and set vibration and stick dead
+  zones. Most controllers macOS recognizes work without setup.
+- **Performance cores.** On Apple silicon, the game's threads are kept on the
+  performance cores instead of being parked on the efficiency cores.
+- **A Mac app.** A signed, notarized universal app with automatic updates.
+  Saves go to `~/Documents`, F12 screenshots to `~/Pictures`, and everything
+  else to Application Support.
+
 ## Requirements
 
 - macOS 15 Sequoia or later
-- A Mac with Apple silicon (Intel Macs work on a best-effort basis)
+- A Mac with Apple silicon, or an Intel Mac with a dedicated AMD GPU with at
+  least 4 GB of video memory (Radeon RX 580 class or faster). Intel Macs are
+  supported on a best-effort basis, and Intel integrated graphics aren't
+  supported.
 - About 2 to 3 GB of free memory while a game runs
 - A game controller
 - Xbox 360 games
@@ -96,8 +117,9 @@ More for developers is in the
   project is built on
 - [Xenia Edge](https://github.com/has207/xenia-edge), for several fixes
   and ideas
-- Third-party libraries are listed in the app under System > About >
-  Acknowledgements
+- Third-party libraries and their licenses are listed in the app under
+  System > About > Acknowledgements; the license texts macXenos ships are in
+  [docs/acknowledgements](docs/acknowledgements/)
 
 ## License
 
