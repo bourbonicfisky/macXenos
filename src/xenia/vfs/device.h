@@ -30,6 +30,9 @@ class Device {
   const std::string& mount_path() const { return mount_path_; }
   virtual bool is_read_only() const { return true; }
 
+  // True when the files come from a disc's GDFX file system.
+  virtual bool is_gdfx() const { return name() == "GDFX"; }
+
   virtual void Dump(StringBuffer* string_buffer) = 0;
   virtual Entry* ResolvePath(const std::string_view path) = 0;
 
