@@ -51,6 +51,8 @@ static void ShowMacAboutPanel() {
   add_line(@"macXenos — an unofficial macOS build of Xenia Canary. Ported by dmg:\n",
            @"https://www.patreon.com/dmug");
   add_line(@"Official website:\n", @"https://macxenos.com");
+  add_line(@"Source code and bug reports:\n",
+           @"https://github.com/bourbonicfisky/macXenos");
   add_line(@"Original project:\n",
            @"https://github.com/xenia-canary/xenia-canary");
   add_line(@"Xenia project:\n", @"https://xenia.jp/about/");

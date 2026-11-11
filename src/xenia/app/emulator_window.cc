@@ -230,6 +230,8 @@ constexpr std::string_view kRecentlyPlayedTitlesFilename = "recent.toml";
 // The most titles recent.toml keeps: the dashboard's All Games list.
 constexpr size_t kMaxPlayedTitles = 1000;
 constexpr std::string_view kBaseTitle = "macXenos";
+constexpr std::string_view kPublicRepositoryUrl =
+    "https://github.com/bourbonicfisky/macXenos";
 
 EmulatorWindow::EmulatorWindow(Emulator* emulator,
                                ui::WindowedAppContext& app_context,
@@ -879,6 +881,13 @@ bool EmulatorWindow::Initialize() {
     help_menu->AddChild(
         MenuItem::Create(MenuItem::Type::kString, "macXenos &Website...", "F1",
                          std::bind(&EmulatorWindow::ShowWebsite, this)));
+    help_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "macXenos on &GitHub...",
+        []() { LaunchWebBrowser(kPublicRepositoryUrl); }));
+    help_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "&Report a Bug...", []() {
+          LaunchWebBrowser(std::string(kPublicRepositoryUrl) + "/issues");
+        }));
     help_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
     help_menu->AddChild(MenuItem::Create(
         MenuItem::Type::kString, "&About...",

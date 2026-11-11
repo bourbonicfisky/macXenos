@@ -79,7 +79,8 @@ Xenia as a whole; results on the Mac can differ.
 ## Reporting problems
 
 See [Troubleshooting](docs/troubleshooting.md) for common problems and what
-to include in a report. Please report problems with macXenos to this project,
+to include in a report. Please report problems with macXenos in
+[this project's issues](https://github.com/bourbonicfisky/macXenos/issues),
 not to the Xenia Canary or Xenia Edge projects.
 
 ## Building from source

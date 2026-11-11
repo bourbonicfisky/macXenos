@@ -100,7 +100,8 @@ neither is touched.
 
 ## Reporting a problem
 
-Please include:
+Open an issue on [macXenos on GitHub](https://github.com/bourbonicfisky/macXenos/issues),
+or choose **Help > Report a Bug** in the app. Please include:
 
 - the game's name and, if you know it, its title ID,
 - your Mac model and macOS version,

@@ -18,6 +18,7 @@ import { getPreferences, usePreferences } from "../ui/preferences";
 
 /** The official website, on About macXenos. */
 const WEBSITE = "https://macxenos.com";
+const REPOSITORY = "https://github.com/bourbonicfisky/macXenos";
 
 /** Where the sounds come from, and the way to get them if they aren't here. */
 function SoundSource() {
@@ -269,6 +270,11 @@ export function dashboard(state: NativeState): BladeDef {
             <p className="m-0">
               <a className="pane-link" href={WEBSITE}>
                 macxenos.com
+              </a>
+            </p>
+            <p className="m-0">
+              <a className="pane-link" href={REPOSITORY}>
+                {REPOSITORY.replace("https://", "")}
               </a>
             </p>
             <p className="menu-spec m-0 text-[0.85em]">
