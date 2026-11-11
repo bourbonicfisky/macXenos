@@ -399,6 +399,26 @@ TEST_CASE("Resolved-fetch service: a depth snapshot serves only depth-format fet
   REQUIRE(ClassifyResolvedFetch(in) == ResolvedFetchService::kRamContent);
 }
 
+TEST_CASE("Resolved-fetch service: a depth snapshot does not serve a composite fetch",
+          "[l0][metal][reader][service]") {
+  // Red Dead Redemption: Undead Nightmare resolves a 128x128 scratch depth map
+  // to the base of its 1600x1600 cascade atlas. The other cascades are
+  // resolves at other bases inside the atlas, so the scratch snapshot cannot
+  // represent the atlas fetch: RAM (which holds every depth writeback) does.
+  ResolvedFetchServiceInputs in = Row((1 << kFactorRegistration) |
+                                      (1 << kFactorDepth) |
+                                      (1 << kFactorRamBacked));
+  in.exact.fetch_format = xenos::TextureFormat::k_24_8;
+  REQUIRE(ClassifyResolvedFetch(in) == ResolvedFetchService::kBridgeSnapshot);
+  in.depth_fetch_composite = true;
+  REQUIRE(ClassifyResolvedFetch(in) == ResolvedFetchService::kRamContent);
+  // The flag describes depth registrations only.
+  in = Row((1 << kFactorRegistration) | (1 << kFactorCoveredR32F));
+  ResolvedFetchService colour_service = ClassifyResolvedFetch(in);
+  in.depth_fetch_composite = true;
+  REQUIRE(ClassifyResolvedFetch(in) == colour_service);
+}
+
 // Hidden helper: prints the classifier's table in the golden-table layout, so
 // a deliberate semantic change can re-record it from production code.
 TEST_CASE("Resolved-fetch service: dump the current table",

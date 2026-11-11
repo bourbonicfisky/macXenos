@@ -196,6 +196,9 @@ if(APPLE)
     # Cache-clear release (implement-metal-cache-clearing section 3): reuses
     # the same real MetalTextureCache + view-heap closure as the alias test.
     ${CMAKE_CURRENT_SOURCE_DIR}/metal_cache_clear_release_test.mm
+    # Depth bridge against the resolved-target registry (a snapshot smaller
+    # than the fetch, with other resolves in the fetch's extent): same closure.
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_depth_composite_bridge_test.mm
     # OpenSpec 6.1 lifecycle: constructs the REAL MetalSharedTextureCache
     # (shared TextureCache subclass) over the real MetalSharedMemory + the real
     # legacy cache as slot authority, and drives it through its production

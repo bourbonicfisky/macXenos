@@ -57,6 +57,10 @@ struct ResolvedFetchServiceInputs {
   bool covered_r32f = false;
   // Scaled-cover inputs (scaled_session is false at 1x).
   ScaledCoverInputs scaled = {};
+  // The registered target is a depth snapshot smaller than the fetch, and the
+  // rest of the fetch's guest extent holds other resolves' content (computed
+  // by the caller from the registry).
+  bool depth_fetch_composite = false;
 };
 
 inline ResolvedFetchService ClassifyResolvedFetch(
@@ -79,6 +83,17 @@ inline ResolvedFetchService ClassifyResolvedFetch(
   if (in.exact.rt_is_depth &&
       in.exact.fetch_format != xenos::TextureFormat::k_24_8 &&
       in.exact.fetch_format != xenos::TextureFormat::k_24_8_FLOAT) {
+    return ResolvedFetchService::kRamContent;
+  }
+  // One snapshot can stand in for a larger fetch only while the rest of the
+  // fetch holds nothing (the fitted view zero-fills it). Red Dead Redemption:
+  // Undead Nightmare resolves a 128x128 scratch depth map to the base of its
+  // 1600x1600 cascade atlas, whose 800x800 cascades are resolves of their own
+  // at other bases; the scratch snapshot fitted to the atlas read every
+  // cascade as depth 0 and the deferred shadow pass darkened whatever it drew
+  // while that registration was live. The depth writeback keeps every resolve
+  // in RAM, so RAM serves the composition.
+  if (in.exact.rt_is_depth && in.depth_fetch_composite) {
     return ResolvedFetchService::kRamContent;
   }
   if (in.exact.rt_is_depth || in.exact.color_bridge || !in.exact.ram_backed ||

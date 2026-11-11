@@ -155,7 +155,9 @@ class MetalTextureCache {
   // Must mirror the serving rule in the fetch path's bridge block (covered
   // fast path is R32Float only — see the comment there). Defined in the .mm
   // (needs the MTLTexture bridge cast).
-  bool BridgeServes(uint32_t base, uint32_t width, uint32_t height) const;
+  // `pitch` is the fetch pitch in texels (0: the width, 32-aligned).
+  bool BridgeServes(uint32_t base, uint32_t width, uint32_t height,
+                    uint32_t pitch = 0) const;
 
   // Host textures (id<MTLTexture>) referenced since the last ResetActive, to be
   // made resident on the encoder.
@@ -768,6 +770,13 @@ class MetalTextureCache {
       std::unordered_map<uint32_t, SwizzleView> swizzle_views;
     };
     FittedView fitted;
+    // DepthFetchIsComposite memo: the answer for one fetch shape, valid while
+    // the registry is unchanged.
+    mutable uint64_t composite_epoch = UINT64_MAX;
+    mutable uint32_t composite_width = 0;
+    mutable uint32_t composite_height = 0;
+    mutable uint32_t composite_pitch = 0;
+    mutable bool composite = false;
   };
   // Keyed by guest resolve destination base (fetch.base_address << 12).
   std::unordered_map<uint32_t, ResolvedTarget> resolved_targets_;
@@ -782,6 +791,12 @@ class MetalTextureCache {
                           uint32_t* height_out) const;
   bool SnapshotFitApplies(const ResolvedTarget& rt, uint32_t fetch_w,
                           uint32_t fetch_h, bool covered_r32f) const;
+  // True when `rt` is a depth snapshot smaller than the fetch and another
+  // resolve's snapshot lies in the rest of the fetch's guest extent: the
+  // fetch is a composition this snapshot cannot represent.
+  bool DepthFetchIsComposite(const ResolvedTarget& rt, uint32_t base,
+                             uint32_t fetch_w, uint32_t fetch_h,
+                             uint32_t fetch_pitch) const;
   bool EnsureFittedSnapshot(ResolvedTarget& rt, uint32_t fetch_w,
                             uint32_t fetch_h);
   uint32_t ServeFittedSnapshot(ResolvedTarget& rt, uint32_t fetch_w,

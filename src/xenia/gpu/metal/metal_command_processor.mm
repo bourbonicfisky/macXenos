@@ -11383,7 +11383,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
         bool bridge_served =
             texture_cache_ &&
             texture_cache_->BridgeServes(fbase, f.size_2d.width + 1,
-                                          f.size_2d.height + 1);
+                                          f.size_2d.height + 1,
+                                          uint32_t(f.pitch) << 5);
         // CENSUS ONLY (XE_METAL_SERVING_CENSUS=1, task 1.1 of
         // implement-metal-gpu-visible-resolve-authority): count how often this
         // dependency declaration disagrees with the serve chain's own
@@ -11647,7 +11648,8 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
             bool bridge = texture_cache_ &&
                           texture_cache_->BridgeServes(f.base_address << 12,
                                                        f.size_2d.width + 1,
-                                                       f.size_2d.height + 1);
+                                                       f.size_2d.height + 1,
+                                                       uint32_t(f.pitch) << 5);
             uint32_t fw = fetch_width_serve(f), fh = fetch_height_serve(f);
             uint32_t fp = f.pitch ? (uint32_t(f.pitch) << 5)
                                   : ((fw + 31u) & ~31u);
@@ -16142,6 +16144,30 @@ bool MetalCommandProcessor::IssueCopy() {
           const char* v = std::getenv("XE_METAL_STAGE3");
           return (!v || v[0] != '0') && !std::getenv("XE_METAL_NO_WRITEBACK");
         }();
+        // XE_METAL_SEED_FRONTBUFFER=<hexbase>,<hexlen> (trace replay): a
+        // single-frame replay has no previous swap, so every resolve keeps a
+        // snapshot and the write-back-only path live runs takes is never
+        // exercised. Seeding the frontbuffer range the live run used puts the
+        // replay on the same policy.
+        if (!last_frontbuffer_bytes_) {
+          static const std::pair<uint32_t, uint32_t> s_seed_frontbuffer = [] {
+            std::pair<uint32_t, uint32_t> seed = {0, 0};
+            const char* value = std::getenv("XE_METAL_SEED_FRONTBUFFER");
+            if (value) {
+              char* end = nullptr;
+              seed.first = uint32_t(std::strtoul(value, &end, 16));
+              if (end && *end == ',') {
+                seed.second = uint32_t(std::strtoul(end + 1, nullptr, 16));
+              }
+            }
+            return seed;
+          }();
+          if (s_seed_frontbuffer.second) {
+            last_frontbuffer_base_ = s_seed_frontbuffer.first;
+            last_frontbuffer_bytes_ = s_seed_frontbuffer.second;
+            recent_frontbuffers_[0] = s_seed_frontbuffer;
+          }
+        }
         const bool skip_snapshot =
             !snap && last_frontbuffer_bytes_ && !ResolveSnapshotsForAllEnabled() &&
             canonical_resolve &&

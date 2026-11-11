@@ -979,6 +979,8 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
       uint32_t(fetch.endianness),
       rt.wb_endian};
   out->covered_r32f = covered_r32f;
+  out->depth_fetch_composite = DepthFetchIsComposite(
+      rt, fetch.base_address << 12, fetch_w, fetch_h, uint32_t(fetch.pitch) << 5);
   // XE_METAL_SCALED_COVER=0: exact rollback of scaled-cover serving (scaled
   // sessions then serve these fetches from 1x RAM, as before it existed).
   static const bool s_scaled_cover_enabled =
@@ -1177,6 +1179,60 @@ bool MetalTextureCache::SnapshotFitApplies(const ResolvedTarget& rt,
     return false;
   }
   return true;
+}
+
+bool MetalTextureCache::DepthFetchIsComposite(const ResolvedTarget& rt,
+                                              uint32_t base, uint32_t fetch_w,
+                                              uint32_t fetch_h,
+                                              uint32_t fetch_pitch) const {
+  // XE_METAL_DEPTH_COMPOSITE_RAM=0: rollback (the snapshot at the fetch base
+  // serves every depth fetch, fitted when the sizes differ).
+  static const bool s_enabled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_DEPTH_COMPOSITE_RAM"), true);
+  if (!s_enabled || !rt.is_depth || !rt.texture) {
+    return false;
+  }
+  uint32_t snap_w = 0, snap_h = 0;
+  SnapshotObjectDims(rt, &snap_w, &snap_h);
+  if (fetch_w <= snap_w && fetch_h <= snap_h) {
+    return false;
+  }
+  if (!fetch_pitch) {
+    fetch_pitch = fetch_w;
+  }
+  if (rt.composite_epoch == registry_epoch_ && rt.composite_width == fetch_w &&
+      rt.composite_height == fetch_h && rt.composite_pitch == fetch_pitch) {
+    return rt.composite;
+  }
+  // Depth fetches are 32bpp (k_24_8 / k_24_8_FLOAT; ClassifyResolvedFetch
+  // sends every other format to RAM before this matters).
+  uint64_t fetch_bytes = uint64_t(xe::align(fetch_pitch, 32u)) *
+                         xe::align(fetch_h, 32u) * 4;
+  auto fetch_extent =
+      metal::GuestRange::FromBounds(base, uint64_t(base) + fetch_bytes);
+  bool composite = false;
+  if (fetch_extent) {
+    for (const auto& pair : resolved_targets_) {
+      const ResolvedTarget& other = pair.second;
+      // Strips and columns joined into this snapshot's object are part of it.
+      if (pair.first == base || !other.texture || other.texture == rt.texture) {
+        continue;
+      }
+      auto other_extent = metal::GuestRange::FromBaseLength(
+          other.guest_extent_length ? other.guest_extent_start : pair.first,
+          std::max(other.guest_extent_length, 1u));
+      if (other_extent && fetch_extent->Overlaps(*other_extent)) {
+        composite = true;
+        break;
+      }
+    }
+  }
+  rt.composite_epoch = registry_epoch_;
+  rt.composite_width = fetch_w;
+  rt.composite_height = fetch_h;
+  rt.composite_pitch = fetch_pitch;
+  rt.composite = composite;
+  return composite;
 }
 
 void MetalTextureCache::RetireFittedView(ResolvedTarget::FittedView& fitted) {
@@ -3171,16 +3227,16 @@ void MetalTextureCache::RegisterResolvedTipView(uint32_t base, void* texture) {
 }
 
 bool MetalTextureCache::BridgeServes(uint32_t base, uint32_t width,
-                                     uint32_t height) const {
+                                     uint32_t height, uint32_t pitch) const {
   auto it = resolved_targets_.find(base);
   if (it == resolved_targets_.end() || !it->second.texture) {
     return false;
   }
   const ResolvedTarget& rt = it->second;
-  if (rt.is_depth || !rt.ram_backed) {
-    return true;
+  if (rt.is_depth) {
+    return !DepthFetchIsComposite(rt, base, width, height, pitch);
   }
-  return false;
+  return !rt.ram_backed;
 }
 
 void MetalTextureCache::ExtendResolvedTargetCoverage(void* texture,
