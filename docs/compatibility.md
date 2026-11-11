@@ -8,7 +8,11 @@ M4 Mac mini, at the original resolution (1x), using the Metal renderer. The 18
 games added on November 11 were tested that day on one of the two Macs; the
 other column shows a dash until the next full run.
 
-**"Reaches" is how far the test goes, not how far the game works.**
+**"Test reaches" is only how far the automated test goes, not how far the
+game can be played.** Each test plays the opening of the game with a scripted
+controller, stops at the point shown, and measures that scene. What happens
+later in the game isn't covered: it may play to the end, or it may have
+problems the test never gets to.
 
 The frame rate is what the game ran at during the test. Xbox 360 games were
 built to run at a fixed frame rate, almost always 30 or 60 frames per second,
@@ -21,7 +25,7 @@ falls below it. Many games also tie their timing to the frame rate, so running
 them faster than intended would speed up the game itself rather than make it
 smoother.
 
-| Game | Reaches | M4 mini | M4 Pro | Notes |
+| Game | Test reaches | M4 mini | M4 Pro | Notes |
 | --- | --- | ---: | ---: | --- |
 | 007 Legends | Opening level | 60 | 60 |  |
 | 007: Quantum of Solace | First level | 30 | 30 |  |
