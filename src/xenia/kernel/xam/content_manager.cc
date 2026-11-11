@@ -9,7 +9,10 @@
 
 #include "xenia/kernel/xam/content_manager.h"
 
+#include <algorithm>
+
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/clock.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
@@ -19,8 +22,15 @@
 #include "xenia/kernel/xfile.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/vfs/devices/host_path_device.h"
+#include "xenia/vfs/devices/xcontent_container_device.h"
 
 DECLARE_int32(license_mask);
+
+DEFINE_bool(serve_disc_content, true,
+            "Serve the content packages a multi-disc title installs from one "
+            "of its discs (the launched image or a \"(Disc N)\" image beside "
+            "it) when the content root has no copy.",
+            "Content");
 
 namespace xe {
 namespace kernel {
@@ -48,9 +58,37 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
   device->Initialize();
   fs->RegisterDevice(std::move(device));
   fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
+  mounted_ = true;
+}
+
+ContentPackage::ContentPackage(KernelState* kernel_state,
+                               const std::string_view root_name,
+                               const XCONTENT_AGGREGATE_DATA& data,
+                               vfs::Entry* package_entry)
+    : kernel_state_(kernel_state),
+      root_name_(root_name),
+      license_(cvars::license_mask) {
+  device_path_ = fmt::format("\\Device\\Content\\{0}\\", ++content_device_id_);
+  content_data_ = data;
+
+  auto device = vfs::XContentContainerDevice::CreateContentDevice(
+      device_path_, package_entry);
+  if (!device || !device->Initialize()) {
+    XELOGE("Cannot mount content package {}", package_entry->absolute_path());
+    return;
+  }
+  license_ = device->license_mask();
+
+  auto fs = kernel_state_->file_system();
+  fs->RegisterDevice(std::move(device));
+  fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
+  mounted_ = true;
 }
 
 ContentPackage::~ContentPackage() {
+  if (!mounted_) {
+    return;
+  }
   auto fs = kernel_state_->file_system();
   fs->UnregisterSymbolicLink(root_name_ + ":");
   fs->UnregisterDevice(device_path_);
@@ -240,8 +278,114 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(
         result.emplace_back(std::move(content_data));
       }
     }
+
+    if (xuid) {
+      // A disc holds no user's content, only XUID 0's.
+      continue;
+    }
+    for (vfs::Entry* package : ListDiscPackages(title_id, content_type)) {
+      const std::string name = package->name();
+      if (std::any_of(result.cbegin(), result.cend(),
+                      [&](const XCONTENT_AGGREGATE_DATA& listed) {
+                        return listed.file_name() == name;
+                      })) {
+        continue;
+      }
+      XCONTENT_AGGREGATE_DATA content_data;
+      content_data.device_id = device_id;
+      content_data.content_type = content_type;
+      content_data.set_display_name(xe::to_utf16(name));
+      content_data.set_file_name(name);
+      content_data.title_id = title_id;
+      content_data.xuid = xuid;
+      result.emplace_back(std::move(content_data));
+    }
   }
   return result;
+}
+
+const std::vector<std::unique_ptr<vfs::Device>>& ContentManager::ContentDiscs()
+    const {
+  std::lock_guard<std::mutex> lock(content_discs_mutex_);
+  auto emulator = kernel_state_->emulator();
+  if (!cvars::serve_disc_content || emulator->launch_path().empty() ||
+      emulator->launch_path() == content_discs_launch_path_) {
+    return content_discs_;
+  }
+  content_discs_launch_path_ = emulator->launch_path();
+  // A package opened from the last title's discs may still be mounted.
+  for (auto& disc : content_discs_) {
+    retired_content_discs_.push_back(std::move(disc));
+  }
+  content_discs_.clear();
+
+  const uint64_t scan_start_ms = Clock::QueryHostUptimeMillis();
+  const auto paths = emulator->DiscSetPaths();
+  // The launched disc is mounted a second time only when it has content.
+  const bool launched_has_content =
+      kernel_state_->file_system()->ResolvePath(
+          std::string(kDefaultGameSymbolicLink) + "\\content") != nullptr;
+  for (size_t i = 0; i < paths.size(); ++i) {
+    if (!i && !launched_has_content) {
+      continue;
+    }
+    auto device = emulator->CreateVfsDevice(
+        paths[i], fmt::format("\\Device\\ContentDisc{}", i));
+    if (!device || !device->is_gdfx() || !device->Initialize() ||
+        !device->ResolvePath("content")) {
+      continue;
+    }
+    XELOGI("Content: packages on {} are served from the disc",
+           xe::path_to_utf8(paths[i].filename()));
+    content_discs_.push_back(std::move(device));
+  }
+  if (paths.size() > 1) {
+    XELOGI("Content: checked {} other disc images in {} ms", paths.size() - 1,
+           Clock::QueryHostUptimeMillis() - scan_start_ms);
+  }
+  return content_discs_;
+}
+
+static std::string DiscPackageRoot(uint32_t title_id,
+                                   const XContentType content_type) {
+  return fmt::format("content\\{:016X}\\{:08X}\\{:08X}", uint64_t(0), title_id,
+                     static_cast<uint32_t>(content_type));
+}
+
+std::vector<vfs::Entry*> ContentManager::ListDiscPackages(
+    uint32_t title_id, const XContentType content_type) const {
+  std::vector<vfs::Entry*> packages;
+  if (content_type == XContentType::kSavedGame) {
+    return packages;
+  }
+  if (title_id == kCurrentlyRunningTitleId) {
+    title_id = kernel_state_->title_id();
+  }
+  const std::string root = DiscPackageRoot(title_id, content_type);
+  for (const auto& disc : ContentDiscs()) {
+    vfs::Entry* entry = disc->ResolvePath(root);
+    if (!entry) {
+      continue;
+    }
+    for (const auto& child : entry->children()) {
+      if (!(child->attributes() & vfs::kFileAttributeDirectory)) {
+        packages.push_back(child.get());
+      }
+    }
+  }
+  return packages;
+}
+
+vfs::Entry* ContentManager::ResolveDiscPackage(
+    const XCONTENT_AGGREGATE_DATA& data) const {
+  const std::string name = xe::string_util::trim(data.file_name());
+  for (vfs::Entry* package :
+       ListDiscPackages(data.title_id, data.content_type)) {
+    if (xe::utf8::equal_case(package->name(), name)) {
+      return package;
+    }
+  }
+  return nullptr;
 }
 
 std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContentODD(
@@ -285,7 +429,20 @@ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
     const XCONTENT_AGGREGATE_DATA& data, const uint32_t disc_number) {
   auto package_path = ResolvePackagePath(xuid, data, disc_number);
   if (!std::filesystem::exists(package_path)) {
-    return nullptr;
+    vfs::Entry* disc_package =
+        disc_number == -1 ? ResolveDiscPackage(data) : nullptr;
+    if (!disc_package) {
+      return nullptr;
+    }
+    auto global_lock = global_critical_region_.Acquire();
+    auto package = std::make_unique<ContentPackage>(kernel_state_, root_name,
+                                                    data, disc_package);
+    if (!package->is_mounted()) {
+      return nullptr;
+    }
+    XELOGI("Content: {} is served from {}", root_name,
+           disc_package->absolute_path());
+    return package;
   }
 
   auto global_lock = global_critical_region_.Acquire();
@@ -298,7 +455,7 @@ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
 bool ContentManager::ContentExists(const uint64_t xuid,
                                    const XCONTENT_AGGREGATE_DATA& data) {
   auto path = ResolvePackagePath(xuid, data);
-  return std::filesystem::exists(path);
+  return std::filesystem::exists(path) || ResolveDiscPackage(data);
 }
 
 X_RESULT ContentManager::WriteContentHeaderFile(const uint64_t xuid,
@@ -406,15 +563,12 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name,
     return X_ERROR_ALREADY_EXISTS;
   }
 
-  auto package_path = ResolvePackagePath(xuid, data, disc_number);
-  if (!std::filesystem::exists(package_path)) {
+  // Open package.
+  auto package = ResolvePackage(root_name, xuid, data, disc_number);
+  if (!package) {
     // Does not exist, must be created.
     return X_ERROR_FILE_NOT_FOUND;
   }
-
-  // Open package.
-  auto package = ResolvePackage(root_name, xuid, data, disc_number);
-  assert_not_null(package);
 
   package->LoadPackageLicenseMask(ResolvePackageHeaderPath(
       data.file_name(), xuid, kernel_state_->title_id(), data.content_type));

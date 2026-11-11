@@ -1295,6 +1295,31 @@ std::filesystem::path FindSiblingDisc(const std::filesystem::path& launched,
 
 }  // namespace
 
+std::vector<std::filesystem::path> Emulator::DiscSetPaths() const {
+  std::vector<std::filesystem::path> paths;
+  if (launch_path_.empty()) {
+    return paths;
+  }
+  paths.push_back(launch_path_);
+  const std::string name = xe::path_to_utf8(launch_path_.filename());
+  const size_t disc_pos = name.find("(Disc ");
+  if (disc_pos == std::string::npos) {
+    return paths;
+  }
+  const std::string prefix = name.substr(0, disc_pos + 6);
+  std::error_code ec;
+  for (const auto& entry :
+       std::filesystem::directory_iterator(launch_path_.parent_path(), ec)) {
+    const std::string candidate = xe::path_to_utf8(entry.path().filename());
+    if (candidate != name && candidate.compare(0, prefix.size(), prefix) == 0 &&
+        entry.path().extension() == launch_path_.extension()) {
+      paths.push_back(entry.path());
+    }
+  }
+  std::sort(paths.begin() + 1, paths.end());
+  return paths;
+}
+
 const std::filesystem::path Emulator::GetNewDiscPath(
     std::string window_message, uint32_t disc_number) {
   std::filesystem::path path = "";

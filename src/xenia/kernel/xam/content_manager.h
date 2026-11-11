@@ -11,6 +11,7 @@
 #define XENIA_KERNEL_XAM_CONTENT_MANAGER_H_
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -20,6 +21,7 @@
 #include "xenia/base/mutex.h"
 #include "xenia/base/string_key.h"
 #include "xenia/base/string_util.h"
+#include "xenia/vfs/device.h"
 #include "xenia/vfs/entry.h"
 #include "xenia/xbox.h"
 
@@ -199,7 +201,14 @@ class ContentPackage {
   ContentPackage(KernelState* kernel_state, const std::string_view root_name,
                  const XCONTENT_AGGREGATE_DATA& data,
                  const std::filesystem::path& package_path);
+  // The STFS package stored in |package_entry|, whose device has to outlive
+  // this.
+  ContentPackage(KernelState* kernel_state, const std::string_view root_name,
+                 const XCONTENT_AGGREGATE_DATA& data,
+                 vfs::Entry* package_entry);
   ~ContentPackage();
+
+  bool is_mounted() const { return mounted_; }
 
   void LoadPackageLicenseMask(const std::filesystem::path header_path);
 
@@ -218,6 +227,7 @@ class ContentPackage {
   std::string device_path_;
   XCONTENT_AGGREGATE_DATA content_data_;
   uint32_t license_;
+  bool mounted_ = false;
 };
 
 class ContentManager {
@@ -294,6 +304,15 @@ class ContentManager {
 
   bool UpdateSpaData(vfs::Entry* spa_file_update);
 
+  // Content a title installs from a disc of its set is served from the disc
+  // when the content root has no copy. The images are mounted on the first
+  // lookup and kept, so a disc swap leaves the packages opened from them
+  // readable.
+  const std::vector<std::unique_ptr<vfs::Device>>& ContentDiscs() const;
+  vfs::Entry* ResolveDiscPackage(const XCONTENT_AGGREGATE_DATA& data) const;
+  std::vector<vfs::Entry*> ListDiscPackages(
+      uint32_t title_id, const XContentType content_type) const;
+
   KernelState* kernel_state_;
   std::filesystem::path root_path_;
   std::filesystem::path save_root_path_;
@@ -301,6 +320,12 @@ class ContentManager {
   // TODO(benvanik): remove use of global lock, it's bad here!
   xe::global_critical_region global_critical_region_;
   std::unordered_map<string_key_insensitive, ContentPackage*> open_packages_;
+
+  mutable std::mutex content_discs_mutex_;
+  // The launch path the discs were collected for.
+  mutable std::filesystem::path content_discs_launch_path_;
+  mutable std::vector<std::unique_ptr<vfs::Device>> content_discs_;
+  mutable std::vector<std::unique_ptr<vfs::Device>> retired_content_discs_;
 };
 
 }  // namespace xam

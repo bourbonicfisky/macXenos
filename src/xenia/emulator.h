@@ -312,6 +312,12 @@ class Emulator {
   const std::filesystem::path GetNewDiscPath(std::string window_message = "",
                                              uint32_t disc_number = 0);
 
+  // The image or executable the title was launched from.
+  const std::filesystem::path& launch_path() const { return launch_path_; }
+  // The launched image, then the other "(Disc N)" images of its set that lie
+  // beside it. Empty when nothing is launched.
+  std::vector<std::filesystem::path> DiscSetPaths() const;
+
   void WaitUntilExit();
 
   // Reports a crash of the calling guest thread at pc, which fault describes,
