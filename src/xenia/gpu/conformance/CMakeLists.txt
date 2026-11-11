@@ -204,7 +204,11 @@ if(APPLE)
     # texture_util.cc, trace_writer.cc, memory.cc, register_file.cc -- is
     # already in this target, so the subclass source is the only addition.
     ${PROJECT_SOURCE_DIR}/src/xenia/gpu/metal/metal_shared_texture_cache.mm
-    ${CMAKE_CURRENT_SOURCE_DIR}/metal_shared_texture_cache_lifecycle_test.mm)
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal_shared_texture_cache_lifecycle_test.mm
+    # MetalProvider::SelectedDevice (metal_pipeline_storage.mm) and
+    # GuestRamWatchOverlaps (metal_lazy_publication.h) are defined in units
+    # this target does not link; the stubs keep the closure lean.
+    ${CMAKE_CURRENT_SOURCE_DIR}/conformance_link_stubs.mm)
   # Metal Shader Converter declarations used by ir_runtime_impl.mm and
   # metal_texture_cache.mm's bindless view-heap writes.
   target_include_directories(xenia-gpu-conformance PRIVATE
