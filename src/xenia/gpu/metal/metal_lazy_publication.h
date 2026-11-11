@@ -11,6 +11,7 @@
 #define XENIA_GPU_METAL_METAL_LAZY_PUBLICATION_H_
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +24,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/threading.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/metal/metal_tiled_publish_run.h"
 #include "xenia/gpu/texture_address.h"
@@ -108,6 +110,15 @@ class MetalLazyPublication {
     }();
     return s_enabled;
   }
+  // XE_METAL_LAZY_CLAIM=0: an access copies what it found before it waited,
+  // whoever published the page meanwhile (the previous behavior).
+  static bool ClaimEnabled() {
+    static const bool s_enabled = [] {
+      const char* v = std::getenv("XE_METAL_LAZY_CLAIM");
+      return !(v && v[0] == '0' && !v[1]);
+    }();
+    return s_enabled;
+  }
   // A fault touches one host page (four of these on a 16 KB host).
   static constexpr size_t kBulkPages = 16;
   static constexpr uint32_t kPageShift = 12;
@@ -146,11 +157,16 @@ class MetalLazyPublication {
     // read sees the newest finished producer, as on hardware).
     uint64_t stale_partial_pages = 0;
     uint64_t retired_records = 0;
-    // Pages an access copied whose owner had left the table meanwhile:
-    // published by a drain or a second access (raced), or replaced by a
-    // newer record that still owns the page (superseded).
-    uint64_t raced_copies = 0;
+    // Owners that left their page while an access waited for them. Replaced
+    // by a newer record that still owns the page: copied (superseded).
+    // Published by a drain or another access, no owner left: not copied
+    // again (already_published), or, with XE_METAL_LAZY_CLAIM=0, copied a
+    // second time (raced).
     uint64_t superseded_copies = 0;
+    uint64_t already_published = 0;
+    uint64_t raced_copies = 0;
+    // Accesses that waited for another access to finish copying their pages.
+    uint64_t in_flight_waits = 0;
   };
 
   // Arms `owner`: records page ownership for [guest_addr, guest_addr +
@@ -391,11 +407,18 @@ class MetalLazyPublication {
     }
     uint32_t first = phys_start >> kPageShift;
     uint32_t last = (phys_start + length - 1) >> kPageShift;
+    const bool claim = ClaimEnabled();
     // Snapshot the owners under the lock; copy without it.
     std::vector<std::pair<uint32_t, std::vector<Owner>>> touched;
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::unique_lock<std::mutex> lock(mutex_);
       ++stats_.faults;
+      if (claim) {
+        // Pages another access is copying still have their owners, and RAM
+        // does not have all their bytes yet. Let it finish: this access then
+        // finds them published.
+        WaitForInFlight(lock, first, last);
+      }
       for (uint32_t page = first; page <= last; ++page) {
         const std::vector<Owner>* owners = FindPageOwners(page);
         if (owners && !owners->empty()) {
@@ -442,6 +465,78 @@ class MetalLazyPublication {
       }
       done_counts[t] = done;
       max_done = std::max(max_done, done);
+    }
+    // The waits take up to milliseconds. A drain or another access may have
+    // published a page meanwhile and let the guest write to it: copying the
+    // page again would put the GPU's bytes back over that write (Rise of the
+    // Tomb Raider: 10,000 pages in a three-minute route came back from the
+    // wait already published; Crysis 3: two threads on one page every few
+    // frames). Look at the table again, drop what is published, and hold the
+    // pages that are left until their bytes are in RAM, so that a second
+    // access to one of them waits instead of copying it too.
+    std::vector<uint32_t> snapshot_sizes(touched.size(), 0);
+    std::vector<uint32_t> snapshot_done = done_counts;
+    std::vector<uint32_t> claimed;
+    for (size_t t = 0; t < touched.size(); ++t) {
+      snapshot_sizes[t] = uint32_t(touched[t].second.size());
+    }
+    if (claim) {
+      std::unique_lock<std::mutex> lock(mutex_);
+      WaitForInFlight(lock, first, last);
+      max_done = 0;
+      for (size_t t = 0; t < touched.size(); ++t) {
+        const uint32_t page = touched[t].first;
+        std::vector<Owner>& owners = touched[t].second;
+        const std::vector<Owner>* now = FindPageOwners(page);
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < done_counts[t]; ++i) {
+          bool present = false;
+          if (now) {
+            for (const Owner& o : *now) {
+              if (o.authority_sequence == owners[i].authority_sequence) {
+                present = true;
+                break;
+              }
+            }
+          }
+          if (!present) {
+            if (!now || now->empty()) {
+              const uint64_t n = ++stats_.already_published;
+              if (n <= 4 || (n & 16383) == 0) {
+                XELOGI("MetalLazyPublication: page {:08X} of seq={} was "
+                       "published during the wait, not copied again (#{}, "
+                       "{} superseded copies, {} in-flight waits)",
+                       page << kPageShift, owners[i].authority_sequence, n,
+                       stats_.superseded_copies, stats_.in_flight_waits);
+              }
+              continue;
+            }
+            // A newer record replaced this one and still owns the page (a
+            // resolve to the same destination every frame: Just Cause 2
+            // thousands of times a run, LEGO Indiana Jones' arena at every
+            // boot). The page stays armed for it; this access still gets
+            // the record it waited for.
+            ++stats_.superseded_copies;
+          }
+          if (kept != i) {
+            owners[kept] = owners[i];
+          }
+          ++kept;
+        }
+        owners.erase(owners.begin() + kept, owners.end());
+        done_counts[t] = kept;
+        max_done = std::max(max_done, kept);
+        if (kept) {
+          claimed.push_back(page);
+        }
+      }
+      if (!claimed.empty()) {
+        // A thread parked by a guest suspend in the middle of the copy would
+        // keep its pages held, and the suspender may be the next to touch
+        // them.
+        xe::threading::BeginSuspendDeferral();
+        in_flight_.push_back(&claimed);
+      }
     }
     std::vector<uint64_t> page_bytes(touched.size(), 0);
     uint64_t bulk_bytes = 0;
@@ -504,16 +599,10 @@ class MetalLazyPublication {
         const std::vector<Owner>& owners = touched[t].second;
         const uint32_t done = done_counts[t];
         for (uint32_t i = 0; i < done; ++i) {
-          if (!RemoveOwnerFromPage(page, owners[i].authority_sequence)) {
-            // The owner left the page between the snapshot and here. With
-            // a newer owner on the page it was superseded (a resolve to the
-            // same destination every frame: Just Cause 2 thousands of times
-            // a run, LEGO Indiana Jones' arena at every boot) and the newer
-            // record's publication covers the copy above. With no owner
-            // left, a drain or a second fault on the host page published it,
-            // and the copy above may have covered a CPU write the other one
-            // let through (Rise of the Tomb Raider: over 10,000 pages in a
-            // three-minute route; Crysis 3: one page every few frames).
+          if (!RemoveOwnerFromPage(page, owners[i].authority_sequence) &&
+              !claim) {
+            // XE_METAL_LAZY_CLAIM=0: the owner left the page between the
+            // snapshot and here, and the copy above was made all the same.
             const std::vector<Owner>* left = FindPageOwners(page);
             if (left && !left->empty()) {
               ++stats_.superseded_copies;
@@ -534,14 +623,22 @@ class MetalLazyPublication {
           ++stats_.fault_pages_copied;
           stats_.fault_bytes_copied += page_bytes[t];
         }
-        if (done != owners.size()) {
+        if (snapshot_done[t] != snapshot_sizes[t]) {
           ++stats_.stale_reads;
-          if (done) {
+          if (snapshot_done[t]) {
             ++stats_.stale_partial_pages;
           }
           ++remaining;
         }
       }
+      if (!claimed.empty()) {
+        in_flight_.erase(
+            std::find(in_flight_.begin(), in_flight_.end(), &claimed));
+      }
+    }
+    if (!claimed.empty()) {
+      in_flight_done_.notify_all();
+      xe::threading::EndSuspendDeferral();
     }
     return remaining;
   }
@@ -825,7 +922,34 @@ class MetalLazyPublication {
     pages_.erase(page);
   }
 
+  // Blocks while another access holds a page of [first, last]. The holder
+  // only copies memory, so a caller inside the global critical region can
+  // wait for it.
+  void WaitForInFlight(std::unique_lock<std::mutex>& lock, uint32_t first,
+                       uint32_t last) {
+    auto held = [&] {
+      for (const std::vector<uint32_t>* pages : in_flight_) {
+        // Ascending, like the snapshot they were taken from.
+        auto it = std::lower_bound(pages->begin(), pages->end(), first);
+        if (it != pages->end() && *it <= last) {
+          return true;
+        }
+      }
+      return false;
+    };
+    if (in_flight_.empty() || !held()) {
+      return;
+    }
+    ++stats_.in_flight_waits;
+    in_flight_done_.wait(lock, [&] { return !held(); });
+  }
+
   mutable std::mutex mutex_;
+  // The pages each access in its copy holds (a vector on that access's
+  // stack, registered from its second look at the table until its owners
+  // are removed).
+  std::vector<const std::vector<uint32_t>*> in_flight_;
+  std::condition_variable in_flight_done_;
   std::vector<std::vector<Owner>> flat_pages_;
   size_t flat_armed_pages_ = 0;
   std::unordered_map<uint32_t, std::vector<Owner>> pages_;

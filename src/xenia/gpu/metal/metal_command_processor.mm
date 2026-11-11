@@ -3726,9 +3726,11 @@ void MetalCommandProcessor::ShutdownContext() {
     auto st = lazy_publication_.stats();
     XELOGI(
         "MetalLazyPublication final: armed {} records / {} pages, faults {}, "
-        "pages copied {} ({} bytes), stale reads {}, retired {}",
+        "pages copied {} ({} bytes), stale reads {}, retired {}, published "
+        "during the wait {}, superseded copies {}, in-flight waits {}",
         st.armed_records, st.armed_pages, st.faults, st.fault_pages_copied,
-        st.fault_bytes_copied, st.stale_reads, st.retired_records);
+        st.fault_bytes_copied, st.stale_reads, st.retired_records,
+        st.already_published, st.superseded_copies, st.in_flight_waits);
   }
   if (!sampler_census_.empty()) {
     for (const auto& kv : sampler_census_) {

@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
@@ -232,6 +233,110 @@ TEST_CASE("lazy publication: OnAccess publishes the completed older owners",
   CHECK(std::memcmp(ram.data() + 0x20400, shared.data() + 0x20400, 0x800) ==
         0);
   CHECK(!table.Owns(12));
+}
+
+TEST_CASE("lazy publication: a page published during the wait is not copied "
+          "again",
+          "[l0][metal][lazypub]") {
+  MetalLazyPublication table;
+  MetalLazyPublication::Owner owner;
+  owner.authority_sequence = 21;
+  owner.submission = 1;
+  owner.guest_addr = 0x30000;
+  owner.range_bytes = 0x1000;
+  owner.linear = true;
+  table.Arm(owner, nullptr, nullptr);
+
+  const uint32_t image_bytes = 0x31000;
+  std::vector<uint8_t> shared(image_bytes), ram(image_bytes, 0);
+  for (uint32_t i = 0; i < image_bytes; ++i) {
+    shared[i] = uint8_t(i * 11 + 5);
+  }
+  const uint8_t cpu_byte = uint8_t(~shared[0x30010]);
+  // While the access waits for the submission, the drain publishes the
+  // record and retires it, and the guest (the page is open now) writes.
+  uint32_t remaining = table.OnAccess(
+      0x30100, 4,
+      [&](uint64_t) {
+        std::memcpy(ram.data() + 0x30000, shared.data() + 0x30000, 0x1000);
+        CHECK(table.Retire(21) == 1);
+        ram[0x30010] = cpu_byte;
+        return true;
+      },
+      shared.data(), [&](uint32_t address) { return ram.data() + address; });
+  CHECK(remaining == 0);
+  CHECK(ram[0x30010] == cpu_byte);
+  CHECK(table.stats().already_published == 1);
+  CHECK(table.stats().fault_pages_copied == 0);
+
+  // Superseded during the wait: a newer record owns the page. The access
+  // still gets the record it waited for, and the page stays armed.
+  MetalLazyPublication::Owner older = owner;
+  older.authority_sequence = 31;
+  older.guest_addr = 0x30000;
+  older.range_bytes = 0x800;
+  MetalLazyPublication::Owner newer = older;
+  newer.authority_sequence = 32;
+  newer.submission = 2;
+  table.Arm(older, nullptr, nullptr);
+  std::fill(ram.begin(), ram.end(), uint8_t(0));
+  remaining = table.OnAccess(
+      0x30100, 4,
+      [&](uint64_t submission) {
+        CHECK(submission == 1);
+        CHECK(table.Retire(31) == 1);
+        table.Arm(newer, nullptr, nullptr);
+        return true;
+      },
+      shared.data(), [&](uint32_t address) { return ram.data() + address; });
+  CHECK(remaining == 0);
+  CHECK(std::memcmp(ram.data() + 0x30000, shared.data() + 0x30000, 0x800) ==
+        0);
+  CHECK(table.stats().superseded_copies == 1);
+  CHECK(table.Owns(32));
+}
+
+TEST_CASE("lazy publication: two accesses to one page copy it once",
+          "[l0][metal][lazypub]") {
+  MetalLazyPublication table;
+  MetalLazyPublication::Owner owner;
+  owner.authority_sequence = 41;
+  owner.submission = 1;
+  owner.guest_addr = 0x50000;
+  owner.range_bytes = 0x1000;
+  owner.linear = true;
+  table.Arm(owner, nullptr, nullptr);
+
+  const uint32_t image_bytes = 0x51000;
+  std::vector<uint8_t> shared(image_bytes), ram(image_bytes, 0);
+  for (uint32_t i = 0; i < image_bytes; ++i) {
+    shared[i] = uint8_t(i * 13 + 7);
+  }
+  // Both accesses take their snapshot before either copies.
+  std::atomic<int> waiting{0};
+  auto wait = [&](uint64_t) {
+    ++waiting;
+    while (waiting.load() < 2) {
+      std::this_thread::yield();
+    }
+    return true;
+  };
+  auto translate = [&](uint32_t address) { return ram.data() + address; };
+  uint32_t remaining_other = 1;
+  std::thread other([&] {
+    remaining_other =
+        table.OnAccess(0x50800, 4, wait, shared.data(), translate);
+  });
+  uint32_t remaining = table.OnAccess(0x50100, 4, wait, shared.data(),
+                                      translate);
+  other.join();
+  CHECK(remaining == 0);
+  CHECK(remaining_other == 0);
+  CHECK(std::memcmp(ram.data() + 0x50000, shared.data() + 0x50000, 0x1000) ==
+        0);
+  CHECK(table.stats().fault_pages_copied == 1);
+  CHECK(table.stats().already_published == 1);
+  CHECK(!table.Owns(41));
 }
 
 TEST_CASE("lazy publication: OldestOwnerBefore finds older overlapping owners",
