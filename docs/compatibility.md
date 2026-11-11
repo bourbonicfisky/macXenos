@@ -1,10 +1,12 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 133 of them. Each one
+These are the games macXenos is tested with regularly: 151 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. Results below are from the full runs of
 every game on November 7, 2026 on an M4 Pro Mac mini, and November 8 on a base
-M4 Mac mini, at the original resolution (1x), using the Metal renderer.
+M4 Mac mini, at the original resolution (1x), using the Metal renderer. The 18
+games added on November 11 were tested that day on one of the two Macs; the
+other column shows a dash until the next full run.
 
 **"Reaches" is how far the test goes, not how far the game works.**
 
@@ -33,6 +35,7 @@ smoother.
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 | 30 |  |
 | Batman: Arkham Origins | Blackgate rooftop | 30 | 30 |  |
 | Battlefield: Bad Company | First level | 30 | 30 |  |
+| Bayonetta | Prologue, the clock tower fight | – | 60 |  |
 | Beautiful Katamari | Rolling practice | 60 | 60 |  |
 | Bionic Commando | First level | 60 | 60 |  |
 | BioShock | The plane crash, first control | 30 | 30 |  |
@@ -82,6 +85,9 @@ smoother.
 | Final Fantasy XIII | The Hanging Edge, after the first battle | 30 | 30 | After a Game Over and Retry in the first battle, Lightning's skin and the walkway can render wrongly |
 | Forza Horizon | Opening drive | 30 | 30 |  |
 | Forza Horizon 2 | Drive to the Festival | 30 | 30 |  |
+| Forza Motorsport 2 | Exhibition race, on the grid | – | 60 | Some menu text is missing letters |
+| Forza Motorsport 4 | First race, cockpit view | – | 60 | In cockpit view the windshield and side windows are flat grey |
+| Fuel | Career, The Leap of Faith | – | 30 |  |
 | Gears of War | Campaign, Ashes | 30 | 30 |  |
 | Gears of War 2 | Campaign, Act I | 30 | 30 |  |
 | Gears of War 3 | Campaign prologue | 30 | 30 |  |
@@ -109,7 +115,13 @@ smoother.
 | Lost Planet: Colonies | Mission 1, the hangar | 47 | 30 | A late beta of the game. Runs above 30 on the M4 mini, not yet explained. Rarely crashes in play |
 | Mafia II | Story opening | 119 | 148 | Doesn't cap its own frame rate (see below). Rarely crashes in play |
 | Mass Effect | First conversation | 30 | 30 |  |
+| Mass Effect 3 | Prologue, the Reapers reach Earth | – | 30 |  |
+| Max Payne 3 | Chapter 1, the bullet-time tutorial | – | 33 |  |
+| Metro 2033 | Prologue, first control | – | 30 |  |
+| Midnight Club: Los Angeles | Free roam | 30 | – |  |
 | Mirror's Edge | Story, first chapter | 30 | 30 |  |
+| Mortal Kombat: Komplete Edition | Practice mode | 60 | – |  |
+| MX vs. ATV Supercross | Single race, Anaheim | – | 30 |  |
 | NBA 2K11 | The Jordan intro game, Lakers at Bulls | 60 | 60 |  |
 | NBA 2K14 | Quick Game, CPU vs CPU | 60 | 60 |  |
 | NBA 2K18 | CPU vs CPU game | 60 | 60 |  |
@@ -121,6 +133,8 @@ smoother.
 | Perfect Dark Zero | Mission 0, Datacore | 30 | 30 |  |
 | Portal 2 | Relaxation Vault | 30 | 30 |  |
 | Prince of Persia: The Forgotten Sands | Opening | 30 | 30 |  |
+| Pure | Tutorial ride | – | 30 |  |
+| Quantum Theory | First control in the Tower | – | 30 |  |
 | Rage | Campaign opening | 60 | 60 |  |
 | Rayman Legends | Teensies in Trouble | 60 | 60 |  |
 | Rayman Origins | Opening clearing | 60 | 60 |  |
@@ -132,10 +146,14 @@ smoother.
 | Rise of the Tomb Raider | Ascension, the mountain | 30 | 30 | Whole-screen colour flashes in play (frequent on M4 Macs, rare on M1 Max). Graphics > Troubleshooting > "Wait for the GPU before signalling the game" removes them |
 | Saints Row | Campaign opening, outside the church | 29 | 29 |  |
 | Saints Row 2 | First mission, the prison infirmary | 29 | 29 |  |
+| Saints Row IV | Opening mission, the bunker tunnel | – | 87 | Doesn't cap its own frame rate (see below) |
 | Silent Hill: Homecoming | Opening nightmare, the operating room | 28 | 29 | The gurney mattress shows a blocky green and magenta texture |
+| Singularity | Katorga-12, the pier | – | 30 |  |
 | Skate 2 | Skating | 30 | 30 |  |
+| Skate 3 | Free skate, the first plaza | 60 | – |  |
 | Skate. | Freeskate, Downtown library plaza | 60 | 60 |  |
 | Sonic Generations | First stage | 30 | 30 |  |
+| Sonic Unleashed | Windmill Isle, Act 1 | 30 | – |  |
 | Spider-Man: Friend or Foe | The Helicarrier hub | 60 | 60 |  |
 | Spider-Man: Web of Shadows | Manhattan, after the opening | 30 | 30 |  |
 | Tales of Vesperia | Zaphias, the Lower Quarter | 30 | 30 |  |
@@ -152,15 +170,18 @@ smoother.
 | Virtua Tennis 4 | Exhibition match, first serve | 60 | 60 |  |
 | Viva Piñata | Garden | 30 | 30 |  |
 | WALL-E | First level | 60 | 60 |  |
+| Warhammer 40,000: Space Marine | First fight with the orks | – | 30 |  |
+| Wolfenstein | Train station, first control | – | 30 |  |
 | WWE SmackDown vs. Raw 2007 | Exhibition match, CPU vs CPU | 60 | 60 |  |
 | WWE SmackDown vs. Raw 2011 | One on One match, CPU vs CPU | 60 | 60 |  |
 
-Every game was still running at the end of its test on both Macs, and none hit
-a GPU error. Notes list the problems still open in these games; problems
-fixed before these runs are not listed.
+Every game was still running at the end of its test on every Mac it ran on,
+and none hit a GPU error. Notes list the problems still open in these games;
+problems fixed before these runs are not listed.
 
-Mafia II and 50 Cent: Blood on the Sand don't limit their own frame rate, so
-they run as fast as the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
+Mafia II, Saints Row IV and 50 Cent: Blood on the Sand don't limit their own
+frame rate, so they run as fast as the Mac allows, and the table measures them
+that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
 Graphics settings.
 
 A game not listed here may still work; these are only the ones tested on every
