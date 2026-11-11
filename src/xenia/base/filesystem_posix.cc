@@ -107,6 +107,10 @@ std::filesystem::path GetMacStorageFolder() {
 std::filesystem::path GetMacSavesFolder() {
   return GetHomeFolder() / "Documents" / "macXenos" / "Saves";
 }
+
+std::filesystem::path GetMacScreenshotsFolder() {
+  return GetHomeFolder() / "Pictures" / "macXenos";
+}
 #endif  // XE_PLATFORM_MAC
 
 FILE* OpenFile(const std::filesystem::path& path, const std::string_view mode) {

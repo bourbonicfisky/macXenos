@@ -66,6 +66,12 @@ class EmulatorWindow {
       Emulator* emulator, ui::WindowedAppContext& app_context, uint32_t width,
       uint32_t height);
 
+  // Where screenshots go when screenshot_path is empty. Unset: a screenshots
+  // folder beside the executable.
+  void set_default_screenshot_folder(const std::filesystem::path& path) {
+    default_screenshot_folder_ = path;
+  }
+
   std::unique_ptr<xe::threading::Thread> Gamepad_HotKeys_Listener;
 
   int32_t selected_title_index = -1;
@@ -395,6 +401,7 @@ class EmulatorWindow {
   // screenshot_interval(_ms) and log_fps_interval.
   std::unique_ptr<xe::threading::Thread> auto_screenshot_thread_;
   std::atomic<bool> auto_screenshot_stop_{false};
+  std::filesystem::path default_screenshot_folder_;
   std::atomic<bool> blades_visible_{false};
   bool game_frozen_ = false;
   bool dashboard_sounds_downloading_ = false;

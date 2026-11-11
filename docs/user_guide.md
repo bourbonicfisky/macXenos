@@ -167,6 +167,7 @@ Folder…** and paste the path.
 | Shader cache, rebuilt if deleted | `cache_host/` | |
 | The log from the last run | `xenia.log` | |
 | Game patches you add | `patches/` | |
+| Screenshots (**F12**), one folder per game | `~/Pictures/macXenos` | `screenshot_path` in the config file |
 
 Game saves and game installs can go on an external drive. If that drive
 isn't connected when a game starts, macXenos uses the default folder for that

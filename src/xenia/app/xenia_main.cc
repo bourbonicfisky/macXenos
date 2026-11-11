@@ -689,6 +689,13 @@ bool EmulatorApp::OnInitialize() {
     XELOGE("Failed to create the main emulator window");
     return false;
   }
+#if XE_PLATFORM_MAC
+  // Screenshots go to ~/Pictures/macXenos, not inside the app bundle.
+  if (mac_default_folders) {
+    emulator_window_->set_default_screenshot_folder(
+        xe::filesystem::GetMacScreenshotsFolder());
+  }
+#endif  // XE_PLATFORM_MAC
 
   // Setup the emulator and run its loop in a separate thread.
   emulator_thread_quit_requested_.store(false, std::memory_order_relaxed);

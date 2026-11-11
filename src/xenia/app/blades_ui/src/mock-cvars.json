@@ -1886,7 +1886,7 @@
 "type": "path",
 "value": "",
 "defaultValue": "",
-"description": "Folder for screenshots (F12 and screenshot_interval). Empty: a screenshots folder beside the executable.",
+"description": "Folder for screenshots (F12 and screenshot_interval). Empty: ~/Pictures/macXenos, or a screenshots folder beside the executable in portable mode or with storage_root set.",
 "changed": false
 },
 "screenshot_interval": {

@@ -191,8 +191,9 @@ DEFINE_int32(recent_titles_entry_amount, 10,
              "keeps none.",
              "General");
 DEFINE_path(screenshot_path, "",
-            "Folder for screenshots (F12 and screenshot_interval). Empty: a "
-            "screenshots folder beside the executable.",
+            "Folder for screenshots (F12 and screenshot_interval). Empty: "
+            "~/Pictures/macXenos, or a screenshots folder beside the "
+            "executable in portable mode or with storage_root set.",
             "General");
 DEFINE_int32(screenshot_interval, 0,
              "Seconds between automatic screenshots of the guest output, for "
@@ -1280,12 +1281,14 @@ void EmulatorWindow::ExportScreenshot(const xe::ui::RawImage& image,
     return;
   }
 
-  // Create a screenshots folder beside the executable unless one is set.
-  auto screenshot_path =
-      (cvars::screenshot_path.empty()
-           ? xe::filesystem::GetExecutableFolder() / "screenshots"
-           : cvars::screenshot_path) /
-      title_id;
+  // Use the default folder (or one beside the executable) unless one is set.
+  std::filesystem::path screenshot_path = cvars::screenshot_path;
+  if (screenshot_path.empty()) {
+    screenshot_path = default_screenshot_folder_.empty()
+                          ? xe::filesystem::GetExecutableFolder() / "screenshots"
+                          : default_screenshot_folder_;
+  }
+  screenshot_path /= title_id;
 
   if (!std::filesystem::exists(screenshot_path)) {
     std::filesystem::create_directories(screenshot_path);

@@ -47,6 +47,9 @@ std::filesystem::path GetMacStorageFolder();
 
 // ~/Documents/macXenos/Saves: the default folder for saved games.
 std::filesystem::path GetMacSavesFolder();
+
+// ~/Pictures/macXenos: the default folder for screenshots.
+std::filesystem::path GetMacScreenshotsFolder();
 #endif  // XE_PLATFORM_MAC
 
 // Creates the parent folder of the specified path if needed.
