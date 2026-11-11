@@ -274,3 +274,44 @@ them, but it also lifts centred music and effects. Also check what speaker
 setup the emulated console reports (`XAudioGetSpeakerConfig` reads the
 user audio flags from xconfig), because games choose stereo or 5.1 output
 from it.
+
+## Disc image trimming (keep only the data a game uses)
+
+Recorded 2026-11-11.
+
+**Goal:** shrink a library of full Xbox 360 disc images by repacking each
+one so it holds only what the game reads: the game partition's file system
+and files, without the video partition, the unused gaps and the padding to
+the end of the disc. A "Trim" action in the game library (or a command-line
+tool) writes a trimmed copy beside the original and, once the copy is
+verified, offers to replace it.
+
+**State (checked 2026-11-11: this tree 77ac18894):**
+- The test library holds 257 full images at 2.08 TB, a median of 7.8 GB
+  each (`/Volumes/NAS/Emulation/Xbox 360 Decompressed`). Many games use
+  well under half of that.
+- The disc reader (`src/xenia/vfs/devices/disc_image_device.cc`) looks for
+  the game partition's `MICROSOFT*XBOX*MEDIA` header at a few known offsets,
+  including 0, so an image that holds only the game partition already
+  mounts. It reads files through the directory entries' sector numbers and
+  never touches the video partition.
+- Nothing in this tree writes images. Community tools exist (extract-xiso's
+  rewrite mode, the Xbox 360 "trim" options in ISO managers), so the format
+  of a trimmed image is settled; the work is a safe, built-in way to do it.
+
+**Rough shape:**
+1. Walk the game partition's directory tree, as the reader does, and list
+   every file's sectors plus the file system's own sectors.
+2. Simplest: copy the game partition and cut it after the last used
+   sector. Further: rebuild it, packing files together and rewriting the
+   directory entries' sector numbers, which also drops gaps between files.
+3. Verify by mounting the copy and comparing every file's bytes with the
+   original before anything is replaced.
+4. The library action, with the saving shown per game and for the whole
+   library.
+
+**Risk:** a game that reads raw sectors outside its files (copy protection
+checks, data hidden past the file system) would break, so test the routed
+titles on trimmed copies before offering this to users. A trimmed image
+also no longer matches the Redump checksums people use to verify dumps;
+keep trimming opt-in and say so where the action is offered.
