@@ -288,8 +288,8 @@ verified, offers to replace it.
 
 **State (checked 2026-11-11: this tree 77ac18894):**
 - The test library holds 257 full images at 2.08 TB, a median of 7.8 GB
-  each (`/Volumes/NAS/Emulation/Xbox 360 Decompressed`). Many games use
-  well under half of that.
+  each (`/Volumes/NAS/Emulation/Xbox 360 Decompressed`). How much of that
+  each game actually uses hasn't been measured; step 1 below gives it.
 - The disc reader (`src/xenia/vfs/devices/disc_image_device.cc`) looks for
   the game partition's `MICROSOFT*XBOX*MEDIA` header at a few known offsets,
   including 0, so an image that holds only the game partition already
