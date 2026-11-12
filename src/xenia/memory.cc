@@ -2073,6 +2073,26 @@ bool ProtectWholePagesEnabled() {
 }
 }  // namespace
 
+// The parent heap's host view (Memory::TranslatePhysical) is how the
+// emulated GPU, DMA and kernel reach guest RAM. On the console those writes
+// ignore CPU page protection, so this view keeps write access whatever the
+// guest asks of its virtual view: Ninja Gaiden II marks a texture range
+// read-only and then resolves into it, and publishing the resolve into the
+// read-only view faulted (host write fault in CopyTiledPages under
+// MmSetAddressProtect, and in DrainPendingWritebacks at a fence with lazy
+// publication off; 3 of 3 boots). Guest code never uses this view.
+// XE_PHYSICAL_VIEW_GUEST_PROTECT=1 restores the guest's protection there.
+static uint32_t PhysicalViewProtect(uint32_t protect) {
+  static const bool s_guest_protect = [] {
+    const char* value = std::getenv("XE_PHYSICAL_VIEW_GUEST_PROTECT");
+    return value && value[0] == '1' && !value[1];
+  }();
+  if (s_guest_protect || !(protect & kMemoryProtectRead)) {
+    return protect;
+  }
+  return protect | kMemoryProtectWrite;
+}
+
 bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
                          uint32_t allocation_type, uint32_t protect,
                          bool top_down, uint32_t* out_address) {
@@ -2093,7 +2113,8 @@ bool PhysicalHeap::Alloc(uint32_t size, uint32_t alignment,
   uint32_t parent_heap_end = GetPhysicalAddress(heap_base_ + (heap_size_ - 1));
   uint32_t parent_address;
   if (!parent_heap_->AllocRange(parent_heap_start, parent_heap_end, size,
-                                alignment, allocation_type, protect, top_down,
+                                alignment, allocation_type,
+                                PhysicalViewProtect(protect), top_down,
                                 &parent_address)) {
     XELOGE(
         "PhysicalHeap::Alloc unable to alloc physical memory in parent heap "
@@ -2145,7 +2166,8 @@ bool PhysicalHeap::AllocFixed(uint32_t base_address, uint32_t size,
   // TODO(benvanik): flag for ensure-not-committed?
   uint32_t parent_base_address = GetPhysicalAddress(base_address);
   if (!parent_heap_->AllocFixed(parent_base_address, size, alignment,
-                                allocation_type, protect)) {
+                                allocation_type,
+                                PhysicalViewProtect(protect))) {
     XELOGE(
         "PhysicalHeap::AllocFixed unable to alloc physical memory in parent "
         "heap");
@@ -2197,7 +2219,8 @@ bool PhysicalHeap::AllocRange(uint32_t low_address, uint32_t high_address,
   uint32_t parent_high_address = GetPhysicalAddress(high_address);
   uint32_t parent_address;
   if (!parent_heap_->AllocRange(parent_low_address, parent_high_address, size,
-                                alignment, allocation_type, protect, top_down,
+                                alignment, allocation_type,
+                                PhysicalViewProtect(protect), top_down,
                                 &parent_address)) {
     XELOGE(
         "PhysicalHeap::AllocRange unable to alloc physical memory in parent "
@@ -2312,8 +2335,15 @@ bool PhysicalHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
                      InvalidateUnwatchedEnabled());
   }
 
-  if (!parent_heap_->Protect(GetPhysicalAddress(address), size, protect,
-                             old_protect)) {
+  // The guest's previous protection, as recorded (the physical view's host
+  // protection no longer mirrors it, see PhysicalViewProtect).
+  if (old_protect && address >= heap_base_ &&
+      address - heap_base_ < heap_size_) {
+    *old_protect =
+        page_table_[(address - heap_base_) >> page_size_shift_].current_protect;
+  }
+  if (!parent_heap_->Protect(GetPhysicalAddress(address), size,
+                             PhysicalViewProtect(protect))) {
     XELOGE("PhysicalHeap::Protect failed due to parent heap failure");
     return false;
   }
