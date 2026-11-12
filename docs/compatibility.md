@@ -72,7 +72,7 @@ smoother.
 | Dragon Age II | Prologue battle | 30 | 30 |  |
 | Dragon Age: Origins | Human Noble origin, Castle Highever | 30 | 30 |  |
 | Dragon Age: Origins - Awakening | The road to Vigil's Keep | 30 | 30 |  |
-| Dynasty Warriors 6 | Challenge mode, Rampage | 60 | 60 | Musou mode crashes on its briefing screen |
+| Dynasty Warriors 6 | Challenge mode, Rampage | 60 | 60 |  |
 | Dynasty Warriors 7 | Wei story, chapter 1 | 60 | 60 |  |
 | The Elder Scrolls IV: Oblivion | Imperial Prison cell | 30 | 30 |  |
 | The Elder Scrolls V: Skyrim | Opening cart ride to Helgen | 30 | 30 | Sometimes crashes or stops responding in play; being worked on. The M4 mini figure is from November 7, as it stopped early on November 8 |
