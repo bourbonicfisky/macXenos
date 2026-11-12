@@ -272,6 +272,84 @@ bool GuestRamWatchOverlaps(uint32_t base, uint32_t length) {
          base < uint64_t(watch.first) + watch.second;
 }
 
+namespace {
+struct CpSentinelState {
+  std::vector<uint32_t> addresses;
+  uint32_t ring_address[64] = {};
+  uint32_t ring_packet[64] = {};
+  uint64_t count = 0;
+  bool fired = false;
+};
+CpSentinelState& GetCpSentinel() {
+  static CpSentinelState state = [] {
+    CpSentinelState s;
+    const char* v = std::getenv("XE_CP_SENTINEL");
+    while (v && *v) {
+      char* end = nullptr;
+      uint32_t a = uint32_t(std::strtoul(v, &end, 16));
+      if (end == v) {
+        break;
+      }
+      s.addresses.push_back(a & ~uint32_t(3));
+      v = (*end == ',') ? end + 1 : end;
+    }
+    return s;
+  }();
+  return state;
+}
+}  // namespace
+
+bool CpSentinelEnabled() { return !GetCpSentinel().addresses.empty(); }
+
+void CpSentinelNote(uint32_t packet_physical, uint32_t packet) {
+  CpSentinelState& s = GetCpSentinel();
+  s.ring_address[s.count & 63] = packet_physical;
+  s.ring_packet[s.count & 63] = packet;
+  ++s.count;
+}
+
+void CpSentinelReport(Memory* memory, const std::string& reason) {
+  CpSentinelState& s = GetCpSentinel();
+  std::string packets;
+  const uint64_t first = s.count > 64 ? s.count - 64 : 0;
+  for (uint64_t i = first; i < s.count; ++i) {
+    packets += fmt::format("{}{:08X}:{:08X}", (i - first) % 8 ? " " : "\n    ",
+                           s.ring_address[i & 63], s.ring_packet[i & 63]);
+  }
+  // The words around the last packet, as guest memory holds them now.
+  std::string words;
+  if (s.count) {
+    const uint32_t last = s.ring_address[(s.count - 1) & 63] & ~uint32_t(3);
+    for (uint32_t i = 0; i < 32; ++i) {
+      const uint32_t* w = memory->TranslatePhysical<const uint32_t*>(
+          last - 0x40 + i * 4);
+      words += fmt::format("{}{:08X}", (i & 7) ? " " : "\n    ",
+                           w ? xe::byte_swap(*w) : 0u);
+    }
+  }
+  XELOGW("CpSentinel: {} before packet #{}; last packets (address:header):{}"
+         "\n  memory from last packet - 0x40:{}",
+         reason, s.count, packets, words);
+}
+
+void CpSentinelCheck(Memory* memory) {
+  CpSentinelState& s = GetCpSentinel();
+  if (s.fired) {
+    return;
+  }
+  for (uint32_t address : s.addresses) {
+    const uint32_t* word = memory->TranslatePhysical<const uint32_t*>(address);
+    const uint32_t value = word ? xe::byte_swap(*word) : 0;
+    if (value != 0xC0013F00u && value != 0x00013F00u) {
+      continue;
+    }
+    s.fired = true;
+    CpSentinelReport(memory,
+                     fmt::format("{:08X} = {:08X}", address, value));
+    return;
+  }
+}
+
 void GuestRamWatchNote(const char* writer, uint32_t base, uint32_t length,
                        uint64_t value) {
   if (!GuestRamWatchOverlaps(base, length)) {
@@ -1539,6 +1617,19 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
         std::memcpy(&as_float, &value, sizeof(as_float));
         XELOGI("GpuWatchReg draw={} reg={:04X} value={:08X} ({})",
                trace_draw_index_, index, value, as_float);
+      }
+    }
+    // Sentinel: SCRATCH_UMSK / SCRATCH_ADDR are set once at device setup;
+    // a later change means the CP parsed something that is not a command.
+    if ((index == XE_GPU_REG_SCRATCH_UMSK ||
+         index == XE_GPU_REG_SCRATCH_ADDR) &&
+        register_file_->values[index] && register_file_->values[index] != value &&
+        CpSentinelEnabled()) {
+      static uint32_t s_reports = 0;
+      if (s_reports++ < 4) {
+        CpSentinelReport(memory_,
+                         fmt::format("register {:04X} {:08X} -> {:08X}", index,
+                                     register_file_->values[index], value));
       }
     }
     register_file_->values[index] = value;

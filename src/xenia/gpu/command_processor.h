@@ -136,6 +136,17 @@ void GuestRamWatchNote(const char* writer, uint32_t base, uint32_t length,
                        uint64_t value = UINT64_MAX);
 bool GuestRamWatchOverlaps(uint32_t base, uint32_t length);
 
+// XE_CP_SENTINEL=<physical hex>[,...] (diagnostic; inert when unset):
+// before every PM4 packet the command processor checks these guest words
+// and, the first time one holds C0013F00 or 00013F00 (the words Need for
+// Speed: The Run's memory was overwritten with), logs the last 64 packets
+// it executed. CpSentinelNote records a packet; CpSentinelCheck tests the
+// words.
+bool CpSentinelEnabled();
+void CpSentinelNote(uint32_t packet_physical, uint32_t packet);
+void CpSentinelCheck(Memory* memory);
+void CpSentinelReport(Memory* memory, const std::string& reason);
+
 class CommandProcessor {
  protected:
   RingBuffer

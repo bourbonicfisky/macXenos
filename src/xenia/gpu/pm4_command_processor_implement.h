@@ -275,6 +275,32 @@ bool COMMAND_PROCESSOR::ExecutePacket() {
     COMMAND_PROCESSOR::DisassembleCurrentPacket();
   }
 #endif
+  static const bool s_sentinel = CpSentinelEnabled();
+  if (s_sentinel) {
+    CpSentinelCheck(memory_);
+    // SCRATCH_UMSK / SCRATCH_ADDR, whichever path wrote them (the constant
+    // range writers bypass WriteRegister).
+    static uint32_t s_scratch_seen[2] = {};
+    static uint32_t s_scratch_reports = 0;
+    const uint32_t scratch_now[2] = {
+        register_file_->values[XE_GPU_REG_SCRATCH_UMSK],
+        register_file_->values[XE_GPU_REG_SCRATCH_ADDR]};
+    for (int i = 0; i < 2; ++i) {
+      if (scratch_now[i] != s_scratch_seen[i]) {
+        if (s_scratch_seen[i] && s_scratch_reports < 4) {
+          ++s_scratch_reports;
+          CpSentinelReport(memory_,
+                           fmt::format("SCRATCH_{} {:08X} -> {:08X}",
+                                       i ? "ADDR" : "UMSK", s_scratch_seen[i],
+                                       scratch_now[i]));
+        }
+        s_scratch_seen[i] = scratch_now[i];
+      }
+    }
+    CpSentinelNote(HostToGuestPhysical(reader_.read_ptr()),
+                   xe::byte_swap(*reinterpret_cast<const uint32_t*>(
+                       reader_.read_ptr())));
+  }
   const uint32_t packet = reader_.ReadAndSwap<uint32_t>();
   const uint32_t packet_type = packet >> 30;
 
