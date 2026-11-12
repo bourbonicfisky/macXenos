@@ -71,12 +71,6 @@ inline std::string ReleaseVersion() {
   return IsReleaseVersion() ? Version() : std::string();
 }
 
-// The release's build number (CFBundleVersion, the commit count Sparkle
-// compares), empty outside a bundle.
-inline std::string BundleBuildNumber() {
-  return BundleInfoString("CFBundleVersion");
-}
-
 }  // namespace app
 }  // namespace xe
 

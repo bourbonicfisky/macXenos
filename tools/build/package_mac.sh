@@ -17,8 +17,9 @@
 #                  of the built commit (generate_version_header.py): "1.0" on
 #                  the macxenos-1.0 tag, "1.0+3" three commits after it.
 #                  Give it only for a test build, e.g. 1.0-beta9-test6.
-#                  CFBundleVersion is the built commit's count (git rev-list
-#                  --count): Sparkle orders releases by it, so it only grows.
+#                  CFBundleVersion is the built commit's date, YYYYMMDDHHMM
+#                  in UTC: Sparkle orders releases by it, and it is the same
+#                  for a commit here and in the public export.
 #   --feed-url     The Sparkle appcast the app checks for updates (default:
 #                  https://macxenos.com/appcast.xml). See sparkle_appcast.sh.
 #   --no-sparkle   Leave the updater out (no Sparkle.framework, no feed): the
@@ -108,10 +109,16 @@ TAG_VERSION="$(MACXENOS_VERSION= python3 "${REPO_ROOT}/tools/build/generate_vers
   --source-root "${REPO_ROOT}" --print-version "${COMMIT_FULL:-HEAD}" 2>/dev/null | cut -d' ' -f1)"
 SHORT_VERSION="${SHORT_VERSION_OVERRIDE:-${TAG_VERSION:-dev}}"
 # Sparkle compares CFBundleVersion to decide what is newer, so it must grow
-# with every release: the built commit's position in history. (It was the
-# short hash, which has no order.)
-BUILD_VERSION="$(git -C "${REPO_ROOT}" rev-list --count "${COMMIT_FULL:-HEAD}" 2>/dev/null)" \
-  || die "cannot count commits up to ${COMMIT_FULL:-HEAD} for CFBundleVersion"
+# with every release: the built commit's committer date, YYYYMMDDHHMM in
+# UTC. The public repository is a filtered export of this one
+# (export_public.sh) that keeps commit dates but drops commits, so a count
+# of commits (the scheme up to 1.0 beta 9, about 10,000) would be lower for
+# the same commit there and an update packaged from it would look older.
+# The date is the same in both and larger than any count released.
+BUILD_VERSION="$(TZ=UTC git -C "${REPO_ROOT}" log -1 --format=%cd \
+  --date=format-local:%Y%m%d%H%M "${COMMIT_FULL:-HEAD}" 2>/dev/null)" \
+  && [[ -n "${BUILD_VERSION}" ]] \
+  || die "cannot read the date of ${COMMIT_FULL:-HEAD} for CFBundleVersion"
 
 # ===========================================================================
 # 1. Assemble the bundle skeleton

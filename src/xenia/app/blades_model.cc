@@ -1141,17 +1141,14 @@ void BladesModel::WriteApp(StateWriter& w) {
   w.EndArray();
 
   // Dashboard > About: the version ("1.0", or "1.0+3" for a development
-  // build) and the build. A release shows its build number and commit; a
-  // development build the branch it came from.
+  // build) and the build: its commit, and for a development build the branch
+  // it came from.
   const std::string version = Version();
   w.Key("appVersion");
   w.String(version.c_str());
   w.Key("appBuild");
   if (IsReleaseVersion()) {
-    const std::string build = BundleBuildNumber() +
-                              " (" XE_BUILD_COMMIT_SHORT ", " XE_BUILD_DATE
-                              ")";
-    w.String(build.c_str());
+    w.String(XE_BUILD_COMMIT_SHORT " (" XE_BUILD_DATE ")");
   } else {
     w.String(XE_BUILD_BRANCH "@" XE_BUILD_COMMIT_SHORT " (" XE_BUILD_DATE ")");
   }
