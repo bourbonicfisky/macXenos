@@ -1105,6 +1105,20 @@ class PosixCondition<Semaphore> final : public PosixConditionBase {
     count_--;
     cond_.notify_all();
   }
+  // A release hands its counts to the threads already waiting, in order, as
+  // the console kernel does. Counted with a condition variable, a thread that
+  // came back to wait took them first: Ninja Gaiden II releases four job
+  // tokens to its four workers, the one worker its job mask excludes woke
+  // first, skipped, waited again and took all four, so the frame's job never
+  // ran and the game froze in its opening (3 of 3 boots).
+  // XE_SEMAPHORE_HANDOFF=0 restores the counted wait.
+  [[nodiscard]] bool latches_single_waits() const override {
+    static const bool s_handoff = [] {
+      const char* value = std::getenv("XE_SEMAPHORE_HANDOFF");
+      return !(value && value[0] == '0' && !value[1]);
+    }();
+    return s_handoff;
+  }
   uint32_t count_;
   const uint32_t maximum_count_;
 };
