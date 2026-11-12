@@ -45,6 +45,10 @@ void XNotifyListener::EnqueueNotification(XNotificationID id, uint32_t data) {
   if (key.version > max_version_) {
     return;
   }
+  // xam 816A8328.
+  if (key.system_only && !is_system_) {
+    return;
+  }
   auto global_lock = global_critical_region_.Acquire();
   notifications_.push_back(std::pair<XNotificationID, uint32_t>(id, data));
   wait_handle_->Set();
