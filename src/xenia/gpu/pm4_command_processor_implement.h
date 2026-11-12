@@ -878,6 +878,17 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
                                  w ? xe::byte_swap(*w) : 0u);
           }
           XELOGW("WAIT_REG_MEM stuck: words from {:08X}:{}", around, words);
+          // Scratch write-back state: D3D handshakes (a callback request
+          // in SCRATCH_REG0, then a wait for its write-back) poll it.
+          std::string scratch;
+          for (uint32_t i = 0; i < 8; ++i) {
+            scratch += fmt::format(
+                " {:08X}",
+                register_file_->values[XE_GPU_REG_SCRATCH_REG0 + i]);
+          }
+          XELOGW("WAIT_REG_MEM stuck: SCRATCH_ADDR={:08X} UMSK={:02X} regs:{}",
+                 register_file_->values[XE_GPU_REG_SCRATCH_ADDR],
+                 register_file_->values[XE_GPU_REG_SCRATCH_UMSK], scratch);
         }
       }
       // Wait.

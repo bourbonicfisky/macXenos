@@ -79,6 +79,8 @@
 #if XE_PLATFORM_MAC
 #include <dlfcn.h>
 #include <execinfo.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #endif  // XE_PLATFORM_MAC
 
 DECLARE_bool(headless);
@@ -1577,6 +1579,23 @@ void Emulator::DumpGuestMemoryOnce() {
       const void* source =
           readable ? memory()->TranslateVirtual(uint32_t(address))
                    : zeros.data();
+#if XE_PLATFORM_MAC
+      // Pages of a loaded DLL image (Need for Speed: The Run's NFS.Main.dll)
+      // carry no guest read protection; copy whatever the host can read.
+      // mach_vm_read_overwrite fails on an unreadable page instead of
+      // faulting.
+      std::vector<uint8_t> copy(kPage);
+      mach_vm_size_t copied = 0;
+      if (!readable && heap &&
+          mach_vm_read_overwrite(
+              mach_task_self(),
+              mach_vm_address_t(memory()->TranslateVirtual(uint32_t(address))),
+              kPage, mach_vm_address_t(copy.data()), &copied) == KERN_SUCCESS &&
+          copied == kPage) {
+        source = copy.data();
+        readable = true;
+      }
+#endif  // XE_PLATFORM_MAC
       std::fwrite(source, 1, kPage, file);
       pages += readable;
     }
