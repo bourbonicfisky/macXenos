@@ -13,7 +13,10 @@
 #                              [--feed-url <url>] [--no-sparkle]
 #
 #   --config       Build config to package (default: Release).
-#   --version      CFBundleShortVersionString (default: 1.0-dev), e.g. 1.0-rc1.
+#   --version      CFBundleShortVersionString. Default: from the release tags
+#                  of the built commit (generate_version_header.py): "1.0" on
+#                  the macxenos-1.0 tag, "1.0+3" three commits after it.
+#                  Give it only for a test build, e.g. 1.0-beta9-test6.
 #                  CFBundleVersion is the built commit's count (git rev-list
 #                  --count): Sparkle orders releases by it, so it only grows.
 #   --feed-url     The Sparkle appcast the app checks for updates (default:
@@ -99,7 +102,11 @@ get_define() { sed -n "s/^#define $1 \"\\(.*\\)\"/\\1/p" "${VERSION_H}" 2>/dev/n
 COMMIT_SHORT="$(get_define XE_BUILD_COMMIT_SHORT)"; COMMIT_SHORT="${COMMIT_SHORT:-unknown}"
 BRANCH="$(get_define XE_BUILD_BRANCH)"; BRANCH="${BRANCH:-unknown}"
 COMMIT_FULL="$(get_define XE_BUILD_COMMIT)"
-SHORT_VERSION="${SHORT_VERSION_OVERRIDE:-1.0-dev}"
+# The version the built commit's release tags give it (macxenos-1.0 -> 1.0,
+# later commits 1.0+N), the same rule the app's version.h follows.
+TAG_VERSION="$(MACXENOS_VERSION= python3 "${REPO_ROOT}/tools/build/generate_version_header.py" \
+  --source-root "${REPO_ROOT}" --print-version "${COMMIT_FULL:-HEAD}" 2>/dev/null | cut -d' ' -f1)"
+SHORT_VERSION="${SHORT_VERSION_OVERRIDE:-${TAG_VERSION:-dev}}"
 # Sparkle compares CFBundleVersion to decide what is newer, so it must grow
 # with every release: the built commit's position in history. (It was the
 # short hash, which has no order.)

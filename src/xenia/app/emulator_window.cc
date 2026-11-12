@@ -8,6 +8,7 @@
  */
 
 #include "xenia/app/emulator_window.h"
+#include "xenia/app/app_version.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -244,20 +245,24 @@ EmulatorWindow::EmulatorWindow(Emulator* emulator,
           std::make_unique<ui::ImGuiDrawer>(window_.get(), kZOrderImGui)),
       display_config_game_config_load_callback_(
           new DisplayConfigGameConfigLoadCallback(*emulator, *this)) {
-  base_title_ = std::string(kBaseTitle) +
+  // A release names itself by version ("macXenos 1.0"); a development
+  // build adds the branch and commit it was built from.
+  base_title_ = std::string(kBaseTitle) + " " + Version();
+  if (!IsReleaseVersion()) {
+    base_title_ +=
 #ifdef DEBUG
 #if _NO_DEBUG_HEAP == 1
-                " DEBUG"
+        " DEBUG"
 #else
-                " CHECKED"
+        " CHECKED"
 #endif
 #endif
-                " ("
+        " ("
 #ifdef XE_BUILD_IS_PR
-                "PR#" XE_BUILD_PR_NUMBER " - "
+        "PR#" XE_BUILD_PR_NUMBER " - "
 #endif
-                XE_BUILD_BRANCH "@" XE_BUILD_COMMIT_SHORT " on " XE_BUILD_DATE
-                ")";
+        XE_BUILD_BRANCH "@" XE_BUILD_COMMIT_SHORT " on " XE_BUILD_DATE ")";
+  }
 
   LoadRecentlyLaunchedTitles();
 }

@@ -109,7 +109,9 @@ endif()
 find_package(Git QUIET)
 if(Git_FOUND)
   set(XE_GIT_CONFIGURE_DEPENDS "${XE_VERSION_GENERATOR}")
-  foreach(XE_GIT_PATH HEAD logs/HEAD packed-refs)
+  # refs/tags: a new release tag changes XE_BUILD_VERSION (git tag writes a
+  # loose ref there, which touches the directory).
+  foreach(XE_GIT_PATH HEAD logs/HEAD packed-refs refs/tags)
     execute_process(
       COMMAND "${GIT_EXECUTABLE}" -C "${PROJECT_SOURCE_DIR}"
               rev-parse --git-path "${XE_GIT_PATH}"

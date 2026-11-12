@@ -19,13 +19,14 @@
 # half is tools/build/sparkle_public_ed_key.txt, baked into Info.plist by
 # package_mac.sh). An update whose signature does not match is refused.
 #
-# Release flow: package_mac.sh --version 1.0-betaN -> copy build/dist/
-# macXenos.dmg to <releases dir>/macXenos-1.0-betaN.dmg -> this script ->
+# Release flow: tag the commit macxenos-<version> (macxenos-1.0) -> build
+# -> package_mac.sh (it takes the version from the tag) -> copy build/dist/
+# macXenos.dmg to <releases dir>/macXenos-<version>.dmg -> this script ->
 # upload the DMG and appcast.xml so the feed URL serves the new appcast.
 
 set -euo pipefail
 
-[[ $# -eq 2 ]] || { sed -n '3,22p' "$0" >&2; exit 2; }
+[[ $# -eq 2 ]] || { sed -n '3,23p' "$0" >&2; exit 2; }
 RELEASES="$1"
 PREFIX="$2"
 [[ -d "${RELEASES}" ]] || { echo "error: no folder ${RELEASES}" >&2; exit 1; }

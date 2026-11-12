@@ -187,9 +187,11 @@ export type NativeState = {
   /** The Mac's preferred languages, most preferred first (BCP 47); empty
       off macOS. The dashboard's "Same as my Mac" picks from these. */
   systemLanguages: string[];
-  /** The release, "1.0 beta 3", for the Dashboard blade. */
+  /** The version, "1.0" (or "1.0+3" for a development build), for the
+      Dashboard blade. */
   appVersion: string;
-  /** The build: branch@commit (date). */
+  /** The build: "number (commit, date)" for a release, branch@commit (date)
+      for a development build. */
   appBuild: string;
   updater: Updater;
 };

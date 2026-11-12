@@ -8,6 +8,7 @@
  */
 
 #include "xenia/app/blades_model.h"
+#include "xenia/app/app_version.h"
 
 #include <algorithm>
 #include <array>
@@ -67,9 +68,6 @@ namespace xe {
 namespace app {
 
 namespace {
-
-// Shown in Preferences (Dashboard > About). Raise with each release.
-constexpr const char* kReleaseName = "1.0 beta 3";
 
 using Writer = rapidjson::Writer<rapidjson::StringBuffer>;
 
@@ -1142,10 +1140,21 @@ void BladesModel::WriteApp(StateWriter& w) {
 #endif
   w.EndArray();
 
+  // Dashboard > About: the version ("1.0", or "1.0+3" for a development
+  // build) and the build. A release shows its build number and commit; a
+  // development build the branch it came from.
+  const std::string version = Version();
   w.Key("appVersion");
-  w.String(kReleaseName);
+  w.String(version.c_str());
   w.Key("appBuild");
-  w.String(XE_BUILD_BRANCH "@" XE_BUILD_COMMIT_SHORT " (" XE_BUILD_DATE ")");
+  if (IsReleaseVersion()) {
+    const std::string build = BundleBuildNumber() +
+                              " (" XE_BUILD_COMMIT_SHORT ", " XE_BUILD_DATE
+                              ")";
+    w.String(build.c_str());
+  } else {
+    w.String(XE_BUILD_BRANCH "@" XE_BUILD_COMMIT_SHORT " (" XE_BUILD_DATE ")");
+  }
   // Whether this copy can update itself (a release bundle carrying Sparkle),
   // and whether the first-launch question about checking has been answered.
   w.Key("updater");
