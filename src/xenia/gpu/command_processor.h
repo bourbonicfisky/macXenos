@@ -475,6 +475,13 @@ class CommandProcessor {
   virtual bool FlushPendingWritebacksForWait(uint32_t guest_address) {
     return true;
   }
+  // Called once when a WAIT_REG_MEM has slept WaitRegMemStallUs() without
+  // its condition becoming true. The guest may be waiting for a CPU thread
+  // that is itself waiting for GPU work issued earlier in the stream (a
+  // memexport into a job queue), so a backend that defers GPU work must
+  // let it run before the CP blocks for good.
+  virtual void OnWaitRegMemStalled() {}
+  virtual uint64_t WaitRegMemStallUs() const { return UINT64_MAX; }
 
   virtual void PollCompletedSubmission() {}
 

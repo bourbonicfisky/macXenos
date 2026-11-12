@@ -21448,6 +21448,36 @@ void MetalCommandProcessor::PrepareGuestMemoryForFenceWrite(
   }
 }
 
+// A CPU read of a page whose memexport or resolve is still in the open
+// command buffer sees the prior contents and asks for nothing (only writes
+// request a commit), so a guest thread that polls such a page while the CP
+// waits on that thread deadlocks. Battlefield 3 gates each frame's command
+// recording on a job that a memexport draw makes runnable by writing its
+// queue slot, then waits with WAIT_REG_MEM for the recording to end; when
+// nothing committed the export in between, the slot never changed and the
+// game froze. On the console the export has run by the time the CP reaches
+// the wait. A wait that has slept XE_METAL_WAIT_COMMIT_US (default 1000;
+// 0 = the first missed poll) commits the open buffer (no wait) when it
+// holds such a record; the readers' faults then wait for its completion
+// and publish it. Committing at the first missed poll instead raised Gears
+// of War: Judgment from 19 to 30 commits per frame, where the waits end on
+// their own. XE_METAL_WAIT_COMMIT=0 restores the previous behavior.
+uint64_t MetalCommandProcessor::WaitRegMemStallUs() const {
+  static const uint64_t s_us = [] {
+    const char* off = std::getenv("XE_METAL_WAIT_COMMIT");
+    if (off && off[0] == '0' && !off[1]) {
+      return UINT64_MAX;
+    }
+    const char* v = std::getenv("XE_METAL_WAIT_COMMIT_US");
+    return v && v[0] ? uint64_t(std::strtoull(v, nullptr, 10)) : 1000ull;
+  }();
+  return s_us;
+}
+
+void MetalCommandProcessor::OnWaitRegMemStalled() {
+  CommitOpenFaultableWork(false);
+}
+
 bool MetalCommandProcessor::FlushPendingWritebacksForWait(
     uint32_t guest_address) {
   // A wait blocks the command stream before swap, so an intersecting deferred

@@ -821,6 +821,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
   }();
   uint64_t slept_us = 0;
   bool stuck_logged = false;
+  bool wait_stalled_notified = false;
 
   // XE_CP_WAIT_CENSUS=1 (diagnostic, default off): per-window counts of
   // WAIT_REG_MEM packets, the ones that had to sleep, the sleeps, the
@@ -854,6 +855,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
       // certainly a lost signal (whoever should write the value never did) —
       // log WHAT is being waited on, once per stuck wait.
       ++wait_iterations;
+      if (!wait_stalled_notified && slept_us >= WaitRegMemStallUs()) {
+        wait_stalled_notified = true;
+        OnWaitRegMemStalled();
+      }
       if (!stuck_logged && slept_us >= 5000000) {
         stuck_logged = true;
         XELOGW(

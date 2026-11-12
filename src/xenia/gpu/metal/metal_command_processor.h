@@ -1056,6 +1056,8 @@ class MetalCommandProcessor : public CommandProcessor {
   void DumpBoundColorRtDiagnostic(const Shader* pixel_shader);
   void ServiceLazyCommitRequest();
   void OnIdlePoll() override { ServiceLazyCommitRequest(); }
+  void OnWaitRegMemStalled() override;
+  uint64_t WaitRegMemStallUs() const override;
 
   // S8 — async submission. EndFrameEncoder commits WITHOUT waiting (unless
   // XE_METAL_SYNC_WAIT=1 restores the old synchronous behavior for A/B);
