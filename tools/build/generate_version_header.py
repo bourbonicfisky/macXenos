@@ -36,31 +36,37 @@ def _build_identity(source_root: Path) -> tuple[str, str, str]:
         return "tarball", ":(-dont-do-this", ":("
 
 
-# Releases are tagged macxenos-<version> (macxenos-1.0, macxenos-1.0-beta8.1).
-TAG_PREFIX = "macxenos-"
+# Public releases are tagged macxenos-<version> (macxenos-1.0); the public
+# export (export_public.sh) carries those tags. Internal builds are tagged
+# internal-<version> (internal-1.0.1-test1): versioned the same way, never
+# exported.
+TAG_PREFIXES = ("macxenos-", "internal-")
 
 
 def release_version(source_root: Path, commit: str = "HEAD") -> tuple[str, bool]:
     """The version of `commit` and whether it is a release.
 
-    A commit carrying a release tag is that release ("1.0", True). A later
-    commit is a development build of the newest release before it, with the
-    number of commits since ("1.0+3", False). MACXENOS_VERSION overrides both
-    (a test build: "1.0-beta9-test6"), as a release only if it has no "+".
+    A commit carrying a release or internal tag is that version ("1.0",
+    True). A later commit is a development build of the newest tagged
+    version before it, with the number of commits since ("1.0+3", False).
+    MACXENOS_VERSION overrides both (a test build: "1.0-beta9-test6"), as a
+    release only if it has no "+".
     """
     override = os.getenv("MACXENOS_VERSION", "").strip()
     if override:
         return override, "+" not in override and "-dev" not in override
     try:
+        matches = [arg for prefix in TAG_PREFIXES
+                   for arg in ("--match", prefix + "*")]
         described = _git_output(
-            source_root, "describe", "--tags", "--long", "--match",
-            TAG_PREFIX + "*", commit
+            source_root, "describe", "--tags", "--long", *matches, commit
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
         return "dev", False
     # <prefix><version>-<commits since>-g<hash>; the version may contain "-".
     tag, since, _ = described.rsplit("-", 2)
-    version = tag[len(TAG_PREFIX):]
+    version = next(tag[len(prefix):] for prefix in TAG_PREFIXES
+                   if tag.startswith(prefix))
     if since == "0":
         return version, True
     return f"{version}+{since}", False

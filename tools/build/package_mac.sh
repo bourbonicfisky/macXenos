@@ -13,10 +13,11 @@
 #                              [--feed-url <url>] [--no-sparkle]
 #
 #   --config       Build config to package (default: Release).
-#   --version      CFBundleShortVersionString. Default: from the release tags
-#                  of the built commit (generate_version_header.py): "1.0" on
-#                  the macxenos-1.0 tag, "1.0+3" three commits after it.
-#                  Give it only for a test build, e.g. 1.0-beta9-test6.
+#   --version      CFBundleShortVersionString. Default: from the tags of the
+#                  built commit (generate_version_header.py): "1.0" on the
+#                  public release tag macxenos-1.0, "1.0.1-test1" on the
+#                  internal tag internal-1.0.1-test1 (never exported or put
+#                  in the appcast), "1.0+3" three commits after a tag.
 #                  CFBundleVersion is the built commit's date, YYYYMMDDHHMM
 #                  in UTC: Sparkle orders releases by it, and it is the same
 #                  for a commit here and in the public export.
