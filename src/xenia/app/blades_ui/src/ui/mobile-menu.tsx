@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import type { BladeDef } from "./blade";
 import { playSound } from "./sound";
@@ -80,7 +81,7 @@ export function MobileMenu({
     <nav
       ref={navRef}
       className="deck-strip sticky top-0 z-30 hidden max-[860px]:block"
-      aria-label="Blades"
+      aria-label={t("mobileMenu.blades")}
     >
       <div className="flex items-center justify-between gap-3 px-4 py-2">
         <a href="#home" className="deck-brand inline-flex items-center gap-2.5" onClick={() => close(false)}>
@@ -99,7 +100,7 @@ export function MobileMenu({
             setMenuOpen(!menuOpen);
           }}
         >
-          <span className="sr-only">{menuOpen ? "Close menu" : "Menu"}</span>
+          <span className="sr-only">{menuOpen ? t("mobileMenu.close") : t("mobileMenu.menu")}</span>
           <span className="deck-burger-bars" aria-hidden="true">
             <span />
             <span />

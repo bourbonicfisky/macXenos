@@ -19,11 +19,11 @@ const GAMERTAG = /^[A-Za-z][A-Za-z0-9]*( [A-Za-z0-9]+)*$/;
 export const validGamertag = (name: string) => name.length >= 1 && name.length <= 15 && GAMERTAG.test(name);
 
 const SLOTS = [-1, 0, 1, 2, 3];
-const slotName = (slot: number) => (slot < 0 ? "Signed out" : `Player ${slot + 1}`);
+const slotName = (slot: number) => (slot < 0 ? t("profiles.signedOut") : t("controller.player", { player: slot + 1 }));
 
 function SignIn({ profile }: { profile: Profile }) {
   return (
-    <div role="radiogroup" aria-label={`${profile.gamertag} plays as`} className="mt-[0.3em] flex flex-wrap gap-[0.5em]">
+    <div role="radiogroup" aria-label={t("profiles.playsAs", { gamertag: profile.gamertag })} className="mt-[0.3em] flex flex-wrap gap-[0.5em]">
       {SLOTS.map((slot) => (
         <button
           key={slot}
@@ -34,7 +34,7 @@ function SignIn({ profile }: { profile: Profile }) {
           onClick={() => {
             if (profile.slot === slot) return;
             send(slot < 0 ? { op: "profileSignOut", xuid: profile.xuid } : { op: "profileSignIn", xuid: profile.xuid, slot });
-            showToast(profile.gamertag, slot < 0 ? "Signed out" : `Signed in as ${slotName(slot)}`);
+            showToast(profile.gamertag, slot < 0 ? t("profiles.signedOut") : t("profiles.signedInAs", { player: slotName(slot) }));
           }}
         >
           {slotName(slot)}
@@ -67,7 +67,7 @@ function GamertagField({
         spellCheck={false}
         maxLength={15}
         aria-label={title}
-        placeholder="Gamertag"
+        placeholder={t("profiles.gamertag")}
         className="pref-text rounded-row mt-[0.3em] min-h-[2.2em] w-full px-[0.7em]"
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
@@ -83,7 +83,7 @@ function GamertagField({
         }}
       />
       {draft && !ok ? (
-        <Aside>Up to 15 letters and numbers, starting with a letter; single spaces between words.</Aside>
+        <Aside>{t("profiles.gamertagRules")}</Aside>
       ) : null}
       <PaneAction disabled={!ok || !changed} onSelect={() => onCommit(draft)}>
         {action}
@@ -102,7 +102,7 @@ function DeleteProfile({ profile }: { profile: Profile }) {
     return () => window.clearTimeout(timer);
   }, [armed]);
   if (titleOpen) {
-    return <Aside>Quit the game to delete a profile.</Aside>;
+    return <Aside>{t("profiles.deleteWhilePlaying")}</Aside>;
   }
   return (
     <button
@@ -116,10 +116,10 @@ function DeleteProfile({ profile }: { profile: Profile }) {
         }
         setArmed(false);
         send({ op: "profileDelete", xuid: profile.xuid });
-        showToast(profile.gamertag, "Profile deleted");
+        showToast(profile.gamertag, t("profiles.deleted"));
       }}
     >
-      {armed ? "Press again to delete it and its saves" : "Delete profile"}
+      {armed ? t("profiles.confirmDelete") : t("profiles.delete")}
     </button>
   );
 }
@@ -131,20 +131,20 @@ function ProfilePane({ xuid }: { xuid: string }) {
   return (
     <>
       <PaneAction onSelect={() => openPicturePicker(profile.xuid)}>{t("profiles.picker.change")}</PaneAction>
-      <p className="pref-group m-0">Sign in as</p>
+      <p className="pref-group m-0">{t("profiles.signInAs")}</p>
       <SignIn profile={profile} />
-      <p className="pref-group m-0">Gamertag</p>
+      <p className="pref-group m-0">{t("profiles.gamertag")}</p>
       <GamertagField
-        title={`Rename ${profile.gamertag}`}
+        title={t("profiles.renameTitle", { gamertag: profile.gamertag })}
         initial={profile.gamertag}
-        action="Rename"
+        action={t("profiles.rename")}
         onCommit={(name) => {
           send({ op: "profileRename", xuid: profile.xuid, gamertag: name });
-          showToast("Profile renamed", name);
+          showToast(t("profiles.renamed"), name);
         }}
       />
-      <p className="pref-group m-0">Saves</p>
-      <PaneAction onSelect={() => send({ op: "profileFolder", xuid: profile.xuid })}>Show saves in Finder</PaneAction>
+      <p className="pref-group m-0">{t("profiles.saves")}</p>
+      <PaneAction onSelect={() => send({ op: "profileFolder", xuid: profile.xuid })}>{t("profiles.showSavesInFinder")}</PaneAction>
       <DeleteProfile profile={profile} />
       <p className="menu-spec m-0 text-[0.75em]">XUID {profile.xuid}</p>
     </>
@@ -154,12 +154,12 @@ function ProfilePane({ xuid }: { xuid: string }) {
 function CreateProfile() {
   return (
     <GamertagField
-      title="New profile's gamertag"
+      title={t("profiles.newGamertag")}
       initial=""
-      action="Create profile"
+      action={t("profiles.createProfile")}
       onCommit={(name) => {
         send({ op: "profileCreate", gamertag: name });
-        showToast("Profile created", name);
+        showToast(t("profiles.created"), name);
       }}
     />
   );
@@ -178,19 +178,16 @@ export function profiles(state: NativeState): BladeDef {
   }));
   menu.push({
     id: "create",
-    section: state.profiles.length ? "New" : undefined,
-    label: "Create a profile",
+    section: state.profiles.length ? t("profiles.newSection") : undefined,
+    label: t("profiles.createAProfile"),
     glyph: "star",
-    heading: "Create a profile",
+    heading: t("profiles.createAProfile"),
     detail: (
       <>
-        <p>
-          Each profile keeps its own saves and achievements. Pick a gamertag, then sign the new
-          profile in as a player.
-        </p>
+        <p>{t("profiles.create.detail")}</p>
         <CreateProfile />
         {state.profiles.length === 0 ? (
-          <Aside>Most games need a signed-in profile to save.</Aside>
+          <Aside>{t("profiles.create.note")}</Aside>
         ) : null}
       </>
     )
@@ -200,8 +197,8 @@ export function profiles(state: NativeState): BladeDef {
   const player = state.profiles.find((profile) => profile.slot === 0) ?? state.profiles[0];
   return {
     id: "profiles",
-    label: "profiles",
-    title: "Profiles",
+    label: t("profiles.tab"),
+    title: t("advanced.profiles"),
     tone: "rose",
     feature: player ? <Gamercard profile={player} /> : undefined,
     menu

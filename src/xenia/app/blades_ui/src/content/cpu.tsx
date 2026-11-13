@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import type { BladeDef } from "../ui/blade";
 import { send, useNative, type NativeState } from "../native";
 import {
@@ -12,28 +13,28 @@ import {
 import { Aside } from "./parts";
 
 const QOS: Option[] = [
-  { value: "off", label: "Off", short: "Off" },
-  { value: "main", label: "Main thread", short: "Main" },
-  { value: "priority", label: "High-priority threads", short: "Priority" },
-  { value: "all", label: "Every thread", short: "All", recommended: true }
+  { value: "off", get label() { return t("graphics.qos.off"); }, get short() { return t("graphics.qos.off"); } },
+  { value: "main", get label() { return t("cpu.mainThread"); }, get short() { return t("cpu.main"); } },
+  { value: "priority", get label() { return t("graphics.qos.priority"); }, get short() { return t("graphics.qos.priorityShort"); } },
+  { value: "all", get label() { return t("graphics.qos.all"); }, get short() { return t("graphics.qos.allShort"); }, recommended: true }
 ];
 
 const QOS_CLASS: Option[] = [
-  { value: "user_initiated", label: "User initiated", short: "Initiated" },
-  { value: "user_interactive", label: "User interactive", short: "Interactive" }
+  { value: "user_initiated", get label() { return t("cpu.userInitiated"); }, get short() { return t("cpu.initiated"); } },
+  { value: "user_interactive", get label() { return t("cpu.userInteractive"); }, get short() { return t("cpu.interactive"); } }
 ];
 
 const SPEEDS = [
-  { value: 0.5, label: "Half" },
-  { value: 1, label: "Normal" },
-  { value: 2, label: "Double" }
+  { value: 0.5, get label() { return t("cpu.half"); } },
+  { value: 1, get label() { return t("pref.volume.normal"); } },
+  { value: 2, get label() { return t("cpu.double"); } }
 ];
 
 /** Game speed changes the clock of the game that is running, right away. */
 function Speed() {
   const { timeScalar, titleOpen } = useNative();
   return (
-    <div role="radiogroup" aria-label="Game speed" className="mt-[0.3em] flex flex-wrap gap-[0.5em]">
+    <div role="radiogroup" aria-label={t("cpu.gameSpeed")} className="mt-[0.3em] flex flex-wrap gap-[0.5em]">
       {SPEEDS.map((speed) => (
         <button
           key={speed.value}
@@ -45,7 +46,7 @@ function Speed() {
           onClick={() => {
             if (!titleOpen || Math.abs(timeScalar - speed.value) < 1e-6) return;
             send({ op: "action", id: "timeScalar", value: speed.value });
-            announceSetting("Game speed", speed.label);
+            announceSetting(t("cpu.gameSpeed"), speed.label);
           }}
         >
           {speed.label}
@@ -57,69 +58,60 @@ function Speed() {
 
 function SpeedValue() {
   const { timeScalar } = useNative();
-  return <>{timeScalar === 1 ? "Normal" : `${timeScalar}x`}</>;
+  return <>{timeScalar === 1 ? t("pref.volume.normal") : `${timeScalar}x`}</>;
 }
 
 export function cpu(_state: NativeState): BladeDef {
   return {
     id: "cpu",
-    label: "cpu",
+    label: t("cpu.tab"),
     title: "CPU",
     tone: "amber",
     menu: [
       {
         id: "speed",
-        label: "Game speed",
+        label: t("cpu.gameSpeed"),
         glyph: "speed",
         value: <SpeedValue />,
-        heading: "Game speed",
+        heading: t("cpu.gameSpeed"),
         detail: (
           <>
-            <p>
-              Runs the game&rsquo;s clock slower or faster. Most games keep
-              their own time, so this is for testing more than playing.
-            </p>
+            <p>{t("cpu.speed.detail")}</p>
             <Speed />
-            <Aside>Only while a game is running. It goes back to normal when the game closes.</Aside>
+            <Aside>{t("cpu.speed.note")}</Aside>
           </>
         )
       },
       {
         id: "scheduling",
-        label: "Thread scheduling",
+        label: t("cpu.threadScheduling"),
         glyph: "chip",
         value: <Value name="guest_thread_qos" options={QOS} />,
-        heading: "Performance cores",
+        heading: t("graphics.qos.label"),
         detail: (
           <>
-            <p>
-              Asks macOS to keep the game&rsquo;s threads on performance cores.
-              Every thread, the default, suits most games; Off lets macOS decide.
-            </p>
-            <Options name="guest_thread_qos" title="Thread scheduling" options={QOS} />
-            <p className="pref-group">Priority</p>
-            <p className="menu-note m-0 text-[0.78em]">Interactive is the highest macOS gives.</p>
-            <Options name="guest_thread_qos_class" title="Thread priority" options={QOS_CLASS} />
+            <p>{t("cpu.scheduling.detail")}</p>
+            <Options name="guest_thread_qos" title={t("cpu.threadScheduling")} options={QOS} />
+            <p className="pref-group">{t("cpu.priority")}</p>
+            <p className="menu-note m-0 text-[0.78em]">{t("cpu.priority.note")}</p>
+            <Options name="guest_thread_qos_class" title={t("cpu.threadPriority")} options={QOS_CLASS} />
             <NextLaunchNote names={["guest_thread_qos", "guest_thread_qos_class"]} />
           </>
         )
       },
       {
         id: "threads",
-        label: "Game threads",
+        label: t("cpu.gameThreads"),
         glyph: "layers",
-        heading: "Game threads",
+        heading: t("cpu.gameThreads"),
         detail: (
           <>
-            <p>
-              Games tell the 360 which of its six hardware threads to use and
-              how urgent each is. Ignoring that can help a game that stalls.
-            </p>
-            <Check name="ignore_thread_affinities" label="Ignore thread placement" recommended />
-            <Check name="ignore_thread_priorities" label="Ignore thread priorities" recommended />
+            <p>{t("cpu.threads.detail")}</p>
+            <Check name="ignore_thread_affinities" label={t("cpu.ignoreThreadPlacement")} recommended />
+            <Check name="ignore_thread_priorities" label={t("cpu.ignoreThreadPriorities")} recommended />
             <UseRecommended
               names={["ignore_thread_affinities", "ignore_thread_priorities"]}
-              title="Game threads"
+              title={t("cpu.gameThreads")}
             />
             <NextLaunchNote names={["ignore_thread_affinities", "ignore_thread_priorities"]} />
           </>
@@ -127,24 +119,21 @@ export function cpu(_state: NativeState): BladeDef {
       },
       {
         id: "compatibility",
-        label: "Compatibility",
+        label: t("cpu.compatibility"),
         glyph: "wrench",
-        heading: "Compatibility fixes",
+        heading: t("cpu.compatibilityFixes"),
         detail: (
           <>
-            <p>
-              Fixes a few games need. Leave them as they are unless a
-              game&rsquo;s page says otherwise.
-            </p>
-            <Check name="ignore_trap_instructions" label="Skip debug traps" recommended />
+            <p>{t("cpu.compatibility.detail")}</p>
+            <Check name="ignore_trap_instructions" label={t("cpu.skipDebugTraps")} recommended />
             <Check
               name="disable_context_promotion"
-              label="Turn off context promotion (some sports games)"
+              label={t("cpu.disableContextPromotion")}
               recommended
             />
-            <Check name="disable_prefetch_and_cachecontrol" label="Skip cache hints" recommended />
-            <Check name="clock_no_scaling" label="Use the Mac's clock directly" recommended />
-            <Check name="clock_source_raw" label="Read the hardware timer" recommended />
+            <Check name="disable_prefetch_and_cachecontrol" label={t("cpu.skipCacheHints")} recommended />
+            <Check name="clock_no_scaling" label={t("cpu.useHostClock")} recommended />
+            <Check name="clock_source_raw" label={t("cpu.readTheHardwareTimer")} recommended />
             <UseRecommended
               names={[
                 "ignore_trap_instructions",
@@ -153,7 +142,7 @@ export function cpu(_state: NativeState): BladeDef {
                 "clock_no_scaling",
                 "clock_source_raw"
               ]}
-              title="Compatibility"
+              title={t("cpu.compatibility")}
             />
             <NextLaunchNote
               names={[
@@ -168,18 +157,15 @@ export function cpu(_state: NativeState): BladeDef {
       },
       {
         id: "patches",
-        label: "Patches and plugins",
+        label: t("cpu.patchesAndPlugins"),
         glyph: "blocks",
         value: <Value name="apply_patches" />,
-        heading: "Patches and plugins",
+        heading: t("cpu.patchesAndPlugins"),
         detail: (
           <>
-            <p>
-              Game patches fix bugs and unlock frame rates; plugins and trainers
-              are loaded from each game&rsquo;s plugins folder.
-            </p>
-            <Check name="apply_patches" label="Apply game patches" />
-            <Check name="allow_plugins" label="Load plugins and trainers" />
+            <p>{t("cpu.patches.detail")}</p>
+            <Check name="apply_patches" label={t("cpu.applyGamePatches")} />
+            <Check name="allow_plugins" label={t("cpu.loadPluginsAndTrainers")} />
             <NextLaunchNote names={["apply_patches", "allow_plugins"]} />
           </>
         )

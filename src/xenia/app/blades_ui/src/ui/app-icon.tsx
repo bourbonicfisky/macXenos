@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { useTheme } from "./theme";
 
 /**
@@ -19,7 +20,7 @@ export function AppIcon() {
             ? "/macxenos-icon-dark.webp"
             : "/macxenos-icon-light.webp"
         }
-        alt="The macXenos app icon: a red ring of light with a green power symbol still glowing at its centre."
+        alt={t("appIcon.description")}
         width={768}
         height={768}
         fetchPriority="high"
