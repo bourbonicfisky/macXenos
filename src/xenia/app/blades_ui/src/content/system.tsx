@@ -15,10 +15,10 @@ import { dashboard } from "./dashboard";
 import { t } from "../i18n";
 
 const LOG_LEVELS: Option[] = [
-  { value: 0, label: "Errors", short: "Errors" },
-  { value: 1, label: "Warnings", short: "Warnings" },
-  { value: 2, label: "Information", short: "Info" },
-  { value: 3, label: "Everything", short: "Debug" }
+  { value: 0, get label() { return t("system.errors"); }, get short() { return t("system.errors"); } },
+  { value: 1, get label() { return t("system.warnings"); }, get short() { return t("system.warnings"); } },
+  { value: 2, get label() { return t("system.information"); }, get short() { return t("system.info"); } },
+  { value: 3, get label() { return t("system.everything"); }, get short() { return t("system.debug"); } }
 ];
 
 /** A folder setting: where it is now, the picker, and back to the default. */
@@ -62,24 +62,24 @@ export function system(state: NativeState): BladeDef {
   );
   return {
     id: "system",
-    label: "system",
-    title: "System",
+    label: t("system.tab"),
+    title: t("system.title"),
     tone: "purple",
     menu: [
       ...dashboardRows,
       {
         id: "language",
-        section: "System",
-        label: "Language and region",
+        section: t("system.title"),
+        label: t("system.languageAndRegion"),
         glyph: "globe",
         value: <ConsoleValue id="language" />,
-        heading: "Language and region",
+        heading: t("system.languageAndRegion"),
         detail: (
           <>
-            <p>The language and country the console reports. Games pick their text and ratings from these.</p>
-            <p className="pref-group">Language</p>
+            <p>{t("system.language.detail")}</p>
+            <p className="pref-group">{t("system.language")}</p>
             <ConsoleOptions id="language" />
-            <p className="pref-group">Country</p>
+            <p className="pref-group">{t("system.country")}</p>
             <ConsoleOptions id="country" />
             <ConsoleLockNote />
           </>
@@ -87,13 +87,13 @@ export function system(state: NativeState): BladeDef {
       },
       {
         id: "clock",
-        label: "Date and time",
+        label: t("system.dateAndTime"),
         glyph: "clock",
         value: <ConsoleValue id="time_zone" />,
-        heading: "Date and time",
+        heading: t("system.dateAndTime"),
         detail: (
           <>
-            <p>The console&rsquo;s time zone. The date and time come from your Mac.</p>
+            <p>{t("system.clock.detail")}</p>
             <ConsoleOptions id="time_zone" />
             <ConsoleCheck id="dst_off" />
             <ConsoleCheck id="clock_24h" />
@@ -103,17 +103,17 @@ export function system(state: NativeState): BladeDef {
       },
       {
         id: "audio-output",
-        label: "Audio output",
+        label: t("audio.output"),
         glyph: "sound",
-        heading: "Audio output",
+        heading: t("audio.output"),
         detail: (
           <>
-            <p>The sound formats the console reports, and the music player&rsquo;s volume.</p>
+            <p>{t("system.audio.detail")}</p>
             <ConsoleCheck id="audio_mono" />
             <ConsoleCheck id="dolby_pro_logic" />
             <ConsoleCheck id="dolby_digital" />
             <ConsoleCheck id="dolby_digital_wma_pro" />
-            <p className="pref-group">Music player volume</p>
+            <p className="pref-group">{t("system.musicPlayerVolume")}</p>
             <ConsoleSlider id="music_volume" />
             <ConsoleLockNote />
           </>
@@ -121,13 +121,13 @@ export function system(state: NativeState): BladeDef {
       },
       {
         id: "family",
-        label: "Family settings",
+        label: t("system.familySettings"),
         glyph: "shield",
         value: <ConsoleValue id="parental_control" />,
-        heading: "Family settings",
+        heading: t("system.familySettings"),
         detail: (
           <>
-            <p>Turns on the console&rsquo;s parental controls, which games check before showing rated content.</p>
+            <p>{t("system.family.detail")}</p>
             <ConsoleCheck id="parental_control" />
             <ConsoleLockNote />
           </>
@@ -135,15 +135,12 @@ export function system(state: NativeState): BladeDef {
       },
       {
         id: "console",
-        label: "Console",
+        label: t("system.console"),
         glyph: "console",
-        heading: "Console",
+        heading: t("system.console"),
         detail: (
           <>
-            <p>
-              Setup steps the console records as done, and its network identity.
-              Some games read these.
-            </p>
+            <p>{t("system.console.detail")}</p>
             <ConsoleCheck id="dashboard_initialized" />
             <ConsoleCheck id="iptv_initialized" />
             <ConsoleCheck id="dvr_initialized" />
@@ -153,10 +150,10 @@ export function system(state: NativeState): BladeDef {
             <PaneAction
               onSelect={() => {
                 send({ op: "consoleReset" });
-                showToast("Console settings", "Back to defaults");
+                showToast(t("console.settings"), t("settings.defaults"));
               }}
             >
-              Reset console settings
+              {t("system.resetConsoleSettings")}
             </PaneAction>
             <ConsoleLockNote />
           </>
@@ -164,24 +161,21 @@ export function system(state: NativeState): BladeDef {
       },
       {
         id: "storage",
-        label: "Storage",
+        label: t("advanced.storage"),
         glyph: "folder",
-        heading: "Storage",
+        heading: t("advanced.storage"),
         detail: (
           <>
-            <p>
-              Where saves, downloaded content and caches live. Empty means the
-              default, in your user folder.
-            </p>
-            <p className="pref-group">Saves and content</p>
-            <TextField name="content_root" title="Content folder" placeholder="Default" />
-            <p className="pref-group">Caches</p>
-            <TextField name="cache_root" title="Cache folder" placeholder="Default" />
-            <p className="pref-group">Settings and profiles</p>
-            <TextField name="storage_root" title="Storage folder" placeholder="Default" />
-            <Check name="mount_cache" label="Mount the console's cache drive" />
-            <Check name="mount_scratch" label="Mount the scratch drive" />
-            <Check name="mount_memory_unit" label="Mount a memory unit" />
+            <p>{t("system.storage.detail")}</p>
+            <p className="pref-group">{t("system.savesAndContent")}</p>
+            <TextField name="content_root" title={t("system.contentFolder")} placeholder={t("folder.default")} />
+            <p className="pref-group">{t("system.caches")}</p>
+            <TextField name="cache_root" title={t("system.cacheFolder")} placeholder={t("folder.default")} />
+            <p className="pref-group">{t("system.settingsAndProfiles")}</p>
+            <TextField name="storage_root" title={t("system.storageFolder")} placeholder={t("folder.default")} />
+            <Check name="mount_cache" label={t("system.mountCache")} />
+            <Check name="mount_scratch" label={t("system.mountScratch")} />
+            <Check name="mount_memory_unit" label={t("system.mountMemoryUnit")} />
             <NextLaunchNote names={["content_root", "cache_root", "storage_root", "mount_cache", "mount_scratch", "mount_memory_unit"]} />
           </>
         )
@@ -226,15 +220,15 @@ export function system(state: NativeState): BladeDef {
       },
       {
         id: "updates",
-        label: "Title updates",
+        label: t("system.titleUpdates"),
         glyph: "branch",
         value: <Value name="apply_title_update" />,
-        heading: "Title updates",
+        heading: t("system.titleUpdates"),
         detail: (
           <>
-            <p>Apply the updates you have installed for a game when it starts.</p>
-            <Check name="apply_title_update" label="Apply title updates" />
-            <Check name="allow_incompatible_title_update" label="Allow updates made for another version" />
+            <p>{t("system.updates.detail")}</p>
+            <Check name="apply_title_update" label={t("system.applyTitleUpdates")} />
+            <Check name="allow_incompatible_title_update" label={t("system.allowOtherVersionUpdates")} />
             <NextLaunchNote names={["apply_title_update", "allow_incompatible_title_update"]} />
           </>
         )
@@ -247,29 +241,23 @@ export function system(state: NativeState): BladeDef {
         heading: "Discord",
         detail: (
           <>
-            <p>
-              Show the game you are playing on your Discord profile. Needs the
-              Discord app open on this Mac; it appears there as Xenia Canary.
-            </p>
-            <Check name="discord" label="Share what I'm playing" />
+            <p>{t("system.discord.detail")}</p>
+            <Check name="discord" label={t("system.discord.share")} />
             <NextLaunchNote names={["discord"]} />
           </>
         )
       },
       {
         id: "logging",
-        label: "Logging",
+        label: t("advanced.logging"),
         glyph: "doc",
         value: <Value name="log_level" options={LOG_LEVELS} />,
-        heading: "Logging",
+        heading: t("advanced.logging"),
         detail: (
           <>
-            <p>
-              How much the log records. Information is enough for a bug report;
-              Everything slows games down.
-            </p>
-            <Options name="log_level" title="Logging" options={LOG_LEVELS} />
-            <Aside>The log is xenia.log in your user folder.</Aside>
+            <p>{t("system.logging.detail")}</p>
+            <Options name="log_level" title={t("advanced.logging")} options={LOG_LEVELS} />
+            <Aside>{t("system.logging.note")}</Aside>
           </>
         )
       }
