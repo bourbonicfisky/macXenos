@@ -12,37 +12,37 @@ import {
 import { Aside, PaneAction } from "./parts";
 import { rendererShown } from "./visibility";
 import { ControllerMap } from "../ui/controller-map";
-import { t } from "../i18n";
+import { t, type MessageKey } from "../i18n";
 
-const PLAYERS = ["Player 1", "Player 2", "Player 3", "Player 4"];
+const players = () => [1, 2, 3, 4].map((player) => t("controller.player", { player }));
 
 const KEYBOARD_MODES: Option[] = [
-  { value: 0, label: "Off", short: "Off" },
-  { value: 1, label: "Plays as a controller", short: "Controller" },
-  { value: 2, label: "Passthrough", short: "Passthrough" }
+  { value: 0, get label() { return t("graphics.qos.off"); }, get short() { return t("graphics.qos.off"); } },
+  { value: 1, get label() { return t("controller.playsAsAController"); }, get short() { return t("controller.title"); } },
+  { value: 2, get label() { return t("controller.passthrough"); }, get short() { return t("controller.passthrough"); } }
 ];
 
-const KEYBOARD_PLAYER: Option[] = PLAYERS.map((label, value) => ({ value, label, short: label }));
+const keyboardPlayers = (): Option[] => players().map((label, value) => ({ value, label, short: label }));
 
 const DASHBOARD_KEYS: Option[] = [
   { value: "F6", label: "F6", short: "F6", recommended: true },
   { value: "F7", label: "F7", short: "F7" },
   { value: "F8", label: "F8", short: "F8" },
   { value: "F10", label: "F10", short: "F10" },
-  { value: "none", label: "None", short: "None" }
+  { value: "none", get label() { return t("home.gameFolders.none"); }, get short() { return t("home.gameFolders.none"); } }
 ];
 
 const DASHBOARD_BUTTONS: Option[] = [
-  { value: "guide", label: "Tap Guide", short: "Guide", recommended: true },
+  { value: "guide", get label() { return t("controller.tapGuide"); }, short: "Guide", recommended: true },
   { value: "back_start", label: "Back + Start", short: "Back + Start" },
-  { value: "none", label: "None", short: "None" }
+  { value: "none", get label() { return t("home.gameFolders.none"); }, get short() { return t("home.gameFolders.none"); } }
 ];
 
 const INPUT_SYSTEMS: Option[] = [
-  { value: "any", label: "Automatic", short: "Automatic" },
-  { value: "sdl", label: "Game controllers (SDL)", short: "SDL" },
-  { value: "keyboard", label: "Keyboard only", short: "Keyboard" },
-  { value: "nop", label: "None", short: "None" }
+  { value: "any", get label() { return t("controller.automatic"); }, get short() { return t("controller.automatic"); } },
+  { value: "sdl", get label() { return t("controller.gameControllersSDL"); }, short: "SDL" },
+  { value: "keyboard", get label() { return t("controller.keyboardOnly"); }, get short() { return t("controller.keyboard"); } },
+  { value: "nop", get label() { return t("home.gameFolders.none"); }, get short() { return t("home.gameFolders.none"); } }
 ];
 
 const percent = (value: number) => `${Math.round(value * 100)}%`;
@@ -52,22 +52,22 @@ function Controllers() {
   const { controllers } = useNative();
   const present = controllers.filter((c) => c.present);
   if (present.length === 0) {
-    return <p className="pad-status m-0">No controller is connected. Plug one in or pair it over Bluetooth.</p>;
+    return <p className="pad-status m-0">{t("controller.noneConnected")}</p>;
   }
   return (
     <>
       {present.map((controller) => (
         <div key={controller.slot} className="grid gap-[0.2em]">
           <p className="pref-group m-0">
-            {controller.name || "Controller"}{" "}
+            {controller.name || t("controller.title")}{" "}
             <span className="pad-status font-normal">({controller.kind})</span>
           </p>
           <div
             role="radiogroup"
-            aria-label={`${controller.name} plays as`}
+            aria-label={t("controller.playsAs", { name: controller.name })}
             className="flex flex-wrap gap-[0.5em]"
           >
-            {PLAYERS.map((label, slot) => (
+            {players().map((label, slot) => (
               <button
                 key={slot}
                 type="button"
@@ -77,7 +77,7 @@ function Controllers() {
                 onClick={() => {
                   if (controller.slot === slot) return;
                   send({ op: "assign", from: controller.slot, to: slot });
-                  announceSetting(controller.name || "Controller", label);
+                  announceSetting(controller.name || t("controller.title"), label);
                 }}
               >
                 {label}
@@ -116,29 +116,29 @@ const BUTTONS: Record<string, { text: string; className: string; name: string }>
   B: { text: "B", className: "pad-key pad-key--b", name: "B" },
   X: { text: "X", className: "pad-key pad-key--x", name: "X" },
   Y: { text: "Y", className: "pad-key pad-key--y", name: "Y" },
-  "Left Shoulder": { text: "LB", className: "pad-chip", name: "Left bumper" },
-  "Right Shoulder": { text: "RB", className: "pad-chip", name: "Right bumper" },
+  "Left Shoulder": { text: "LB", className: "pad-chip", get name() { return t("controller.leftBumper"); } },
+  "Right Shoulder": { text: "RB", className: "pad-chip", get name() { return t("controller.rightBumper"); } },
   Start: { text: "Start", className: "pad-chip", name: "Start" },
   Back: { text: "Back", className: "pad-chip", name: "Back" },
-  "D-PAD Up": { text: "↑", className: "pad-chip", name: "D-pad up" },
-  "D-PAD Down": { text: "↓", className: "pad-chip", name: "D-pad down" },
-  "D-PAD Left": { text: "←", className: "pad-chip", name: "D-pad left" },
-  "D-PAD Right": { text: "→", className: "pad-chip", name: "D-pad right" }
+  "D-PAD Up": { text: "↑", className: "pad-chip", get name() { return t("controller.dpadUp"); } },
+  "D-PAD Down": { text: "↓", className: "pad-chip", get name() { return t("controller.dpadDown"); } },
+  "D-PAD Left": { text: "←", className: "pad-chip", get name() { return t("controller.dpadLeft"); } },
+  "D-PAD Right": { text: "→", className: "pad-chip", get name() { return t("controller.dpadRight"); } }
 };
 
 // The app's own wording, in plain words.
-const ACTIONS: Record<string, string> = {
-  "Toggle Fullscreen": "Full screen on or off",
-  "Clear GPU Cache": "Clear the GPU caches",
-  "Toggle Controller Vibration": "Vibration on or off",
-  "Half CPU Scalar": "Half game speed",
-  "Double CPU Scalar": "Double game speed",
-  "Reset CPU Scalar": "Normal game speed",
-  "Toggle Readback Resolve": "Cycle readback resolve",
-  "Toggle Clear Memory Page State": "Clear memory page state on or off",
-  "Run Selected Title": "Play the selected game",
-  "Title Selection +1": "Next game",
-  "Title Selection -1": "Previous game"
+const ACTIONS: Record<string, MessageKey> = {
+  "Toggle Fullscreen": "controller.action.fullscreen",
+  "Clear GPU Cache": "controller.action.clearCache",
+  "Toggle Controller Vibration": "controller.action.vibration",
+  "Half CPU Scalar": "controller.action.halfSpeed",
+  "Double CPU Scalar": "controller.action.doubleSpeed",
+  "Reset CPU Scalar": "controller.action.normalSpeed",
+  "Toggle Readback Resolve": "controller.action.readback",
+  "Toggle Clear Memory Page State": "controller.action.memoryPages",
+  "Run Selected Title": "controller.action.play",
+  "Title Selection +1": "controller.action.next",
+  "Title Selection -1": "controller.action.previous"
 };
 
 function parseHotkey(label: string) {
@@ -146,13 +146,13 @@ function parseHotkey(label: string) {
   let action = rest.join(" = ").trim();
   const vulkanOnly = /\(Vulkan only\)/.test(action);
   action = action.replace(/\s*\(Vulkan only\)/, "").trim();
-  if (/loglevel/i.test(action)) action = "Logging on or off";
+  if (/loglevel/i.test(action)) action = t("controller.action.logging");
   const buttons = combo
     .split(" + ")
     .map((b) => b.trim())
     // Guide is held first, so it leads.
     .sort((a, b) => (a === "Guide" ? -1 : b === "Guide" ? 1 : 0));
-  return { buttons, action: ACTIONS[action] ?? action, vulkanOnly };
+  return { buttons, action: ACTIONS[action] ? t(ACTIONS[action]) : action, vulkanOnly };
 }
 
 function HotkeyChart({ inGame }: { inGame: boolean }) {
@@ -165,9 +165,7 @@ function HotkeyChart({ inGame }: { inGame: boolean }) {
   return (
     <div className="grid">
       {inGame && !listening ? (
-        <p className="menu-note m-0 text-[0.78em]">
-          Turn hotkeys on above to use these during a game.
-        </p>
+        <p className="menu-note m-0 text-[0.78em]">{t("controller.hotkeys.disabled")}</p>
       ) : null}
       {hotkeys.map((hotkey) => {
         const off = !hotkey.enabled || (inGame && !listening);
@@ -192,7 +190,7 @@ function HotkeyChart({ inGame }: { inGame: boolean }) {
             </span>
             <span className="hotkey-action min-w-0 flex-1">
               {hotkey.action}
-              {hotkey.vulkanOnly ? <span className="pref-tag">Vulkan only</span> : null}
+              {hotkey.vulkanOnly ? <span className="pref-tag">{t("controller.vulkanOnly")}</span> : null}
             </span>
             <button
               type="button"
@@ -202,7 +200,7 @@ function HotkeyChart({ inGame }: { inGame: boolean }) {
               className="pref-switch shrink-0 cursor-pointer"
               onClick={() => {
                 send({ op: "hotkey", id: hotkey.id, enabled: !hotkey.enabled });
-                announceSetting(hotkey.action, hotkey.enabled ? "Off" : "On");
+                announceSetting(hotkey.action, hotkey.enabled ? t("common.off") : t("common.on"));
               }}
             >
               <span className="pref-switch-knob" aria-hidden="true" />
@@ -217,37 +215,34 @@ function HotkeyChart({ inGame }: { inGame: boolean }) {
 function ConnectedValue() {
   const { controllers } = useNative();
   const count = controllers.filter((c) => c.present).length;
-  return <>{count === 0 ? "None" : count === 1 ? "1 connected" : `${count} connected`}</>;
+  return <>{count === 0 ? t("home.gameFolders.none") : t("controller.connected", { count })}</>;
 }
 
 export function controller(_state: NativeState): BladeDef {
   return {
     id: "controller",
-    label: "controller",
-    title: "Controller",
+    label: t("controller.tab"),
+    title: t("controller.title"),
     tone: "orange",
     menu: [
       {
         id: "controllers",
-        label: "Controllers",
+        label: t("controller.controllers"),
         glyph: "pad",
         value: <ConnectedValue />,
-        heading: "Connected controllers",
+        heading: t("controller.connectedControllers"),
         detail: (
           <>
-            <p>
-              Choose which player each controller plays as. Games always see an
-              Xbox 360 controller, whatever you hold.
-            </p>
+            <p>{t("controller.connected.detail")}</p>
             <Controllers />
           </>
         )
       },
       {
         id: "remap",
-        label: "Button mapping",
+        label: t("controller.map.title"),
         glyph: "keys",
-        heading: "Button mapping",
+        heading: t("controller.map.title"),
         detail: (
           <>
             <Remap />
@@ -256,41 +251,38 @@ export function controller(_state: NativeState): BladeDef {
       },
       {
         id: "vibration",
-        label: "Vibration",
+        label: t("controller.vibration"),
         glyph: "bolt",
         value: <Value name="vibration" />,
-        heading: "Vibration",
+        heading: t("controller.vibration"),
         detail: (
           <>
-            <p>Rumble when the game asks for it.</p>
-            <Toggle name="vibration" title="Vibration" />
+            <p>{t("controller.vibration.detail")}</p>
+            <Toggle name="vibration" title={t("controller.vibration")} />
           </>
         )
       },
       {
         id: "deadzones",
-        label: "Stick dead zones",
+        label: t("controller.stickDeadZones"),
         glyph: "target",
-        heading: "Stick dead zones",
+        heading: t("controller.stickDeadZones"),
         detail: (
           <>
-            <p>
-              How far a stick moves before the game sees it. Raise one if a
-              worn stick drifts on its own.
-            </p>
-            <p className="pref-group">Left stick</p>
+            <p>{t("controller.deadZones.detail")}</p>
+            <p className="pref-group">{t("controller.leftStick")}</p>
             <Slider
               name="left_stick_deadzone_percentage"
-              title="Left stick dead zone"
+              title={t("controller.leftStickDeadZone")}
               min={0}
               max={0.5}
               step={0.01}
               format={percent}
             />
-            <p className="pref-group">Right stick</p>
+            <p className="pref-group">{t("controller.rightStick")}</p>
             <Slider
               name="right_stick_deadzone_percentage"
-              title="Right stick dead zone"
+              title={t("controller.rightStickDeadZone")}
               min={0}
               max={0.5}
               step={0.01}
@@ -301,96 +293,80 @@ export function controller(_state: NativeState): BladeDef {
       },
       {
         id: "guide",
-        label: "Guide button",
+        label: t("controller.guideButton"),
         glyph: "play",
         value: <Value name="guide_button" />,
-        heading: "Guide button",
+        heading: t("controller.guideButton"),
         detail: (
           <>
-            <p>
-              Send the Guide button to the game, as the console did. Turn it off
-              if you only use Guide for the hotkeys below.
-            </p>
-            <Toggle name="guide_button" title="Guide button" />
+            <p>{t("controller.guide.detail")}</p>
+            <Toggle name="guide_button" title={t("controller.guideButton")} />
           </>
         )
       },
       {
         id: "hotkeys",
-        label: "Controller hotkeys",
+        label: t("controller.hotkeys"),
         glyph: "star",
         value: <Value name="controller_hotkeys" />,
-        heading: "Controller hotkeys",
+        heading: t("controller.hotkeys"),
         detail: (
           <>
-            <p>Hold Guide and press a button. Turn off any you press by accident.</p>
-            <p className="pref-group">During a game</p>
-            <Toggle name="controller_hotkeys" title="Controller hotkeys during a game" />
+            <p>{t("controller.hotkeys.detail")}</p>
+            <p className="pref-group">{t("controller.duringAGame")}</p>
+            <Toggle name="controller_hotkeys" title={t("controller.hotkeys.inGame")} />
             <NextLaunchNote names={["controller_hotkeys"]} />
             <HotkeyChart inGame />
-            <p className="pref-group">On the home screen</p>
+            <p className="pref-group">{t("controller.onTheHomeScreen")}</p>
             <HotkeyChart inGame={false} />
           </>
         )
       },
       {
         id: "dashboard-shortcut",
-        label: "Dashboard shortcut",
+        label: t("controller.dashboardShortcut"),
         glyph: "keys",
         value: <Value name="preferences_button" options={DASHBOARD_BUTTONS} />,
-        heading: "Dashboard shortcut",
+        heading: t("controller.dashboardShortcut"),
         detail: (
           <>
-            <p>
-              How to open and close this dashboard, in a game or out of one.
-              The game pauses while it is open, as under the 360&rsquo;s guide.
-            </p>
-            <p className="pref-group">On a controller</p>
-            <Options name="preferences_button" title="Dashboard button" options={DASHBOARD_BUTTONS} />
-            <Aside>
-              A tap of Guide on its own opens and hides the dashboard; Guide
-              held with another button is a hotkey instead. While this is
-              chosen, macOS&rsquo;s own Games overlay stays off that button.
-            </Aside>
-            <p className="pref-group">On the keyboard</p>
-            <Options name="preferences_key" title="Dashboard key" options={DASHBOARD_KEYS} />
-            <Aside>⌘, always opens it too.</Aside>
+            <p>{t("controller.shortcut.detail")}</p>
+            <p className="pref-group">{t("controller.onAController")}</p>
+            <Options name="preferences_button" title={t("controller.dashboardButton")} options={DASHBOARD_BUTTONS} />
+            <Aside>{t("controller.shortcut.guideNote")}</Aside>
+            <p className="pref-group">{t("controller.onTheKeyboard")}</p>
+            <Options name="preferences_key" title={t("controller.dashboardKey")} options={DASHBOARD_KEYS} />
+            <Aside>{t("controller.shortcut.keyboardNote")}</Aside>
           </>
         )
       },
       {
         id: "keyboard",
-        label: "Keyboard",
+        label: t("controller.keyboard"),
         glyph: "keys",
         value: <Value name="keyboard_mode" options={KEYBOARD_MODES} />,
-        heading: "Playing on the keyboard",
+        heading: t("controller.playingOnTheKeyboard"),
         detail: (
           <>
-            <p>
-              The keyboard can play as a controller. Passthrough sends keys to
-              games that read a keyboard, and needs a controller connected too.
-            </p>
-            <Options name="keyboard_mode" title="Keyboard" options={KEYBOARD_MODES} />
-            <p className="pref-group">The keyboard plays as</p>
-            <Options name="keyboard_user_index" title="Keyboard player" options={KEYBOARD_PLAYER} />
+            <p>{t("controller.keyboard.detail")}</p>
+            <Options name="keyboard_mode" title={t("controller.keyboard")} options={KEYBOARD_MODES} />
+            <p className="pref-group">{t("controller.keyboard.player")}</p>
+            <Options name="keyboard_user_index" title={t("controller.keyboardPlayer")} options={keyboardPlayers()} />
             <NextLaunchNote names={["keyboard_mode", "keyboard_user_index"]} />
           </>
         )
       },
       {
         id: "input-system",
-        label: "Input system",
+        label: t("controller.inputSystem"),
         glyph: "plug",
         value: <Value name="hid" options={INPUT_SYSTEMS} />,
-        heading: "Input system",
+        heading: t("controller.inputSystem"),
         detail: (
           <>
-            <p>
-              Automatic reads controllers and the keyboard together. Pick one
-              only to rule the other out while troubleshooting.
-            </p>
-            <Options name="hid" title="Input system" options={INPUT_SYSTEMS} />
-            <Aside>Takes effect the next time macXenos starts.</Aside>
+            <p>{t("controller.input.detail")}</p>
+            <Options name="hid" title={t("controller.inputSystem")} options={INPUT_SYSTEMS} />
+            <Aside>{t("controller.input.nextLaunch")}</Aside>
           </>
         )
       }

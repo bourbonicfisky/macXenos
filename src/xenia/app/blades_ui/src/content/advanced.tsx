@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import { useEffect, useState } from "react";
 import type { BladeDef } from "../ui/blade";
 import type { MenuItem } from "../ui/blade-menu";
@@ -21,26 +22,26 @@ import { Aside } from "./parts";
 
 const CATEGORY: Record<string, { label: string; glyph: GlyphName }> = {
   GPU: { label: "GPU", glyph: "monitor" },
-  Display: { label: "Display", glyph: "eye" },
-  Video: { label: "Video", glyph: "resolution" },
+  Display: { get label() { return t("advanced.display"); }, glyph: "eye" },
+  Video: { get label() { return t("advanced.video"); }, glyph: "resolution" },
   Vulkan: { label: "Vulkan", glyph: "layers" },
   CPU: { label: "CPU", glyph: "chip" },
-  a64: { label: "CPU code (Apple Silicon)", glyph: "chip" },
-  x64: { label: "CPU code (Intel)", glyph: "chip" },
-  Kernel: { label: "Kernel", glyph: "console" },
-  Memory: { label: "Memory", glyph: "blocks" },
-  Threading: { label: "Threading", glyph: "split" },
-  APU: { label: "Audio", glyph: "sound" },
-  HID: { label: "Input", glyph: "pad" },
-  SDL: { label: "Controller database", glyph: "pad" },
-  Storage: { label: "Storage", glyph: "folder" },
-  Content: { label: "Content", glyph: "disc" },
-  Profiles: { label: "Profiles", glyph: "people" },
-  General: { label: "General", glyph: "gear" },
-  UI: { label: "Interface", glyph: "sliders" },
-  Logging: { label: "Logging", glyph: "doc" },
-  HACKS: { label: "Hacks", glyph: "wrench" },
-  Config: { label: "Config file", glyph: "doc" }
+  a64: { get label() { return t("advanced.cpuCodeAppleSilicon"); }, glyph: "chip" },
+  x64: { get label() { return t("advanced.cpuCodeIntel"); }, glyph: "chip" },
+  Kernel: { get label() { return t("advanced.kernel"); }, glyph: "console" },
+  Memory: { get label() { return t("advanced.memory"); }, glyph: "blocks" },
+  Threading: { get label() { return t("advanced.threading"); }, glyph: "split" },
+  APU: { get label() { return t("advanced.audio"); }, glyph: "sound" },
+  HID: { get label() { return t("advanced.input"); }, glyph: "pad" },
+  SDL: { get label() { return t("advanced.controllerDatabase"); }, glyph: "pad" },
+  Storage: { get label() { return t("advanced.storage"); }, glyph: "folder" },
+  Content: { get label() { return t("advanced.content"); }, glyph: "disc" },
+  Profiles: { get label() { return t("advanced.profiles"); }, glyph: "people" },
+  General: { get label() { return t("advanced.general"); }, glyph: "gear" },
+  UI: { get label() { return t("advanced.interface"); }, glyph: "sliders" },
+  Logging: { get label() { return t("advanced.logging"); }, glyph: "doc" },
+  HACKS: { get label() { return t("advanced.hacks"); }, glyph: "wrench" },
+  Config: { get label() { return t("advanced.configFile"); }, glyph: "doc" }
 };
 
 /** Kept by Reset to defaults, as in the app (blades_model.cc KeptByResetAll):
@@ -64,11 +65,7 @@ function Warning() {
       <span className="pane-warning-mark shrink-0" aria-hidden="true">
         !
       </span>
-      <span>
-        These are the emulator&rsquo;s own settings, mostly for developers. A wrong value can stop
-        games from starting or running correctly. Change one only when a guide names it, and use
-        Reset to defaults, at the end of this blade, if something goes wrong.
-      </span>
+      <span>{t("advanced.warning")}</span>
     </p>
   );
 }
@@ -88,13 +85,12 @@ function ResetAll() {
   }, [armed]);
 
   if (changed.length === 0) {
-    return <p className="menu-note m-0 text-[0.78em]">Every setting is at its default.</p>;
+    return <p className="menu-note m-0 text-[0.78em]">{t("advanced.defaultsUnchanged")}</p>;
   }
   return (
     <>
       <p className="m-0">
-        {changed.length === 1 ? "1 setting differs" : `${changed.length} settings differ`} from the
-        defaults.
+        {t("advanced.changedSettings", { count: changed.length })}
       </p>
       <button
         type="button"
@@ -107,10 +103,10 @@ function ResetAll() {
           }
           setArmed(false);
           send({ op: "resetAll" });
-          announceSetting("All settings", "Defaults");
+          announceSetting(t("advanced.allSettings"), t("settings.defaults"));
         }}
       >
-        {armed ? "Press again to reset them" : "Reset to defaults"}
+        {armed ? t("advanced.confirmReset") : t("settings.resetDefaults")}
       </button>
     </>
   );
@@ -123,7 +119,7 @@ function SettingEntry({ cvar }: { cvar: Cvar }) {
     <div className="setting-entry grid gap-[0.25em]">
       <p className="m-0 flex flex-wrap items-baseline gap-x-[0.6em]">
         <span className="setting-name">{cvar.name}</span>
-        {cvar.value !== cvar.defaultValue ? <span className="setting-changed">changed</span> : null}
+        {cvar.value !== cvar.defaultValue ? <span className="setting-changed">{t("advanced.changed")}</span> : null}
       </p>
       {cvar.description ? (
         <p className="menu-note m-0 text-[0.8em] whitespace-pre-line">{cvar.description}</p>
@@ -133,8 +129,8 @@ function SettingEntry({ cvar }: { cvar: Cvar }) {
           name={cvar.name}
           title={cvar.name}
           options={[
-            { value: false, label: "Off" },
-            { value: true, label: "On" }
+            { value: false, label: t("graphics.qos.off") },
+            { value: true, label: t("graphics.unsetInputs.on") }
           ]}
         />
       ) : (
@@ -142,11 +138,11 @@ function SettingEntry({ cvar }: { cvar: Cvar }) {
           name={cvar.name}
           title={cvar.name}
           numeric={cvar.type !== "string" && cvar.type !== "path"}
-          placeholder={cvar.type === "string" || cvar.type === "path" ? "(empty)" : undefined}
+          placeholder={cvar.type === "string" || cvar.type === "path" ? t("settings.empty") : undefined}
         />
       )}
       <ResetButton name={cvar.name} title={cvar.name} />
-      {later ? <Aside>Applies the next time a game starts.</Aside> : null}
+      {later ? <Aside>{t("advanced.nextLaunch")}</Aside> : null}
     </div>
   );
 }
@@ -171,8 +167,8 @@ function Search() {
       <input
         type="search"
         spellCheck={false}
-        aria-label="Find a setting"
-        placeholder="Type part of a name, like vsync or deadzone"
+        aria-label={t("advanced.findASetting")}
+        placeholder={t("advanced.search.placeholder")}
         className="pref-text rounded-row mt-[0.3em] min-h-[2.2em] w-full px-[0.7em]"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
@@ -183,7 +179,7 @@ function Search() {
           }
         }}
       />
-      {terms.length > 0 && found.length === 0 ? <Aside>No setting matches.</Aside> : null}
+      {terms.length > 0 && found.length === 0 ? <Aside>{t("advanced.search.empty")}</Aside> : null}
       <div className="grid">
         {found.map((cvar) => (
           <SettingEntry key={cvar.name} cvar={cvar} />
@@ -207,13 +203,13 @@ export function advanced(state: NativeState): BladeDef {
   const menu: MenuItem[] = [
     {
       id: "find",
-      label: "Find a setting",
+      label: t("advanced.findASetting"),
       glyph: "target",
-      heading: "Find a setting",
+      heading: t("advanced.findASetting"),
       detail: (
         <>
           <Warning />
-          <p>Every setting in the config file, by its exact name. Choose the field and start typing.</p>
+          <p>{t("advanced.search.detail")}</p>
           <Search />
         </>
       )
@@ -225,13 +221,13 @@ export function advanced(state: NativeState): BladeDef {
         id: `category-${category.toLowerCase()}`,
         label: CATEGORY[category]?.label ?? category,
         glyph: CATEGORY[category]?.glyph ?? "gear",
-        value: <>{changed > 0 ? `${changed} changed` : list.length}</>,
-        heading: `${CATEGORY[category]?.label ?? category} settings`,
+        value: <>{changed > 0 ? t("advanced.changedCount", { count: changed }) : list.length}</>,
+        heading: t("advanced.categorySettings", { category: CATEGORY[category]?.label ?? category }),
         detail: (
           <>
             <Warning />
             <Aside>
-              {list.length} settings. The other blades cover what most people change.
+              {t("advanced.categoryCount", { count: list.length })}
             </Aside>
             <div className="grid">
               {list.map((cvar) => (
@@ -244,22 +240,18 @@ export function advanced(state: NativeState): BladeDef {
     }),
     {
       id: "reset",
-      label: "Reset to defaults",
+      label: t("settings.resetDefaults"),
       glyph: "wrench",
-      heading: "Reset to defaults",
+      heading: t("settings.resetDefaults"),
       detail: (
         <>
-          <p>
-            Puts every setting back to how macXenos ships, across all the blades. Your signed-in
-            profiles, your save and cache folders, your console settings and button mappings are
-            kept.
-          </p>
+          <p>{t("advanced.reset.detail")}</p>
           <ResetAll />
-          <Aside>Some settings take effect the next time a game starts.</Aside>
+          <Aside>{t("advanced.reset.nextLaunch")}</Aside>
         </>
       )
     }
   ];
 
-  return { id: "advanced", label: "advanced", title: "Advanced", tone: "steel", menu };
+  return { id: "advanced", label: t("advanced.tab"), title: t("advanced.title"), tone: "steel", menu };
 }

@@ -62,6 +62,15 @@
 "description": "Protect the zero page from reads and writes.",
 "changed": false
 },
+"null_page_census": {
+"name": "null_page_census",
+"category": "Memory",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "On hosts with pages larger than 4 KB the guest's first 64 KB stays readable and writable, so a guest null access goes unnoticed. This logs each such access and then lets it through.",
+"changed": false
+},
 "emit_inline_mmio_checks": {
 "name": "emit_inline_mmio_checks",
 "category": "CPU",
@@ -258,6 +267,15 @@
 "value": true,
 "defaultValue": true,
 "description": "Run AMD FidelityFX Super Resolution (FSR) in half precision (16 bits) on the Metal renderer: 11-12% less GPU time at 4K and 5K output on an M4, with no visible difference. Takes effect on the next launch.",
+"changed": false
+},
+"metal_device": {
+"name": "metal_device",
+"category": "GPU",
+"type": "string",
+"value": "",
+"defaultValue": "",
+"description": "Macs with more than one GPU: the Metal device to render with, given as part of its name (for example \"6900\" or \"580\", any case). Empty uses the system default. The log lists the devices at startup.",
 "changed": false
 },
 "vulkan_log_debug_messages": {
@@ -962,6 +980,15 @@
 "description": "Hold games that present without waiting for vblank (they have no frame rate cap of their own, e.g. GTA IV, Mafia II) to one frame per vblank, 60 FPS. Games that cap themselves are unaffected.",
 "changed": false
 },
+"scanline_counter_from_time": {
+"name": "scanline_counter_from_time",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Report the display scanline counter (D1MODE_V_COUNTER) from the time since the last vblank, as the hardware does. Off restores the old counter, which only advances once per frame-pacing step: some games' own frame limiters then never wait (Mafia II runs uncapped instead of at 30), and video players that poll it for vblank crawl (WALL-E's videos at 2.6 FPS).",
+"changed": false
+},
 "gpu_allow_invalid_fetch_constants": {
 "name": "gpu_allow_invalid_fetch_constants",
 "category": "GPU",
@@ -1401,6 +1428,15 @@
 "value": false,
 "defaultValue": false,
 "description": "Disassemble Xenos instructions as comments in the resulting DXBC for debugging.",
+"changed": false
+},
+"metal_discrete_vram_mirror": {
+"name": "metal_discrete_vram_mirror",
+"category": "GPU",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "On Macs with a discrete GPU (AMD), keep the GPU's copy of guest memory in video memory instead of reading it from system memory across PCIe. Has no effect on Apple Silicon. XE_METAL_DISCRETE_MIRROR=0/1 overrides this setting.",
 "changed": false
 },
 "metal_stencil_export": {
@@ -2150,6 +2186,24 @@
 "description": "truncate value to 32-bits",
 "changed": false
 },
+"guest_probe_pcs": {
+"name": "guest_probe_pcs",
+"category": "CPU",
+"type": "string",
+"value": "",
+"defaultValue": "",
+"description": "Comma-separated hex guest addresses to record (diagnostic; printed by the stall dump).",
+"changed": false
+},
+"jit_mtmsrd_atomic_lock": {
+"name": "jit_mtmsrd_atomic_lock",
+"category": "CPU",
+"type": "bool",
+"value": false,
+"defaultValue": false,
+"description": "Hold one host lock from mtmsrd r13 to the next mtmsrd, making guest lwarx/stwcx. sequences mutually exclusive (diagnostic; functions translated before it is set keep their code).",
+"changed": false
+},
 "break_on_debugbreak": {
 "name": "break_on_debugbreak",
 "category": "CPU",
@@ -2265,6 +2319,15 @@
 "value": true,
 "defaultValue": true,
 "description": "Break to the host debugger (or crash if no debugger attached) if an unimplemented PowerPC instruction is encountered.",
+"changed": false
+},
+"jit_ordered_load_functions": {
+"name": "jit_ordered_load_functions",
+"category": "CPU",
+"type": "string",
+"value": "",
+"defaultValue": "",
+"description": "Comma-separated guest function addresses (hex) whose loads are compiled in program order (a barrier after each load). The Xbox 360 CPU never performs a load before an earlier one; ARM hosts do, which breaks guest code that checks a ready flag and then reads the data it guards without a barrier (Crysis 3's job workers read a stale job and livelock). \"all\" orders every function's loads and stores (diagnostic, slow).",
 "changed": false
 },
 "xop_rotates": {
@@ -2438,6 +2501,33 @@
 "description": "implement the db16cyc instruction via MaybeYield, may improve scheduling of guest threads",
 "changed": false
 },
+"a64_inline_vrsqrtefp": {
+"name": "a64_inline_vrsqrtefp",
+"category": "a64",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Emit vrsqrtefp inline (branchless, same lookup table as the helper, equal on all 2^32 inputs) instead of four guest-to-host helper calls per instruction. Off = the helper calls.",
+"changed": false
+},
+"a64_delay_backoff_us": {
+"name": "a64_delay_backoff_us",
+"category": "a64",
+"type": "int",
+"value": 0,
+"defaultValue": 0,
+"description": "Guest spin-wait backoff. The guest's pause instruction (db16cyc) marks its spin loops: the Direct3D fence wait runs 32 of them between two reads of the fence. Once a guest thread has paused without a break for this many microseconds, every further 32 pauses give the core to any other runnable thread (a priority-depressing switch on macOS, a yield elsewhere) and continue at once when none is waiting. 0 = off: a pause is the host's yield instruction and nothing else.",
+"changed": false
+},
+"a64_delay_backoff_sleep_us": {
+"name": "a64_delay_backoff_sleep_us",
+"category": "a64",
+"type": "int",
+"value": 0,
+"defaultValue": 0,
+"description": "With a64_delay_backoff_us: sleep this many microseconds per 32 pauses instead of offering the core, so a long guest spin stops using a core even when the host has idle ones. The guest then sees what it waits for up to this much later. 0 = offer the core only.",
+"changed": false
+},
 "a64_max_stackpoints": {
 "name": "a64_max_stackpoints",
 "category": "a64",
@@ -2454,6 +2544,51 @@
 "value": true,
 "defaultValue": true,
 "description": "Records entries for guest/host stack mappings at function starts and checks for reentry at return sites. Has slight performance impact, but fixes crashes in games that use setjmp/longjmp.",
+"changed": false
+},
+"a64_longjmp_reentry": {
+"name": "a64_longjmp_reentry",
+"category": "a64",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Resume a guest longjmp inside the live frame of the function that called setjmp, restoring the host stack and stackpoints. Off translates the landing site as a new function, which leaves the skipped frames on the host stack (Fable III and Black Ops III then overflow the stackpoints). Needs a64_enable_host_guest_stack_synchronization.",
+"changed": false
+},
+"a64_chunked_partial_vector_stores": {
+"name": "a64_chunked_partial_vector_stores",
+"category": "a64",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Emit stvlx/stvrx as at most four power-of-two stores (8/4/2/1 bytes, or one 16-byte store for an aligned stvlx) of exactly the selected bytes instead of a byte-at-a-time loop. Off = the byte loop.",
+"changed": false
+},
+"a64_skip_fma_input_denorm_flush": {
+"name": "a64_skip_fma_input_denorm_flush",
+"category": "a64",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Skip the software denormal flush of vmaddfp/vnmsubfp inputs while VSCR[NJM] is set, where FPCR.FZ already flushes them inside the fused multiply-add (cores whose FZ flushes inputs only). Off = always flush in software.",
+"changed": false
+},
+"a64_fma_njm_check_per_op": {
+"name": "a64_fma_njm_check_per_op",
+"category": "a64",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "With a64_skip_fma_input_denorm_flush: test VSCR[NJM] once per vmaddfp/vnmsubfp (the FMA flushes its deferred inputs in place when NJM is off) instead of once per flushed input. Off = one check per input.",
+"changed": false
+},
+"a64_vmx_nan_fixup_out_of_line": {
+"name": "a64_vmx_nan_fixup_out_of_line",
+"category": "a64",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Keep only the any-lane-NaN test inline after vector float ops and emit the PPC NaN fix-up in tail code; vector FMAs then stash their sources for it only on that path and read their inputs in place. Off = inline fix-up, stash on every FMA.",
 "changed": false
 },
 "inline_mmio_access": {
@@ -2676,9 +2811,9 @@
 "name": "threading_blocking_waitany",
 "category": "Threading",
 "type": "bool",
-"value": false,
-"defaultValue": false,
-"description": "Candidate fix (default off = current 1ms poll): make WaitMultiple(WaitAny) event-driven instead of polling. Waiters register a latched wait-block with each handle; a handle's Signal hands the wake to one registered waiter under lock (auto-reset consumed exactly once), so a sub-millisecond Set-then-Reset transient is no longer lost (the DOA5 worker-pool deadlock). WaitAll still uses the poll. Regression-check broadly before shipping.",
+"value": true,
+"defaultValue": true,
+"description": "Event-driven waits on events and WaitMultiple(WaitAny) (default on). A waiter registers a latched wait-block with each handle; a handle's Signal hands the wake to the registered waiters under lock (every waiter of a manual-reset event, one for an auto-reset event), so a Set that is Reset before the woken threads run still releases them, as on a console. Off = a wait rechecks the event once it runs, and WaitAny polls every 1 ms, both of which lose such a Set. Advanced: turn off only to bisect a threading regression.",
 "changed": false
 },
 "threading_blocking_waitall": {
@@ -2820,9 +2955,9 @@
 "name": "guest_thread_qos",
 "category": "CPU",
 "type": "string",
-"value": "all",
-"defaultValue": "all",
-"description": "macOS only: Apple QoS scheduling policy for guest CPU threads. 'off' (no QoS calls) | 'all' (default, every guest XThread) | 'main' (entry-point thread only) | 'priority' (guest priority >= guest_thread_qos_priority_threshold). 'hot' (hot-after-warmup) is reserved but not yet implemented.",
+"value": "",
+"defaultValue": "",
+"description": "macOS only: Apple QoS scheduling policy for guest CPU threads. 'off' (no QoS calls; default on Intel Macs) | 'all' (default on Apple silicon, every guest XThread) | 'main' (entry-point thread only) | 'priority' (guest priority >= guest_thread_qos_priority_threshold). 'hot' (hot-after-warmup) is reserved but not yet implemented.",
 "changed": false
 },
 "guest_thread_qos_class": {
@@ -3174,6 +3309,15 @@
 "value": false,
 "defaultValue": false,
 "description": "Enables preview mode in dashboards to render debug information.",
+"changed": false
+},
+"serve_disc_content": {
+"name": "serve_disc_content",
+"category": "Content",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Serve the content packages a multi-disc title installs from one of its discs (the launched image or a \"(Disc N)\" image beside it) when the content root has no copy.",
 "changed": false
 },
 "logged_profile_slot_0_xuid": {

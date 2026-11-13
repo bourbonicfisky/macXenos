@@ -76,8 +76,12 @@ sub-blade tabs both set.
 ## Languages
 
 The dashboard's text goes through `t()` (`src/i18n/`), so it can be
-translated into the console's sixteen languages. Only English exists today;
-the wiring, the checks and the tests are in place for the rest.
+translated into the console's sixteen languages. English and Russian are
+available; the wiring, the checks and the tests are in place for the rest.
+Russian includes the dashboard's menus, settings, library, profile controls
+and console field labels. Native application menus, native dialogs and the
+emulator-provided technical descriptions in Advanced are separate from the
+dashboard catalog and remain in their original language.
 
 - **The text.** `src/i18n/en.ts` is every message in English, keyed
   `"area.thing"`, and the source for translators. Messages take `{name}`
@@ -97,15 +101,18 @@ the wiring, the checks and the tests are in place for the rest.
   every translation keeps each message's placeholders and uses only English's
   keys; and English written straight into a `.tsx` instead of through `t()`
   never grows. `tools/i18n-baseline.json` holds each file's count of such
-  text (Home, the Dashboard rows, the legend, the sub-blades and the sound
-  offer are at zero; Graphics, Controller, Audio & CPU, Profiles, the rest of
-  System and Advanced are still to convert). Convert a file, then
+  text. All dashboard panels use `t()`; the remaining entries are invariant
+  technical names and controller button names (such as CPU, Discord and
+  Guide), which are kept as written. Convert a file, then
   `npm run i18n:baseline` to lock the lower count in. `npm run i18n` prints the
   report, with each language's coverage.
 - **Tests**: `tests/i18n.test.mjs` (language matching, plurals, placeholders,
   the scanner) and smoke tests that switch to the pseudo-locale (`en-XA`,
   development only: every word accented, so untranslated text stands out) and
-  check the converted text follows.
+  check the converted text follows. Russian tests check complete catalog
+  coverage, Russian plural forms, automatic language matching, every blade,
+  live option labels and switching back to English without changing the
+  emulated console's language.
 
 ## Sounds are downloaded, not shipped
 

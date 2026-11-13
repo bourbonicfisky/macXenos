@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { format, placeholders, pseudo } from "../src/i18n/format.ts";
 import { localeForTag, matchLocale, LOCALES } from "../src/i18n/locales.ts";
 import { en } from "../src/i18n/en.ts";
+import ru from "../src/i18n/catalogs/ru.ts";
 import { hardCoded } from "../tools/i18n.mjs";
 
 test("the sixteen console languages", () => {
@@ -62,6 +63,21 @@ test("every English message formats", () => {
   for (const [key, message] of Object.entries(en)) {
     assert.doesNotThrow(() => format(message, {}), key);
   }
+});
+
+test("Russian covers the catalog, preserves placeholders and uses Russian plurals", () => {
+  assert.deepEqual(Object.keys(ru).sort(), Object.keys(en).sort());
+  for (const key of Object.keys(en)) {
+    assert.deepEqual(placeholders(ru[key]), placeholders(en[key]), key);
+    assert.doesNotThrow(() => format(ru[key], {}, "ru"), key);
+  }
+  for (const [count, expected] of [[0, "0 папок"], [1, "1 папка"], [2, "2 папки"], [5, "5 папок"], [11, "11 папок"], [21, "21 папка"], [22, "22 папки"], [25, "25 папок"], [111, "111 папок"], [1.5, "1,5 папки"]]) {
+    assert.equal(format(ru["home.gameFolders.count"], { count }, "ru"), expected);
+  }
+  assert.equal(format(ru["profiles.pictures.installed"], {
+    pictures: 22, titles: 5, collection: "Collection", site: "Site"
+  }, "ru"), "22 аватара из 5 игр: официальная библиотека аватаров Xbox 360 из коллекции Collection на Site (archive.org).");
+  assert.equal(matchLocale(["ru-RU", "en-US"], ["en", "ru"]), "ru");
 });
 
 test("the hard-coded text scanner sees text but not code", () => {

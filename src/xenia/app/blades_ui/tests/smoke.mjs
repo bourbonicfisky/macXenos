@@ -131,6 +131,46 @@ const tests = {
     expect((await page.eval(focusedRow)) !== undefined, "page did not come back");
   },
 
+  async "Russian switches every blade and live options, without changing the console language"(page, base) {
+    await page.open(base, "#system/language");
+    const consoleLanguage = await page.eval("import('/src/native.ts').then(({ getNative }) => getNative().console.fields.find((f) => f.id === 'language')?.value)");
+    await page.eval("[...document.querySelectorAll('.blade[data-state=open] [role=radio]')].find((b) => b.textContent === 'Русский').click()");
+    expect((await page.eval("document.documentElement.lang")) === "ru", "Russian did not activate");
+    expect((await page.eval("document.title")) === "Настройки", "page title stayed English");
+    expect((await page.eval("localStorage.getItem('macxenos-language')")) === "ru", "Russian was not saved");
+    const titles = { home: "macXenos", graphics: "Графика", controller: "Контроллер", audio: "Звук и ЦП", profiles: "Профили", system: "Система", advanced: "Дополнительно" };
+    for (const [id, expected] of Object.entries(titles)) {
+      await page.open(base, `#${id}`);
+      const title = await page.eval("document.querySelector('.blade[data-state=open] h2')?.textContent");
+      expect(title === expected, `#${id}: ${title}`);
+    }
+    const pane = "document.querySelector('.blade[data-state=open] .menu-detail:not([hidden])')";
+    await page.open(base, "#graphics/upscaling");
+    expect((await page.eval(`${pane}.textContent`)).includes("Билинейная"), "static renderer options stayed English");
+    await page.open(base, "#controller/keyboard");
+    expect((await page.eval(`${pane}.textContent`)).includes("Игрок 1"), "keyboard player options stayed English");
+    await page.open(base, "#system/clock");
+    expect((await page.eval(`${pane}.textContent`)).includes("Отключить переход на летнее время"), "native console labels stayed English");
+    expect((await page.eval("import('/src/native.ts').then(({ getNative }) => getNative().console.fields.find((f) => f.id === 'language')?.value)")) === consoleLanguage, "dashboard language changed the console language");
+    await page.eval(`import('/src/mock.ts').then(({ mockState }) => {
+      const state = mockState();
+      state.console.fields.find((f) => f.id === 'language').options.push({ value: 12, label: 'Russian' });
+      state.console.fields.find((f) => f.id === 'country').options = [{ value: 88, label: 'RU' }, { value: 103, label: 'US' }];
+      window.__xeniaReceive(JSON.stringify(state));
+    })`);
+    await page.eval("[...document.querySelectorAll('.blade[data-state=open] .menu-row')].find((b) => b.textContent.startsWith('Язык и регион')).click()");
+    const consoleText = await page.eval(`${pane}.textContent`);
+    expect(consoleText.includes("русский") && consoleText.includes("Россия"), `console choices were not localized: ${consoleText}`);
+    await page.open(base, "#system/language");
+    await page.eval("[...document.querySelectorAll('.blade[data-state=open] [role=radio]')].find((b) => b.textContent === 'Как на моём Mac').click()");
+    await page.eval("import('/src/i18n/index.ts').then((i18n) => i18n.setSystemLanguages(['ru-RU', 'en-US']))");
+    expect((await page.eval("document.documentElement.lang")) === "ru", "Russian Mac language was not matched");
+    await page.eval("[...document.querySelectorAll('.blade[data-state=open] [role=radio]')].find((b) => b.textContent === 'English').click()");
+    await page.open(base, "#graphics/upscaling");
+    expect((await page.eval(`${pane}.textContent`)).includes("Bilinear"), "static renderer options stayed Russian");
+    expect((await page.eval("document.title")) === "Preferences", "page title stayed Russian");
+  },
+
   async "Dashboard language offers Same as my Mac and English"(page, base) {
     await page.open(base, "#system/language");
     const row = await page.eval(

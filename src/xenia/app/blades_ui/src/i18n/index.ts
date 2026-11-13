@@ -42,9 +42,13 @@ function resolve(): ActiveLanguage {
 
 function update() {
   const next = resolve();
-  if (typeof document !== "undefined") document.documentElement.lang = next === PSEUDO ? "en" : next;
-  if (next === active) return;
+  const changed = next !== active;
   active = next;
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = next === PSEUDO ? "en" : next;
+    document.title = t("dashboard.pageTitle");
+  }
+  if (!changed) return;
   for (const listener of listeners) listener();
 }
 
