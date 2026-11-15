@@ -647,6 +647,39 @@ TEST_CASE("Blocking WaitAll reports its member wake", "[wait]") {
     }
   }
 }
+
+// As the Xbox 360 does (pulse_wait_multi probe): a pulse completes a WaitAll
+// whose other member is signaled, consuming it, and is lost when the other
+// member is clear.
+TEST_CASE("Pulse completes a blocking WaitAll", "[wait]") {
+  for (bool manual : {true, false}) {
+    for (bool other_set : {true, false}) {
+      auto pulsed = manual ? Event::CreateManualResetEvent(false)
+                           : Event::CreateAutoResetEvent(false);
+      auto other = Event::CreateAutoResetEvent(other_set);
+      WaitHandle* handles[] = {pulsed.get(), other.get()};
+      auto started = Event::CreateManualResetEvent(false);
+      std::pair<WaitResult, size_t> result{WaitResult::kFailed, 0};
+      std::thread waiter([&] {
+        started->Set();
+        result = WaitMultiple(handles, 2, true, false, 300ms);
+      });
+      auto ready = Wait(started.get(), false, 1s);
+      Sleep(20ms);
+      pulsed->Pulse();
+      waiter.join();
+      REQUIRE(ready == WaitResult::kSuccess);
+      if (other_set) {
+        REQUIRE(result.first == WaitResult::kSuccess);
+        REQUIRE(result.second == 0);
+      } else {
+        REQUIRE(result.first == WaitResult::kTimeout);
+      }
+      REQUIRE(pulsed->Query().state == 0);
+      REQUIRE(other->Query().state == 0);
+    }
+  }
+}
 #endif
 
 TEST_CASE("Semaphore count snapshots", "[semaphore]") {

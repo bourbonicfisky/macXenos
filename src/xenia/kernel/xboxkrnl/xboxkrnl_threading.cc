@@ -1041,7 +1041,7 @@ dword_result_t KeQueryBasePriorityThread_entry(lpvoid_t thread_ptr) {
 
   auto thread = XObject::GetNativeObject<XThread>(kernel_state(), thread_ptr);
   if (thread) {
-    priority = thread->QueryPriority();
+    priority = thread->QueryBasePriorityIncrement();
   }
 
   return priority;
@@ -1054,8 +1054,7 @@ dword_result_t KeSetBasePriorityThread_entry(lpvoid_t thread_ptr,
   auto thread = XObject::GetNativeObject<XThread>(kernel_state(), thread_ptr);
 
   if (thread) {
-    prev_priority = thread->QueryPriority();
-    thread->SetPriority(increment);
+    prev_priority = thread->SetBasePriorityIncrement(int32_t(increment));
   }
 
   return prev_priority;
@@ -2246,6 +2245,45 @@ static bool TimerApcQueued(X_KTHREAD* target_thread, uint32_t apc_routine,
   return queued;
 }
 
+// Takes back the timer APCs queued on a thread for this routine and context.
+// Cancelling a timer, or arming it again, removes its APC if that has expired
+// but not yet run (nt_timer_apc probe).
+void xeRemoveTimerApcs(uint32_t thread_handle, uint32_t apc_routine,
+                       uint32_t apc_routine_context,
+                       cpu::ppc::PPCContext* context) {
+  auto thread =
+      context->kernel_state->object_table()->LookupObject<XThread>(
+          thread_handle);
+  if (!thread) {
+    return;
+  }
+  auto target_thread =
+      context->TranslateVirtual<X_KTHREAD*>(thread->guest_object());
+  const bool change_irql = !CallerIsHostThread();
+  auto old_irql =
+      xeKeKfAcquireSpinLock(context, &target_thread->apc_lock, change_irql);
+  std::vector<uint32_t> removed;
+  for (bool found = true; found;) {
+    found = false;
+    for (auto&& apc : target_thread->apc_lists[1].IterateForward(context)) {
+      if (apc.kernel_routine == XAPC::kTimerKernelRoutine &&
+          apc.normal_routine == apc_routine &&
+          apc.normal_context == apc_routine_context) {
+        apc.enqueued = 0;
+        util::XeRemoveEntryList(&apc.list_entry, context);
+        removed.push_back(context->HostToGuestVirtual(&apc));
+        found = true;
+        break;
+      }
+    }
+  }
+  xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql,
+                        change_irql);
+  for (uint32_t apc_ptr : removed) {
+    context->kernel_state->memory()->SystemHeapFree(apc_ptr);
+  }
+}
+
 uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
                             uint32_t apc_routine_context, uint32_t arg1,
                             uint32_t arg2, cpu::ppc::PPCContext* context,
@@ -2437,6 +2475,11 @@ void xeRundownApcs(cpu::ppc::PPCContext* ctx) {
   auto kpcr = ctx->TranslateVirtualGPR<X_KPCR*>(ctx->r[13]);
 
   auto current_thread = ctx->TranslateVirtual(kpcr->prcb_data.current_thread);
+  // An exiting thread takes no more APCs: NtQueueApcThread on it returns
+  // STATUS_UNSUCCESSFUL on the console (apc_cross_thread probe).
+  uint32_t old_irql = xeKeKfAcquireSpinLock(ctx, &current_thread->apc_lock);
+  current_thread->may_queue_apcs = 0;
+  xeKeKfReleaseSpinLock(ctx, &current_thread->apc_lock, old_irql);
   YankApcList(ctx, current_thread, 1, true);
   YankApcList(ctx, current_thread, 0, false);
 }

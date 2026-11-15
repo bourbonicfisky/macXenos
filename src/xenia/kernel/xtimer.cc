@@ -13,7 +13,9 @@
 #include <cstring>
 
 #include "xenia/base/logging.h"
+#include "xenia/cpu/thread_state.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/kernel/xthread.h"
 
 namespace xe {
@@ -184,8 +186,12 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
         XSystemClock::from_file_time(due_time));
   }
 
+  // The schedule this replaces takes its undelivered APC with it.
+  RetractApc();
+
   // Stash routine for callback.
   callback_thread_ = XThread::GetCurrentThread();
+  callback_thread_handle_ = callback_thread_ ? callback_thread_->handle() : 0;
   callback_routine_ = routine;
   callback_routine_arg_ = routine_arg;
 
@@ -217,8 +223,10 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
     auto cb_routine = callback_routine_;
     auto cb_routine_arg = callback_routine_arg_;
     KernelState* cb_kernel_state = kernel_state();
-    callback = [cb_kernel_state, cb_thread_handle, cb_routine,
-                cb_routine_arg]() {
+    auto cb_generation = apc_generation_;
+    const uint64_t cb_armed = cb_generation->load();
+    callback = [cb_kernel_state, cb_thread_handle, cb_routine, cb_routine_arg,
+                cb_generation, cb_armed]() {
       // Queue APC to call back routine with (arg, low, high).
       // It'll be executed on the thread that requested the timer.
       uint64_t time = xe::Clock::QueryGuestSystemTime();
@@ -229,7 +237,12 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
       // from the context). Hop to the kernel dispatch thread, as the deferred
       // overlapped completions do.
       cb_kernel_state->Dispatch([cb_kernel_state, cb_thread_handle, cb_routine,
-                                 cb_routine_arg, time_low, time_high]() {
+                                 cb_routine_arg, time_low, time_high,
+                                 cb_generation, cb_armed]() {
+        if (cb_generation->load() != cb_armed) {
+          // Cancelled or armed again since this expiry.
+          return;
+        }
         auto cb_thread =
             cb_thread_handle
                 ? cb_kernel_state->object_table()->LookupObject<XThread>(
@@ -247,6 +260,12 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
             cb_routine, cb_routine_arg, time_low, time_high);
         cb_thread->EnqueueApc(cb_routine, cb_routine_arg, time_low, time_high,
                               /*from_timer=*/true);
+        if (cb_generation->load() != cb_armed) {
+          // The cancel ran while this was being queued.
+          xboxkrnl::xeRemoveTimerApcs(cb_thread_handle, cb_routine,
+                                      cb_routine_arg,
+                                      cpu::ThreadState::Get()->context());
+        }
       });
     };
   }
@@ -267,9 +286,22 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
   return result ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
 }
 
+void XTimer::RetractApc() {
+  ++*apc_generation_;
+  auto thread_state = cpu::ThreadState::Get();
+  if (callback_routine_ && callback_thread_handle_ && thread_state) {
+    xboxkrnl::xeRemoveTimerApcs(callback_thread_handle_, callback_routine_,
+                                callback_routine_arg_,
+                                thread_state->context());
+  }
+}
+
 X_STATUS XTimer::Cancel() {
   std::lock_guard<std::mutex> lock(timer_lock_);
-  return timer_->Cancel() ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
+  X_STATUS status =
+      timer_->Cancel() ? X_STATUS_SUCCESS : X_STATUS_UNSUCCESSFUL;
+  RetractApc();
+  return status;
 }
 
 bool XTimer::IsSignaled() {

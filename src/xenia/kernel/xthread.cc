@@ -9,6 +9,8 @@
 
 #include "xenia/kernel/xthread.h"
 
+#include <algorithm>
+
 #if XE_PLATFORM_MAC
 #include <mach/mach.h>
 #include <mach/thread_switch.h>
@@ -788,6 +790,7 @@ X_STATUS XThread::Terminate(int exit_code) {
   X_KTHREAD* thread = guest_object<X_KTHREAD>();
   thread->header.signal_state = 1;
   thread->exit_status = exit_code;
+  thread->may_queue_apcs = 0;
 
   // Notify processor of our exit.
   emulator()->processor()->OnThreadExit(thread_id_);
@@ -942,7 +945,9 @@ void XThread::EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
       this->handle(), normal_routine, normal_context, arg1, arg2,
       cpu::ThreadState::Get()->context(), from_timer);
 
-  xenia_assert(success == X_STATUS_SUCCESS);
+  // A thread that is exiting takes no more APCs.
+  xenia_assert(success == X_STATUS_SUCCESS ||
+               success == X_STATUS_UNSUCCESSFUL);
 }
 
 void XThread::SetCurrentThread() { current_xthread_tls_ = this; }
@@ -1009,6 +1014,47 @@ void XThread::SetPriority(int32_t increment) {
   if (!cvars::ignore_thread_priorities) {
     thread_->set_priority(GuestPriorityToHost(clamped));
   }
+}
+
+int32_t XThread::QueryBasePriorityIncrement() {
+  if (!is_guest_thread()) {
+    return 0;
+  }
+  if (base_saturation_) {
+    return 16 * base_saturation_;
+  }
+  auto* kthread = guest_object<X_KTHREAD>();
+  return int32_t(kthread->base_priority) - int32_t(kthread->base_priority_copy);
+}
+
+int32_t XThread::SetBasePriorityIncrement(int32_t increment) {
+  if (!is_guest_thread()) {
+    return 0;
+  }
+  const int32_t previous = QueryBasePriorityIncrement();
+  auto* kthread = guest_object<X_KTHREAD>();
+  const int32_t old_base = kthread->base_priority;
+  // The new base is the process's default plus the offset, kept between the
+  // process's priority class and its highest dynamic priority: for a title
+  // 13, 10 and 17, so 15 comes back as 4 and -15 as -3 on the console.
+  int32_t new_base = int32_t(kthread->base_priority_copy) + increment;
+  new_base = std::max(new_base, int32_t(kthread->process_priority_class));
+  if (kthread->max_dynamic_priority) {
+    new_base = std::min(new_base, int32_t(kthread->max_dynamic_priority));
+  }
+  base_saturation_ = increment >= 16 ? 1 : increment <= -16 ? -1 : 0;
+  // The current priority keeps its distance from the base (a priority set
+  // with KeSetPriorityThread stays where it was put), unless saturated.
+  int32_t new_priority =
+      base_saturation_ ? new_base : new_base + (priority_ - old_base);
+  new_priority = std::clamp(new_priority, 1, 31);
+  kthread->base_priority = static_cast<uint8_t>(new_base);
+  SetPriority(new_priority);
+  if (new_base <= new_priority) {
+    // The decay floor is the base, not a boosted current priority.
+    base_priority_ = new_base;
+  }
+  return previous;
 }
 
 void XThread::CheckQuantumAndDecay() {
