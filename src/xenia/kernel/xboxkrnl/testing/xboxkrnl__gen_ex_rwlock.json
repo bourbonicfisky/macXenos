@@ -1,0 +1,2438 @@
+{
+ "corpus": "ex_rwlock",
+ "source": "Physical Xbox 360 (Aurora, XBDM), 2026-11-15, bundle 4f299c7182870074; two runs identical; evidence xbox-hardware-2026-11-15/ex_rwlock",
+ "steps": [
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "initialize",
+   "export": "ExInitializeReadWriteLock",
+   "capture": {
+    "alone: lock[:0x10]": "ffffffff000000000000000000000000",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "acquire exclusive",
+   "export": "ExAcquireReadWriteLockExclusive",
+   "capture": {
+    "alone: lock[:0x10]": "00000000000000000000000000000000",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "try exclusive while held exclusive",
+   "export": "ExTryToAcquireReadWriteLockExclusive",
+   "r3": "0000000000000000",
+   "capture": {
+    "alone: lock[:0x10]": "00000000000000000000000000000000",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "try shared while held exclusive",
+   "export": "ExTryToAcquireReadWriteLockShared",
+   "r3": "0000000000000000",
+   "capture": {
+    "alone: lock[:0x10]": "00000000000000000000000000000000",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "release exclusive",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "alone: lock[:0x10]": "ffffffff000000000000000000000000",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "try exclusive when free",
+   "export": "ExTryToAcquireReadWriteLockExclusive",
+   "r3": "0000000000000001",
+   "capture": {
+    "alone: lock[:0x10]": "00000000000000000000000000000000",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "release it",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "alone: lock[:0x10]": "ffffffff000000000000000000000000",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "acquire shared",
+   "export": "ExAcquireReadWriteLockShared",
+   "capture": {
+    "alone: lock[:0x10]": "00000000000000000000000000000001",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "acquire shared again",
+   "export": "ExAcquireReadWriteLockShared",
+   "capture": {
+    "alone: lock[:0x10]": "00000001000000000000000000000002",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "try shared while held shared",
+   "export": "ExTryToAcquireReadWriteLockShared",
+   "r3": "0000000000000001",
+   "capture": {
+    "alone: lock[:0x10]": "00000002000000000000000000000003",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "try exclusive while held shared",
+   "export": "ExTryToAcquireReadWriteLockExclusive",
+   "r3": "0000000000000000",
+   "capture": {
+    "alone: lock[:0x10]": "00000002000000000000000000000003",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "release shared 1",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "alone: lock[:0x10]": "00000001000000000000000000000002",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "release shared 2",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "alone: lock[:0x10]": "00000000000000000000000000000001",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "release shared 3",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "alone: lock[:0x10]": "ffffffff000000000000000000000000",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "try shared when free",
+   "export": "ExTryToAcquireReadWriteLockShared",
+   "r3": "0000000000000001",
+   "capture": {
+    "alone: lock[:0x10]": "00000000000000000000000000000001",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, one thread",
+   "name": "release the last one",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "alone: lock[:0x10]": "ffffffff000000000000000000000000",
+    "alone: lock+0x14[:0x4]": "00000000",
+    "alone: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "alone: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "ExInitializeReadWriteLock",
+   "export": "ExInitializeReadWriteLock",
+   "args": [
+    {
+     "pointer": "writer holds, reader then writer wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "main acquires exclusive",
+   "export": "ExAcquireReadWriteLockExclusive",
+   "capture": {
+    "writer holds, reader then writer wait: lock[:0x10]": "00000000000000000000000000000000",
+    "writer holds, reader then writer wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, reader then writer wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, reader then writer wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): done",
+     "offset": 104
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "worker 0 (shared): create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): handle",
+     "offset": 128
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "writer holds, reader then writer wait worker 0 (shared)"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "worker 0 (shared): started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "worker 0 (shared): let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "writer holds, reader then writer wait: lock[:0x10]": "00000001000000000000000100000000",
+    "writer holds, reader then writer wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, reader then writer wait: lock+0x24[:0x4]": "00000000",
+    "worker 0 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd",
+    "worker 1 (exclusive): order it got in, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 1 (exclusive): attempting",
+     "offset": 136
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 1 (exclusive): done",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "worker 1 (exclusive): create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 1 (exclusive): handle",
+     "offset": 176
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "writer holds, reader then writer wait worker 1 (exclusive)"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "worker 1 (exclusive): started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 1 (exclusive): attempting",
+     "offset": 136
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "worker 1 (exclusive): let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "writer holds, reader then writer wait: lock[:0x10]": "00000002000000010000000100000000",
+    "writer holds, reader then writer wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, reader then writer wait: lock+0x24[:0x4]": "00000000",
+    "worker 0 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd",
+    "worker 1 (exclusive): order it got in, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "main releases",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "writer holds, reader then writer wait: lock[:0x10]": "00000001000000010000000000000001",
+    "writer holds, reader then writer wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, reader then writer wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, reader then writer wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "worker 0 (shared): finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000100000001",
+    "worker 1 (exclusive): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "pointer": "worker 0 (shared): done",
+     "offset": 104
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "worker 1 (exclusive): finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000100000001",
+    "worker 1 (exclusive): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "pointer": "worker 1 (exclusive): done",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "worker 0 (shared): join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000100000001",
+    "worker 1 (exclusive): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "variable": "writer holds, reader then writer wait worker 0 (shared): handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "writer holds, reader then writer wait worker 0 (shared): handle"
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "worker 1 (exclusive): join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000100000001",
+    "worker 1 (exclusive): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "variable": "writer holds, reader then writer wait worker 1 (exclusive): handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "writer holds, reader then writer wait worker 1 (exclusive): handle"
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "the lock is free at the end",
+   "export": "ExTryToAcquireReadWriteLockExclusive",
+   "r3": "0000000000000001",
+   "capture": {
+    "writer holds, reader then writer wait: lock[:0x10]": "00000000000000000000000000000000",
+    "writer holds, reader then writer wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, reader then writer wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, reader then writer wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, reader then writer wait",
+   "name": "ExReleaseReadWriteLock",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "writer holds, reader then writer wait: lock[:0x10]": "ffffffff000000000000000000000000",
+    "writer holds, reader then writer wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, reader then writer wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, reader then writer wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "ExInitializeReadWriteLock",
+   "export": "ExInitializeReadWriteLock",
+   "args": [
+    {
+     "pointer": "writer holds, writer then reader wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "main acquires exclusive",
+   "export": "ExAcquireReadWriteLockExclusive",
+   "capture": {
+    "writer holds, writer then reader wait: lock[:0x10]": "00000000000000000000000000000000",
+    "writer holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, writer then reader wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, writer then reader wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 0 (exclusive): attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 0 (exclusive): done",
+     "offset": 104
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "worker 0 (exclusive): create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 0 (exclusive): handle",
+     "offset": 128
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "writer holds, writer then reader wait worker 0 (exclusive)"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "worker 0 (exclusive): started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 0 (exclusive): attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "worker 0 (exclusive): let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "writer holds, writer then reader wait: lock[:0x10]": "00000001000000010000000000000000",
+    "writer holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, writer then reader wait: lock+0x24[:0x4]": "00000000",
+    "worker 0 (exclusive): order it got in, flag": "cdcdcdcdcdcdcdcd",
+    "worker 1 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): attempting",
+     "offset": 136
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): done",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "worker 1 (shared): create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): handle",
+     "offset": 176
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "writer holds, writer then reader wait worker 1 (shared)"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "worker 1 (shared): started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): attempting",
+     "offset": 136
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "worker 1 (shared): let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "writer holds, writer then reader wait: lock[:0x10]": "00000002000000010000000100000000",
+    "writer holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, writer then reader wait: lock+0x24[:0x4]": "00000000",
+    "worker 0 (exclusive): order it got in, flag": "cdcdcdcdcdcdcdcd",
+    "worker 1 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "main releases",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "writer holds, writer then reader wait: lock[:0x10]": "00000001000000010000000000000001",
+    "writer holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, writer then reader wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, writer then reader wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "worker 0 (exclusive): finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (exclusive): order it got in, flag": "0000000200000001",
+    "worker 1 (shared): order it got in, flag": "0000000100000001"
+   },
+   "args": [
+    {
+     "pointer": "worker 0 (exclusive): done",
+     "offset": 104
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "worker 1 (shared): finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (exclusive): order it got in, flag": "0000000200000001",
+    "worker 1 (shared): order it got in, flag": "0000000100000001"
+   },
+   "args": [
+    {
+     "pointer": "worker 1 (shared): done",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "worker 0 (exclusive): join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (exclusive): order it got in, flag": "0000000200000001",
+    "worker 1 (shared): order it got in, flag": "0000000100000001"
+   },
+   "args": [
+    {
+     "variable": "writer holds, writer then reader wait worker 0 (exclusive): handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "writer holds, writer then reader wait worker 0 (exclusive): handle"
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "worker 1 (shared): join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (exclusive): order it got in, flag": "0000000200000001",
+    "worker 1 (shared): order it got in, flag": "0000000100000001"
+   },
+   "args": [
+    {
+     "variable": "writer holds, writer then reader wait worker 1 (shared): handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "writer holds, writer then reader wait worker 1 (shared): handle"
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "the lock is free at the end",
+   "export": "ExTryToAcquireReadWriteLockExclusive",
+   "r3": "0000000000000001",
+   "capture": {
+    "writer holds, writer then reader wait: lock[:0x10]": "00000000000000000000000000000000",
+    "writer holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, writer then reader wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, writer then reader wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, writer then reader wait",
+   "name": "ExReleaseReadWriteLock",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "writer holds, writer then reader wait: lock[:0x10]": "ffffffff000000000000000000000000",
+    "writer holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, writer then reader wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, writer then reader wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "ExInitializeReadWriteLock",
+   "export": "ExInitializeReadWriteLock",
+   "args": [
+    {
+     "pointer": "reader holds, writer then reader wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "main acquires shared",
+   "export": "ExAcquireReadWriteLockShared",
+   "capture": {
+    "reader holds, writer then reader wait: lock[:0x10]": "00000000000000000000000000000001",
+    "reader holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "reader holds, writer then reader wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "reader holds, writer then reader wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 0 (exclusive): attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 0 (exclusive): done",
+     "offset": 104
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "worker 0 (exclusive): create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 0 (exclusive): handle",
+     "offset": 128
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "reader holds, writer then reader wait worker 0 (exclusive)"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "worker 0 (exclusive): started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 0 (exclusive): attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "worker 0 (exclusive): let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "reader holds, writer then reader wait: lock[:0x10]": "00000001000000010000000000000001",
+    "reader holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "reader holds, writer then reader wait: lock+0x24[:0x4]": "00000000",
+    "worker 0 (exclusive): order it got in, flag": "cdcdcdcdcdcdcdcd",
+    "worker 1 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): attempting",
+     "offset": 136
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): done",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "worker 1 (shared): create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): handle",
+     "offset": 176
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "reader holds, writer then reader wait worker 1 (shared)"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "worker 1 (shared): started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): attempting",
+     "offset": 136
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "worker 1 (shared): let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "reader holds, writer then reader wait: lock[:0x10]": "00000002000000010000000100000001",
+    "reader holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "reader holds, writer then reader wait: lock+0x24[:0x4]": "00000000",
+    "worker 0 (exclusive): order it got in, flag": "cdcdcdcdcdcdcdcd",
+    "worker 1 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "main releases",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "reader holds, writer then reader wait: lock[:0x10]": "00000001000000000000000100000000",
+    "reader holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "reader holds, writer then reader wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "reader holds, writer then reader wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "worker 0 (exclusive): finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (exclusive): order it got in, flag": "0000000100000001",
+    "worker 1 (shared): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "pointer": "worker 0 (exclusive): done",
+     "offset": 104
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "worker 1 (shared): finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (exclusive): order it got in, flag": "0000000100000001",
+    "worker 1 (shared): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "pointer": "worker 1 (shared): done",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "worker 0 (exclusive): join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (exclusive): order it got in, flag": "0000000100000001",
+    "worker 1 (shared): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "variable": "reader holds, writer then reader wait worker 0 (exclusive): handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "reader holds, writer then reader wait worker 0 (exclusive): handle"
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "worker 1 (shared): join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (exclusive): order it got in, flag": "0000000100000001",
+    "worker 1 (shared): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "variable": "reader holds, writer then reader wait worker 1 (shared): handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "reader holds, writer then reader wait worker 1 (shared): handle"
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "the lock is free at the end",
+   "export": "ExTryToAcquireReadWriteLockExclusive",
+   "r3": "0000000000000001",
+   "capture": {
+    "reader holds, writer then reader wait: lock[:0x10]": "00000000000000000000000000000000",
+    "reader holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "reader holds, writer then reader wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "reader holds, writer then reader wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, writer then reader wait",
+   "name": "ExReleaseReadWriteLock",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "reader holds, writer then reader wait: lock[:0x10]": "ffffffff000000000000000000000000",
+    "reader holds, writer then reader wait: lock+0x14[:0x4]": "00000000",
+    "reader holds, writer then reader wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "reader holds, writer then reader wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "ExInitializeReadWriteLock",
+   "export": "ExInitializeReadWriteLock",
+   "args": [
+    {
+     "pointer": "reader holds, two readers join: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "main acquires shared",
+   "export": "ExAcquireReadWriteLockShared",
+   "capture": {
+    "reader holds, two readers join: lock[:0x10]": "00000000000000000000000000000001",
+    "reader holds, two readers join: lock+0x14[:0x4]": "00000000",
+    "reader holds, two readers join: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "reader holds, two readers join: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): done",
+     "offset": 104
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "worker 0 (shared): create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): handle",
+     "offset": 128
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "reader holds, two readers join worker 0 (shared)"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "worker 0 (shared): started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "worker 0 (shared): let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "reader holds, two readers join: lock[:0x10]": "00000001000000000000000000000002",
+    "reader holds, two readers join: lock+0x14[:0x4]": "00000000",
+    "reader holds, two readers join: lock+0x24[:0x4]": "00000000",
+    "worker 0 (shared): order it got in, flag": "0000000100000001",
+    "worker 1 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): attempting",
+     "offset": 136
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): done",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "worker 1 (shared): create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): handle",
+     "offset": 176
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "reader holds, two readers join worker 1 (shared)"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "worker 1 (shared): started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): attempting",
+     "offset": 136
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "worker 1 (shared): let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "reader holds, two readers join: lock[:0x10]": "00000002000000000000000000000003",
+    "reader holds, two readers join: lock+0x14[:0x4]": "00000000",
+    "reader holds, two readers join: lock+0x24[:0x4]": "00000000",
+    "worker 0 (shared): order it got in, flag": "0000000100000001",
+    "worker 1 (shared): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "main releases",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "reader holds, two readers join: lock[:0x10]": "00000001000000000000000000000002",
+    "reader holds, two readers join: lock+0x14[:0x4]": "00000000",
+    "reader holds, two readers join: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "reader holds, two readers join: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "worker 0 (shared): finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000100000001",
+    "worker 1 (shared): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "pointer": "worker 0 (shared): done",
+     "offset": 104
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "worker 1 (shared): finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000100000001",
+    "worker 1 (shared): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "pointer": "worker 1 (shared): done",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "worker 0 (shared): join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000100000001",
+    "worker 1 (shared): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "variable": "reader holds, two readers join worker 0 (shared): handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "reader holds, two readers join worker 0 (shared): handle"
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "worker 1 (shared): join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000100000001",
+    "worker 1 (shared): order it got in, flag": "0000000200000001"
+   },
+   "args": [
+    {
+     "variable": "reader holds, two readers join worker 1 (shared): handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "reader holds, two readers join worker 1 (shared): handle"
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "the lock is free at the end",
+   "export": "ExTryToAcquireReadWriteLockExclusive",
+   "r3": "0000000000000001",
+   "capture": {
+    "reader holds, two readers join: lock[:0x10]": "00000000000000000000000000000000",
+    "reader holds, two readers join: lock+0x14[:0x4]": "00000000",
+    "reader holds, two readers join: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "reader holds, two readers join: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, reader holds, two readers join",
+   "name": "ExReleaseReadWriteLock",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "reader holds, two readers join: lock[:0x10]": "ffffffff000000000000000000000000",
+    "reader holds, two readers join: lock+0x14[:0x4]": "00000000",
+    "reader holds, two readers join: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "reader holds, two readers join: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "ExInitializeReadWriteLock",
+   "export": "ExInitializeReadWriteLock",
+   "args": [
+    {
+     "pointer": "writer holds, two readers wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "main acquires exclusive",
+   "export": "ExAcquireReadWriteLockExclusive",
+   "capture": {
+    "writer holds, two readers wait: lock[:0x10]": "00000000000000000000000000000000",
+    "writer holds, two readers wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, two readers wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, two readers wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): done",
+     "offset": 104
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "worker 0 (shared): create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): handle",
+     "offset": 128
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "writer holds, two readers wait worker 0 (shared)"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "worker 0 (shared): started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 0 (shared): attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "worker 0 (shared): let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "writer holds, two readers wait: lock[:0x10]": "00000001000000000000000100000000",
+    "writer holds, two readers wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, two readers wait: lock+0x24[:0x4]": "00000000",
+    "worker 0 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd",
+    "worker 1 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): attempting",
+     "offset": 136
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): done",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "worker 1 (shared): create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): handle",
+     "offset": 176
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "writer holds, two readers wait worker 1 (shared)"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "worker 1 (shared): started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker 1 (shared): attempting",
+     "offset": 136
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "worker 1 (shared): let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "writer holds, two readers wait: lock[:0x10]": "00000002000000000000000200000000",
+    "writer holds, two readers wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, two readers wait: lock+0x24[:0x4]": "00000000",
+    "worker 0 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd",
+    "worker 1 (shared): order it got in, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "main releases",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "writer holds, two readers wait: lock[:0x10]": "00000001000000000000000000000002",
+    "writer holds, two readers wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, two readers wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, two readers wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "worker 0 (shared): finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000200000001",
+    "worker 1 (shared): order it got in, flag": "0000000100000001"
+   },
+   "args": [
+    {
+     "pointer": "worker 0 (shared): done",
+     "offset": 104
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "worker 1 (shared): finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000200000001",
+    "worker 1 (shared): order it got in, flag": "0000000100000001"
+   },
+   "args": [
+    {
+     "pointer": "worker 1 (shared): done",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "worker 0 (shared): join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000200000001",
+    "worker 1 (shared): order it got in, flag": "0000000100000001"
+   },
+   "args": [
+    {
+     "variable": "writer holds, two readers wait worker 0 (shared): handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "writer holds, two readers wait worker 0 (shared): handle"
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "worker 1 (shared): join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker 0 (shared): order it got in, flag": "0000000200000001",
+    "worker 1 (shared): order it got in, flag": "0000000100000001"
+   },
+   "args": [
+    {
+     "variable": "writer holds, two readers wait worker 1 (shared): handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3000 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "writer holds, two readers wait worker 1 (shared): handle"
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "the lock is free at the end",
+   "export": "ExTryToAcquireReadWriteLockExclusive",
+   "r3": "0000000000000001",
+   "capture": {
+    "writer holds, two readers wait: lock[:0x10]": "00000000000000000000000000000000",
+    "writer holds, two readers wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, two readers wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, two readers wait: lock",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "read-write lock, writer holds, two readers wait",
+   "name": "ExReleaseReadWriteLock",
+   "export": "ExReleaseReadWriteLock",
+   "capture": {
+    "writer holds, two readers wait: lock[:0x10]": "ffffffff000000000000000000000000",
+    "writer holds, two readers wait: lock+0x14[:0x4]": "00000000",
+    "writer holds, two readers wait: lock+0x24[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "writer holds, two readers wait: lock",
+     "offset": 0
+    }
+   ]
+  }
+ ]
+}
