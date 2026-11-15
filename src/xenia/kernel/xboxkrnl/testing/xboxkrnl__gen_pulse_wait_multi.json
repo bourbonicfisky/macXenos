@@ -1,0 +1,3474 @@
+{
+ "corpus": "pulse_wait_multi",
+ "source": "Physical Xbox 360 (Aurora, XBDM), 2026-11-15, bundle 97c30bac9d5178ae; two runs identical; evidence xbox-hardware-2026-11-15/pulse_wait_multi",
+ "steps": [
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, any: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, any: done",
+     "offset": 168
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, any: pulsed event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, any: other event",
+     "offset": 16
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, any: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 0, any: worker handle",
+     "offset": 192
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Ke event type 0, any: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, any: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 0, any: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, any: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, any: 100 ms",
+     "offset": 208
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, any: pulse",
+   "export": "KePulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 0, any: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 0, any: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, any: pulsed event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, any: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 0, any: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, any: done",
+     "offset": 168
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, any: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 0, any: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "Ke event type 0, any: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Ke event type 0, any: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, any: the pulsed event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 0, any: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 0, any: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, any: pulsed event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, any: 0 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, any: the other event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 0, any: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 0, any: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, any: other event",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, any: 0 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other set: attempting",
+     "offset": 384
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other set: done",
+     "offset": 400
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other set: pulsed event",
+     "offset": 232
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other set: other event",
+     "offset": 248
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other set: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other set: worker handle",
+     "offset": 424
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Ke event type 0, all, other set: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other set: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other set: attempting",
+     "offset": 384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other set: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other set: 100 ms",
+     "offset": 440
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other set: pulse",
+   "export": "KePulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 0, all, other set: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 0, all, other set: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other set: pulsed event",
+     "offset": 232
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other set: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 0, all, other set: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other set: done",
+     "offset": 400
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other set: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 0, all, other set: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "Ke event type 0, all, other set: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Ke event type 0, all, other set: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other set: the pulsed event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 0, all, other set: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 0, all, other set: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other set: pulsed event",
+     "offset": 232
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other set: 0 ms",
+     "offset": 432
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other set: the other event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 0, all, other set: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 0, all, other set: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other set: other event",
+     "offset": 248
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other set: 0 ms",
+     "offset": 432
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other clear: attempting",
+     "offset": 616
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other clear: done",
+     "offset": 632
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other clear: pulsed event",
+     "offset": 464
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other clear: other event",
+     "offset": 480
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other clear: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other clear: worker handle",
+     "offset": 656
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Ke event type 0, all, other clear: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other clear: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other clear: attempting",
+     "offset": 616
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other clear: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other clear: 100 ms",
+     "offset": 672
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other clear: pulse",
+   "export": "KePulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 0, all, other clear: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 0, all, other clear: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other clear: pulsed event",
+     "offset": 464
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other clear: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 0, all, other clear: worker wait status, flag": "0000010200000001"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other clear: done",
+     "offset": 632
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other clear: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 0, all, other clear: worker wait status, flag": "0000010200000001"
+   },
+   "args": [
+    {
+     "variable": "Ke event type 0, all, other clear: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Ke event type 0, all, other clear: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other clear: the pulsed event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 0, all, other clear: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 0, all, other clear: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other clear: pulsed event",
+     "offset": 464
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other clear: 0 ms",
+     "offset": 664
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 0",
+   "name": "Ke event type 0, all, other clear: the other event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 0, all, other clear: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 0, all, other clear: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 0, all, other clear: other event",
+     "offset": 480
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 0, all, other clear: 0 ms",
+     "offset": 664
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, any: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, any: done",
+     "offset": 168
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, any: pulsed event",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, any: other event",
+     "offset": 16
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, any: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 1, any: worker handle",
+     "offset": 192
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Ke event type 1, any: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, any: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 1, any: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, any: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, any: 100 ms",
+     "offset": 208
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, any: pulse",
+   "export": "KePulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 1, any: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 1, any: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, any: pulsed event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, any: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 1, any: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, any: done",
+     "offset": 168
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, any: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 1, any: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "Ke event type 1, any: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Ke event type 1, any: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, any: the pulsed event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 1, any: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 1, any: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, any: pulsed event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, any: 0 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, any: the other event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 1, any: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 1, any: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, any: other event",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, any: 0 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other set: attempting",
+     "offset": 384
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other set: done",
+     "offset": 400
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other set: pulsed event",
+     "offset": 232
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other set: other event",
+     "offset": 248
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other set: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other set: worker handle",
+     "offset": 424
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Ke event type 1, all, other set: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other set: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other set: attempting",
+     "offset": 384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other set: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other set: 100 ms",
+     "offset": 440
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other set: pulse",
+   "export": "KePulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 1, all, other set: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 1, all, other set: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other set: pulsed event",
+     "offset": 232
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other set: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 1, all, other set: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other set: done",
+     "offset": 400
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other set: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 1, all, other set: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "Ke event type 1, all, other set: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Ke event type 1, all, other set: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other set: the pulsed event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 1, all, other set: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 1, all, other set: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other set: pulsed event",
+     "offset": 232
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other set: 0 ms",
+     "offset": 432
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other set: the other event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 1, all, other set: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 1, all, other set: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other set: other event",
+     "offset": 248
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other set: 0 ms",
+     "offset": 432
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other clear: attempting",
+     "offset": 616
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other clear: done",
+     "offset": 632
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other clear: pulsed event",
+     "offset": 464
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other clear: other event",
+     "offset": 480
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other clear: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other clear: worker handle",
+     "offset": 656
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Ke event type 1, all, other clear: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other clear: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other clear: attempting",
+     "offset": 616
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other clear: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other clear: 100 ms",
+     "offset": 672
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other clear: pulse",
+   "export": "KePulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 1, all, other clear: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 1, all, other clear: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other clear: pulsed event",
+     "offset": 464
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other clear: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 1, all, other clear: worker wait status, flag": "0000010200000001"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other clear: done",
+     "offset": 632
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other clear: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Ke event type 1, all, other clear: worker wait status, flag": "0000010200000001"
+   },
+   "args": [
+    {
+     "variable": "Ke event type 1, all, other clear: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Ke event type 1, all, other clear: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other clear: the pulsed event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 1, all, other clear: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 1, all, other clear: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other clear: pulsed event",
+     "offset": 464
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other clear: 0 ms",
+     "offset": 664
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Ke event type 1",
+   "name": "Ke event type 1, all, other clear: the other event afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "Ke event type 1, all, other clear: pulsed event+0x4[:0x4]": "00000000",
+    "Ke event type 1, all, other clear: other event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "Ke event type 1, all, other clear: other event",
+     "offset": 480
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Ke event type 1, all, other clear: 0 ms",
+     "offset": 664
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 0, any: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 0, any: done",
+     "offset": 168
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, any: handle array[:0x4]",
+     "offset": 40
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, any: handle array+0x4[:0x4]",
+     "offset": 44
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, any: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, any: worker handle",
+     "offset": 192
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Nt event type 0, any: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, any: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, any: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, any: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, any: 100 ms",
+     "offset": 208
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, any: pulse",
+   "export": "NtPulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 0, any: previous state": "00000000"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 0, any: pulsed handle"
+    },
+    {
+     "pointer": "Nt event type 0, any: previous state",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, any: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 0, any: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "Nt event type 0, any: done",
+     "offset": 168
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, any: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 0, any: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 0, any: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 0, any: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, any: the pulsed event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 0, any: pulsed handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, any: 0 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, any: the other event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 0, any: other handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, any: 0 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 0, any: pulsed handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 0, any: other handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other set: attempting",
+     "offset": 384
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other set: done",
+     "offset": 400
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other set: handle array[:0x4]",
+     "offset": 272
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other set: handle array+0x4[:0x4]",
+     "offset": 276
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other set: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other set: worker handle",
+     "offset": 424
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Nt event type 0, all, other set: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other set: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other set: attempting",
+     "offset": 384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other set: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other set: 100 ms",
+     "offset": 440
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other set: pulse",
+   "export": "NtPulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 0, all, other set: previous state": "00000000"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other set: pulsed handle"
+    },
+    {
+     "pointer": "Nt event type 0, all, other set: previous state",
+     "offset": 280
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other set: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 0, all, other set: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other set: done",
+     "offset": 400
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other set: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 0, all, other set: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other set: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other set: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other set: the pulsed event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other set: pulsed handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other set: 0 ms",
+     "offset": 432
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other set: the other event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other set: other handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other set: 0 ms",
+     "offset": 432
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other set: pulsed handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other set: other handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other clear: attempting",
+     "offset": 616
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other clear: done",
+     "offset": 632
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other clear: handle array[:0x4]",
+     "offset": 504
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other clear: handle array+0x4[:0x4]",
+     "offset": 508
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other clear: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other clear: worker handle",
+     "offset": 656
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Nt event type 0, all, other clear: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other clear: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other clear: attempting",
+     "offset": 616
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other clear: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other clear: 100 ms",
+     "offset": 672
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other clear: pulse",
+   "export": "NtPulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 0, all, other clear: previous state": "00000000"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other clear: pulsed handle"
+    },
+    {
+     "pointer": "Nt event type 0, all, other clear: previous state",
+     "offset": 512
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other clear: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 0, all, other clear: worker wait status, flag": "0000010200000001"
+   },
+   "args": [
+    {
+     "pointer": "Nt event type 0, all, other clear: done",
+     "offset": 632
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other clear: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 0, all, other clear: worker wait status, flag": "0000010200000001"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other clear: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other clear: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other clear: the pulsed event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other clear: pulsed handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other clear: 0 ms",
+     "offset": 664
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "Nt event type 0, all, other clear: the other event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other clear: other handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 0, all, other clear: 0 ms",
+     "offset": 664
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other clear: pulsed handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 0, all, other clear: other handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 1, any: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 1, any: done",
+     "offset": 168
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, any: handle array[:0x4]",
+     "offset": 40
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, any: handle array+0x4[:0x4]",
+     "offset": 44
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, any: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, any: worker handle",
+     "offset": 192
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Nt event type 1, any: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, any: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, any: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, any: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, any: 100 ms",
+     "offset": 208
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, any: pulse",
+   "export": "NtPulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 1, any: previous state": "00000000"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 1, any: pulsed handle"
+    },
+    {
+     "pointer": "Nt event type 1, any: previous state",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, any: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 1, any: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "Nt event type 1, any: done",
+     "offset": 168
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, any: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 1, any: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 1, any: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, any: 5000 ms",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 1, any: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, any: the pulsed event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 1, any: pulsed handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, any: 0 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, any: the other event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 1, any: other handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, any: 0 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 1, any: pulsed handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 1, any: other handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other set: attempting",
+     "offset": 384
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other set: done",
+     "offset": 400
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other set: handle array[:0x4]",
+     "offset": 272
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other set: handle array+0x4[:0x4]",
+     "offset": 276
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other set: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other set: worker handle",
+     "offset": 424
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Nt event type 1, all, other set: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other set: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other set: attempting",
+     "offset": 384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other set: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other set: 100 ms",
+     "offset": 440
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other set: pulse",
+   "export": "NtPulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 1, all, other set: previous state": "00000000"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other set: pulsed handle"
+    },
+    {
+     "pointer": "Nt event type 1, all, other set: previous state",
+     "offset": 280
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other set: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 1, all, other set: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other set: done",
+     "offset": 400
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other set: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 1, all, other set: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other set: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other set: 5000 ms",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other set: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other set: the pulsed event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other set: pulsed handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other set: 0 ms",
+     "offset": 432
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other set: the other event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other set: other handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other set: 0 ms",
+     "offset": 432
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other set: pulsed handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other set: other handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other clear: attempting",
+     "offset": 616
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other clear: done",
+     "offset": 632
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other clear: handle array[:0x4]",
+     "offset": 504
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other clear: handle array+0x4[:0x4]",
+     "offset": 508
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other clear: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other clear: worker handle",
+     "offset": 656
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "Nt event type 1, all, other clear: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other clear: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other clear: attempting",
+     "offset": 616
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other clear: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other clear: 100 ms",
+     "offset": 672
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other clear: pulse",
+   "export": "NtPulseEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 1, all, other clear: previous state": "00000000"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other clear: pulsed handle"
+    },
+    {
+     "pointer": "Nt event type 1, all, other clear: previous state",
+     "offset": 512
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other clear: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 1, all, other clear: worker wait status, flag": "0000010200000001"
+   },
+   "args": [
+    {
+     "pointer": "Nt event type 1, all, other clear: done",
+     "offset": 632
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other clear: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "Nt event type 1, all, other clear: worker wait status, flag": "0000010200000001"
+   },
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other clear: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other clear: 5000 ms",
+     "offset": 688
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other clear: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other clear: the pulsed event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other clear: pulsed handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other clear: 0 ms",
+     "offset": 664
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "Nt event type 1, all, other clear: the other event afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other clear: other handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "Nt event type 1, all, other clear: 0 ms",
+     "offset": 664
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other clear: pulsed handle"
+    }
+   ]
+  },
+  {
+   "scenario": "pulse through a multiple wait, Nt event type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "Nt event type 1, all, other clear: other handle"
+    }
+   ]
+  }
+ ]
+}

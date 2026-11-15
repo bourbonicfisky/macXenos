@@ -1,0 +1,807 @@
+{
+ "corpus": "nt_close_waited",
+ "source": "Physical Xbox 360 (Aurora, XBDM), 2026-11-15, bundle c13796b38f64450c; two runs identical; evidence xbox-hardware-2026-11-15/nt_close_waited",
+ "steps": [
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event with a duplicate: attempting",
+     "offset": 24
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event with a duplicate: done",
+     "offset": 40
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event with a duplicate: handle",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: duplicate",
+   "export": "NtDuplicateObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "event with a duplicate: handle"
+    },
+    {
+     "pointer": "event with a duplicate: copy handle",
+     "offset": 8
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event with a duplicate: worker handle",
+     "offset": 64
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "event with a duplicate: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event with a duplicate: attempting",
+     "offset": 24
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "event with a duplicate: 5000 ms",
+     "offset": 96
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "event with a duplicate: 100 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: close the handle being waited on",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "event with a duplicate: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: the worker is still waiting",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "event with a duplicate: worker wait status, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "event with a duplicate: done",
+     "offset": 40
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "event with a duplicate: 100 ms",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: set through the copy",
+   "export": "NtSetEvent",
+   "r3": "0000000000000000",
+   "capture": {
+    "event with a duplicate: previous state": "00000000"
+   },
+   "args": [
+    {
+     "variable": "event with a duplicate: copy handle"
+    },
+    {
+     "pointer": "event with a duplicate: previous state",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "event with a duplicate: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "event with a duplicate: done",
+     "offset": 40
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "event with a duplicate: 5000 ms",
+     "offset": 96
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "event with a duplicate: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "event with a duplicate: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "event with a duplicate: 5000 ms",
+     "offset": 96
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "event with a duplicate: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: nothing is left on the object",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "event with a duplicate: copy handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "event with a duplicate: 0 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with a duplicate: close the copy",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "event with a duplicate: copy handle"
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "semaphore with a duplicate: attempting",
+     "offset": 128
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "semaphore with a duplicate: done",
+     "offset": 144
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "NtCreateSemaphore",
+   "export": "NtCreateSemaphore",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore with a duplicate: handle",
+     "offset": 104
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 2
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: duplicate",
+   "export": "NtDuplicateObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "semaphore with a duplicate: handle"
+    },
+    {
+     "pointer": "semaphore with a duplicate: copy handle",
+     "offset": 112
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore with a duplicate: worker handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "semaphore with a duplicate: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore with a duplicate: attempting",
+     "offset": 128
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "semaphore with a duplicate: 5000 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "semaphore with a duplicate: 100 ms",
+     "offset": 184
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: close the handle being waited on",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "semaphore with a duplicate: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: the worker is still waiting",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "semaphore with a duplicate: worker wait status, flag": "cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "semaphore with a duplicate: done",
+     "offset": 144
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "semaphore with a duplicate: 100 ms",
+     "offset": 184
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: release through the copy",
+   "export": "NtReleaseSemaphore",
+   "r3": "0000000000000000",
+   "capture": {
+    "semaphore with a duplicate: previous state": "00000000"
+   },
+   "args": [
+    {
+     "variable": "semaphore with a duplicate: copy handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "semaphore with a duplicate: previous state",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "semaphore with a duplicate: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "semaphore with a duplicate: done",
+     "offset": 144
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "semaphore with a duplicate: 5000 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "semaphore with a duplicate: worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "semaphore with a duplicate: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "semaphore with a duplicate: 5000 ms",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "semaphore with a duplicate: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: nothing is left on the object",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "semaphore with a duplicate: copy handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "semaphore with a duplicate: 0 ms",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "semaphore with a duplicate: close the copy",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "semaphore with a duplicate: copy handle"
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event with no other handle: attempting",
+     "offset": 232
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event with no other handle: done",
+     "offset": 248
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event with no other handle: handle",
+     "offset": 208
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with no other handle: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event with no other handle: worker handle",
+     "offset": 272
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "event with no other handle: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with no other handle: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event with no other handle: attempting",
+     "offset": 232
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "event with no other handle: 5000 ms",
+     "offset": 304
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with no other handle: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "event with no other handle: 100 ms",
+     "offset": 288
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with no other handle: close the handle being waited on",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "event with no other handle: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with no other handle: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "event with no other handle: worker wait status, flag": "0000010200000001"
+   },
+   "args": [
+    {
+     "pointer": "event with no other handle: done",
+     "offset": 248
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "event with no other handle: 5000 ms",
+     "offset": 304
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "event with no other handle: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "event with no other handle: worker wait status, flag": "0000010200000001"
+   },
+   "args": [
+    {
+     "variable": "event with no other handle: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "event with no other handle: 5000 ms",
+     "offset": 304
+    }
+   ]
+  },
+  {
+   "scenario": "close a handle another thread waits on",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "event with no other handle: worker handle"
+    }
+   ]
+  }
+ ]
+}

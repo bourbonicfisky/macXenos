@@ -1,0 +1,502 @@
+{
+ "corpus": "ke_tls",
+ "source": "Physical Xbox 360 (Aurora, XBDM), 2026-11-15, bundle f318ae6acde54e63; two runs identical; evidence xbox-hardware-2026-11-15/ke_tls",
+ "steps": [
+  {
+   "scenario": "TLS slots",
+   "name": "allocate slot 0",
+   "export": "KeTlsAlloc",
+   "r3": "0000000000000000",
+   "args": []
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "allocate slot 1",
+   "export": "KeTlsAlloc",
+   "r3": "0000000000000001",
+   "args": []
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "allocate slot 2",
+   "export": "KeTlsAlloc",
+   "r3": "0000000000000002",
+   "args": []
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 0 when new",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "slot 0"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 1 when new",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "slot 1"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 2 when new",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "slot 2"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "set slot 0",
+   "export": "KeTlsSetValue for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot 0"
+    },
+    {
+     "value": 286326784
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "set slot 1",
+   "export": "KeTlsSetValue for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot 1"
+    },
+    {
+     "value": 286326785
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "set slot 2",
+   "export": "KeTlsSetValue for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot 2"
+    },
+    {
+     "value": 286326786
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 0 after set",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000011110000",
+   "args": [
+    {
+     "variable": "slot 0"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 1 after set",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000011110001",
+   "args": [
+    {
+     "variable": "slot 1"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 2 after set",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000011110002",
+   "args": [
+    {
+     "variable": "slot 2"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "set slot 2 to zero",
+   "export": "KeTlsSetValue for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot 2"
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 2 after zero",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "slot 2"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "set slot 2 to all ones",
+   "export": "KeTlsSetValue for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot 2"
+    },
+    {
+     "value": 4294967295
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 2 after all ones",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "00000000FFFFFFFF",
+   "args": [
+    {
+     "variable": "slot 2"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "attempting",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "done",
+     "offset": 16
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker handle",
+     "offset": 40
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker: get, set result, get for each slot; flag": "00000000000000012222000000000000000000012222000100000000000000012222000200000001"
+   },
+   "args": [
+    {
+     "pointer": "done",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3 s",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "3 s",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 0 on the main thread after the worker wrote it",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000011110000",
+   "args": [
+    {
+     "variable": "slot 0"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 1 on the main thread after the worker wrote it",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000011110001",
+   "args": [
+    {
+     "variable": "slot 1"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 2 on the main thread after the worker wrote it",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "00000000FFFFFFFF",
+   "args": [
+    {
+     "variable": "slot 2"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "free slot 1",
+   "export": "KeTlsFree for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot 1"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 1 read after the free",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "slot 1"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "free slot 1 a second time",
+   "export": "KeTlsFree for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot 1"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "allocate after the free",
+   "export": "KeTlsAlloc",
+   "r3": "0000000000000001",
+   "args": []
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "the reused slot when new",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "slot allocated after the free"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "set the reused slot",
+   "export": "KeTlsSetValue for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot allocated after the free"
+    },
+    {
+     "value": 858980352
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "the reused slot after set",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000033330000",
+   "args": [
+    {
+     "variable": "slot allocated after the free"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 0 is untouched",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000011110000",
+   "args": [
+    {
+     "variable": "slot 0"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "allocate until refused, then free",
+   "export": "allocate every slot, then free them",
+   "r3": "0000000000000000",
+   "capture": {
+    "exhaust: allocated, frees that returned nonzero, first refused result": "0000003d0000003dffffffff",
+    "indices the exhaust loop was given": "000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c0000000d0000000e0000000f000000100000001100000012000000130000001400000015000000160000001700000018000000190000001a0000001b0000001c0000001d0000001e0000001f000000200000002100000022000000230000002400000025000000260000002700000028000000290000002a0000002b0000002c0000002d0000002e0000002f000000300000003100000032000000330000003400000035000000360000003700000038000000390000003a0000003b0000003c0000003d0000003e0000003fcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": []
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "slot 0 after the exhaust loop",
+   "export": "KeTlsGetValue for a valid index",
+   "r3": "0000000011110000",
+   "args": [
+    {
+     "variable": "slot 0"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "allocate one more after the loop",
+   "export": "KeTlsAlloc",
+   "r3": "0000000000000003",
+   "args": []
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "free it",
+   "export": "KeTlsFree for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot 1"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "free slot 0",
+   "export": "KeTlsFree for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot 0"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "free the reused slot",
+   "export": "KeTlsFree for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot allocated after the free"
+    }
+   ]
+  },
+  {
+   "scenario": "TLS slots",
+   "name": "free slot 2",
+   "export": "KeTlsFree for a valid index",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "slot 2"
+    }
+   ]
+  }
+ ]
+}

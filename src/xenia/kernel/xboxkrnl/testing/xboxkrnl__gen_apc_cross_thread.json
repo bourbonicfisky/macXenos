@@ -1,0 +1,2172 @@
+{
+ "corpus": "apc_cross_thread",
+ "source": "Physical Xbox 360 (Aurora, XBDM), 2026-11-15, bundle 99ab4d273d6afd9e; two runs identical; evidence xbox-hardware-2026-11-15/apc_cross_thread",
+ "steps": [
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, user alertable: attempting",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, user alertable: done",
+     "offset": 16
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, user alertable: gate",
+     "offset": 32
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, user alertable: first event",
+     "offset": 56
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, user alertable: second event",
+     "offset": 72
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, user alertable: event handle",
+     "offset": 48
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "handle wait, user alertable: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, user alertable: worker handle",
+     "offset": 232
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "handle wait, user alertable: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "handle wait, user alertable: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, user alertable: attempting",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, user alertable: 5000 ms",
+     "offset": 256
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "handle wait, user alertable: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, user alertable: 100 ms",
+     "offset": 240
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "handle wait, user alertable: queue APC 0",
+   "export": "NtQueueApcThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "handle wait, user alertable: worker: each wait status, gate, flag": "cdcdcdcdcdcdcdcdcdcdcdcd",
+    "handle wait, user alertable: APC count, IRQL, context of each call": "000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "handle wait, user alertable: worker handle"
+    },
+    {
+     "routine": "handle wait, user alertable: APC routine"
+    },
+    {
+     "value": 1358954496
+    },
+    {
+     "value": 1627389952
+    },
+    {
+     "value": 1895825408
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "handle wait, user alertable: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "handle wait, user alertable: worker: each wait status, gate, flag": "000000c0cdcdcdcd00000001",
+    "handle wait, user alertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "pointer": "handle wait, user alertable: done",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, user alertable: 5000 ms",
+     "offset": 256
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "handle wait, user alertable: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "handle wait, user alertable: worker: each wait status, gate, flag": "000000c0cdcdcdcd00000001",
+    "handle wait, user alertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "handle wait, user alertable: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, user alertable: 5000 ms",
+     "offset": 256
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "handle wait, user alertable: the set event of the pair afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, user alertable: first event",
+     "offset": 56
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, user alertable: 20 ms",
+     "offset": 248
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, user alertable: attempting",
+     "offset": 280
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, user alertable: done",
+     "offset": 296
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, user alertable: gate",
+     "offset": 312
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, user alertable: first event",
+     "offset": 336
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, user alertable: second event",
+     "offset": 352
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, user alertable: event handle",
+     "offset": 328
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "WaitAll half ready, user alertable: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, user alertable: worker handle",
+     "offset": 512
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "WaitAll half ready, user alertable: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "WaitAll half ready, user alertable: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, user alertable: attempting",
+     "offset": 280
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "WaitAll half ready, user alertable: 5000 ms",
+     "offset": 536
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "WaitAll half ready, user alertable: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "WaitAll half ready, user alertable: 100 ms",
+     "offset": 520
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "WaitAll half ready, user alertable: queue APC 0",
+   "export": "NtQueueApcThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "WaitAll half ready, user alertable: worker: each wait status, gate, flag": "cdcdcdcdcdcdcdcdcdcdcdcd",
+    "WaitAll half ready, user alertable: APC count, IRQL, context of each call": "000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "WaitAll half ready, user alertable: worker handle"
+    },
+    {
+     "routine": "WaitAll half ready, user alertable: APC routine"
+    },
+    {
+     "value": 1358954496
+    },
+    {
+     "value": 1627389952
+    },
+    {
+     "value": 1895825408
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "WaitAll half ready, user alertable: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "WaitAll half ready, user alertable: worker: each wait status, gate, flag": "000000c0cdcdcdcd00000001",
+    "WaitAll half ready, user alertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "pointer": "WaitAll half ready, user alertable: done",
+     "offset": 296
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "WaitAll half ready, user alertable: 5000 ms",
+     "offset": 536
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "WaitAll half ready, user alertable: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "WaitAll half ready, user alertable: worker: each wait status, gate, flag": "000000c0cdcdcdcd00000001",
+    "WaitAll half ready, user alertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "WaitAll half ready, user alertable: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "WaitAll half ready, user alertable: 5000 ms",
+     "offset": 536
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "WaitAll half ready, user alertable: the set event of the pair afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, user alertable: first event",
+     "offset": 336
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "WaitAll half ready, user alertable: 20 ms",
+     "offset": 528
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "delay, user alertable: attempting",
+     "offset": 560
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "delay, user alertable: done",
+     "offset": 576
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "delay, user alertable: gate",
+     "offset": 592
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "delay, user alertable: first event",
+     "offset": 616
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "delay, user alertable: second event",
+     "offset": 632
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "delay, user alertable: event handle",
+     "offset": 608
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "delay, user alertable: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "delay, user alertable: worker handle",
+     "offset": 792
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "delay, user alertable: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "delay, user alertable: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "delay, user alertable: attempting",
+     "offset": 560
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "delay, user alertable: 5000 ms",
+     "offset": 816
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "delay, user alertable: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "delay, user alertable: 100 ms",
+     "offset": 800
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "delay, user alertable: queue APC 0",
+   "export": "NtQueueApcThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "delay, user alertable: worker: each wait status, gate, flag": "cdcdcdcdcdcdcdcdcdcdcdcd",
+    "delay, user alertable: APC count, IRQL, context of each call": "000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "delay, user alertable: worker handle"
+    },
+    {
+     "routine": "delay, user alertable: APC routine"
+    },
+    {
+     "value": 1358954496
+    },
+    {
+     "value": 1627389952
+    },
+    {
+     "value": 1895825408
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "delay, user alertable: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "delay, user alertable: worker: each wait status, gate, flag": "000000c0cdcdcdcd00000001",
+    "delay, user alertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "pointer": "delay, user alertable: done",
+     "offset": 576
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "delay, user alertable: 5000 ms",
+     "offset": 816
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "delay, user alertable: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "delay, user alertable: worker: each wait status, gate, flag": "000000c0cdcdcdcd00000001",
+    "delay, user alertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "delay, user alertable: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "delay, user alertable: 5000 ms",
+     "offset": 816
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "delay, user alertable: the set event of the pair afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "delay, user alertable: first event",
+     "offset": 616
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "delay, user alertable: 20 ms",
+     "offset": 808
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "handle wait, user alertable: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "WaitAll half ready, user alertable: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a waiting worker",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "delay, user alertable: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, user nonalertable: attempting",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, user nonalertable: done",
+     "offset": 16
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, user nonalertable: gate",
+     "offset": 32
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, user nonalertable: first event",
+     "offset": 56
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, user nonalertable: second event",
+     "offset": 72
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, user nonalertable: event handle",
+     "offset": 48
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, user nonalertable: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, user nonalertable: worker handle",
+     "offset": 240
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "handle wait, user nonalertable: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, user nonalertable: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, user nonalertable: attempting",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, user nonalertable: 5000 ms",
+     "offset": 264
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, user nonalertable: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, user nonalertable: 100 ms",
+     "offset": 248
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, user nonalertable: queue APC 0",
+   "export": "NtQueueApcThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "handle wait, user nonalertable: worker: each wait status, gate, flag": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "handle wait, user nonalertable: APC count, IRQL, context of each call": "000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "handle wait, user nonalertable: worker handle"
+    },
+    {
+     "routine": "handle wait, user nonalertable: APC routine"
+    },
+    {
+     "value": 1358954496
+    },
+    {
+     "value": 1627389952
+    },
+    {
+     "value": 1895825408
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, user nonalertable: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "handle wait, user nonalertable: worker: each wait status, gate, flag": "00000102000000c000000000cdcdcdcd00000001",
+    "handle wait, user nonalertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "pointer": "handle wait, user nonalertable: done",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, user nonalertable: 5000 ms",
+     "offset": 264
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, user nonalertable: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "handle wait, user nonalertable: worker: each wait status, gate, flag": "00000102000000c000000000cdcdcdcd00000001",
+    "handle wait, user nonalertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "handle wait, user nonalertable: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, user nonalertable: 5000 ms",
+     "offset": 264
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, user nonalertable: the set event of the pair afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, user nonalertable: first event",
+     "offset": 56
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, user nonalertable: 20 ms",
+     "offset": 256
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, kernel alertable: attempting",
+     "offset": 304
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, kernel alertable: done",
+     "offset": 320
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, kernel alertable: gate",
+     "offset": 336
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, kernel alertable: first event",
+     "offset": 360
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "handle wait, kernel alertable: second event",
+     "offset": 376
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, kernel alertable: event handle",
+     "offset": 352
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, kernel alertable: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, kernel alertable: worker handle",
+     "offset": 544
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "handle wait, kernel alertable: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, kernel alertable: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, kernel alertable: attempting",
+     "offset": 304
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, kernel alertable: 5000 ms",
+     "offset": 568
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, kernel alertable: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, kernel alertable: 100 ms",
+     "offset": 552
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, kernel alertable: queue APC 0",
+   "export": "NtQueueApcThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "handle wait, kernel alertable: worker: each wait status, gate, flag": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "handle wait, kernel alertable: APC count, IRQL, context of each call": "000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "handle wait, kernel alertable: worker handle"
+    },
+    {
+     "routine": "handle wait, kernel alertable: APC routine"
+    },
+    {
+     "value": 1358954496
+    },
+    {
+     "value": 1627389952
+    },
+    {
+     "value": 1895825408
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, kernel alertable: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "handle wait, kernel alertable: worker: each wait status, gate, flag": "00000102000000c000000000cdcdcdcd00000001",
+    "handle wait, kernel alertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "pointer": "handle wait, kernel alertable: done",
+     "offset": 320
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, kernel alertable: 5000 ms",
+     "offset": 568
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, kernel alertable: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "handle wait, kernel alertable: worker: each wait status, gate, flag": "00000102000000c000000000cdcdcdcd00000001",
+    "handle wait, kernel alertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "handle wait, kernel alertable: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, kernel alertable: 5000 ms",
+     "offset": 568
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "handle wait, kernel alertable: the set event of the pair afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "handle wait, kernel alertable: first event",
+     "offset": 360
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "handle wait, kernel alertable: 20 ms",
+     "offset": 560
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, kernel alertable: attempting",
+     "offset": 608
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, kernel alertable: done",
+     "offset": 624
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, kernel alertable: gate",
+     "offset": 640
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, kernel alertable: first event",
+     "offset": 664
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, kernel alertable: second event",
+     "offset": 680
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, kernel alertable: event handle",
+     "offset": 656
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "WaitAll half ready, kernel alertable: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, kernel alertable: worker handle",
+     "offset": 840
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "WaitAll half ready, kernel alertable: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "WaitAll half ready, kernel alertable: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, kernel alertable: attempting",
+     "offset": 608
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "WaitAll half ready, kernel alertable: 5000 ms",
+     "offset": 864
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "WaitAll half ready, kernel alertable: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "WaitAll half ready, kernel alertable: 100 ms",
+     "offset": 848
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "WaitAll half ready, kernel alertable: queue APC 0",
+   "export": "NtQueueApcThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "WaitAll half ready, kernel alertable: worker: each wait status, gate, flag": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "WaitAll half ready, kernel alertable: APC count, IRQL, context of each call": "000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "WaitAll half ready, kernel alertable: worker handle"
+    },
+    {
+     "routine": "WaitAll half ready, kernel alertable: APC routine"
+    },
+    {
+     "value": 1358954496
+    },
+    {
+     "value": 1627389952
+    },
+    {
+     "value": 1895825408
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "WaitAll half ready, kernel alertable: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "WaitAll half ready, kernel alertable: worker: each wait status, gate, flag": "00000102000000c0cdcdcdcd00000001",
+    "WaitAll half ready, kernel alertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "pointer": "WaitAll half ready, kernel alertable: done",
+     "offset": 624
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "WaitAll half ready, kernel alertable: 5000 ms",
+     "offset": 864
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "WaitAll half ready, kernel alertable: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "WaitAll half ready, kernel alertable: worker: each wait status, gate, flag": "00000102000000c0cdcdcdcd00000001",
+    "WaitAll half ready, kernel alertable: APC count, IRQL, context of each call": "000000010000000051000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "WaitAll half ready, kernel alertable: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "WaitAll half ready, kernel alertable: 5000 ms",
+     "offset": 864
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "WaitAll half ready, kernel alertable: the set event of the pair afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "WaitAll half ready, kernel alertable: first event",
+     "offset": 664
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "WaitAll half ready, kernel alertable: 20 ms",
+     "offset": 856
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "handle wait, user nonalertable: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "handle wait, kernel alertable: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "APC to a worker that cannot take it yet",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "WaitAll half ready, kernel alertable: worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: attempting",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: done",
+     "offset": 16
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: gate",
+     "offset": 32
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: first event",
+     "offset": 56
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: second event",
+     "offset": 72
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: event handle",
+     "offset": 48
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "two APCs queued at a gate: create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: worker handle",
+     "offset": 232
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "two APCs queued at a gate: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "two APCs queued at a gate: worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: attempting",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "two APCs queued at a gate: 5000 ms",
+     "offset": 256
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "two APCs queued at a gate: let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "two APCs queued at a gate: 100 ms",
+     "offset": 240
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "two APCs queued at a gate: queue APC 0",
+   "export": "NtQueueApcThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "two APCs queued at a gate: worker: each wait status, gate, flag": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "two APCs queued at a gate: APC count, IRQL, context of each call": "000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "two APCs queued at a gate: worker handle"
+    },
+    {
+     "routine": "two APCs queued at a gate: APC routine"
+    },
+    {
+     "value": 1358954496
+    },
+    {
+     "value": 1627389952
+    },
+    {
+     "value": 1895825408
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "two APCs queued at a gate: queue APC 1",
+   "export": "NtQueueApcThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "two APCs queued at a gate: worker: each wait status, gate, flag": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "two APCs queued at a gate: APC count, IRQL, context of each call": "000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "two APCs queued at a gate: worker handle"
+    },
+    {
+     "routine": "two APCs queued at a gate: APC routine"
+    },
+    {
+     "value": 1358954497
+    },
+    {
+     "value": 1627389953
+    },
+    {
+     "value": 1895825409
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "two APCs queued at a gate: open the gate",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: gate",
+     "offset": 32
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "two APCs queued at a gate: worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "two APCs queued at a gate: worker: each wait status, gate, flag": "000000c0000000000000000000000001",
+    "two APCs queued at a gate: APC count, IRQL, context of each call": "000000020000000051000000510000010000000000000000"
+   },
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: done",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "two APCs queued at a gate: 5000 ms",
+     "offset": 256
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "two APCs queued at a gate: join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "two APCs queued at a gate: worker: each wait status, gate, flag": "000000c0000000000000000000000001",
+    "two APCs queued at a gate: APC count, IRQL, context of each call": "000000020000000051000000510000010000000000000000"
+   },
+   "args": [
+    {
+     "variable": "two APCs queued at a gate: worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "two APCs queued at a gate: 5000 ms",
+     "offset": 256
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "two APCs queued at a gate: the set event of the pair afterwards",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "two APCs queued at a gate: first event",
+     "offset": 56
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "two APCs queued at a gate: 20 ms",
+     "offset": 248
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "queue an APC to the joined worker",
+   "export": "NtQueueApcThread",
+   "r3": "FFFFFFFFC0000001",
+   "capture": {
+    "two APCs queued at a gate: worker: each wait status, gate, flag": "000000c0000000000000000000000001",
+    "two APCs queued at a gate: APC count, IRQL, context of each call": "000000020000000051000000510000010000000000000000"
+   },
+   "args": [
+    {
+     "variable": "two APCs queued at a gate: worker handle"
+    },
+    {
+     "routine": "two APCs queued at a gate: APC routine"
+    },
+    {
+     "value": 1375731712
+    },
+    {
+     "value": 1644167168
+    },
+    {
+     "value": 1912602624
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "alertable delay on the main thread",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "two APCs queued at a gate: worker: each wait status, gate, flag": "000000c0000000000000000000000001",
+    "two APCs queued at a gate: APC count, IRQL, context of each call": "000000020000000051000000510000010000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 288
+    }
+   ]
+  },
+  {
+   "scenario": "two APCs and a thread that has exited",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "two APCs queued at a gate: worker handle"
+    }
+   ]
+  }
+ ]
+}
