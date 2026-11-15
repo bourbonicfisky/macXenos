@@ -181,6 +181,9 @@ X_STATUS XTimer::SetTimer(int64_t due_time, uint32_t period_ms,
     // as possible for increased accuracy
     auto after = xe::chrono::hundrednanoseconds(-due_time);
     due_tp = date::clock_cast<WinSystemClock>(XSystemClock::now() + after);
+  } else if (due_time <= int64_t(Clock::QueryGuestSystemTime())) {
+    // An absolute time that has passed, down to 0, expires at once.
+    due_tp = date::clock_cast<WinSystemClock>(XSystemClock::now());
   } else {
     due_tp = date::clock_cast<WinSystemClock>(
         XSystemClock::from_file_time(due_time));

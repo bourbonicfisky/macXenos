@@ -1278,11 +1278,21 @@ class PosixCondition<Timer> final : public PosixConditionBase {
                std::function<void()> opt_callback) {
     Cancel();
 
-    std::lock_guard lock(mutex_);
+    // A time that has already passed signals the timer before this returns,
+    // as arming a timer for the past does on the console (nt_timer_absolute
+    // probe); the queue still runs the callback, and skips its own Signal.
+    const bool due_now = due_time <= std::chrono::steady_clock::now();
+    {
+      std::lock_guard lock(mutex_);
 
-    callback_ = std::move(opt_callback);
-    signal_ = false;
-    wait_item_ = QueueTimerOnce(&CompletionRoutine, this, due_time);
+      callback_ = std::move(opt_callback);
+      signal_ = false;
+      presignaled_ = due_now;
+      wait_item_ = QueueTimerOnce(&CompletionRoutine, this, due_time);
+    }
+    if (due_now) {
+      Signal();
+    }
   }
 
   void SetRepeating(std::chrono::steady_clock::time_point due_time,
@@ -1294,6 +1304,7 @@ class PosixCondition<Timer> final : public PosixConditionBase {
 
     callback_ = std::move(opt_callback);
     signal_ = false;
+    presignaled_ = false;
     wait_item_ =
         QueueTimerRecurring(&CompletionRoutine, this, due_time, period);
   }
@@ -1313,7 +1324,15 @@ class PosixCondition<Timer> final : public PosixConditionBase {
   static void CompletionRoutine(void* userdata) {
     assert_not_null(userdata);
     auto timer = static_cast<PosixCondition*>(userdata);
-    timer->Signal();
+    bool presignaled;
+    {
+      std::lock_guard lock(timer->mutex_);
+      presignaled = timer->presignaled_;
+      timer->presignaled_ = false;
+    }
+    if (!presignaled) {
+      timer->Signal();
+    }
     // As the callback may reset the timer, store local.
     std::function<void()> callback;
     {
@@ -1334,6 +1353,8 @@ class PosixCondition<Timer> final : public PosixConditionBase {
   std::weak_ptr<TimerQueueWaitItem> wait_item_;
   std::function<void()> callback_;
   bool signal_;  // Protected by mutex_
+  // SetOnce signaled the timer itself; protected by mutex_.
+  bool presignaled_ = false;
   const bool manual_reset_;
 };
 

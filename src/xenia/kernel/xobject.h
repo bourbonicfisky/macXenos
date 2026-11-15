@@ -276,6 +276,13 @@ class XObject {
     header->wait_list.blink_ptr = handle;
   }
 
+  // A positive timeout from here up is an absolute system time; below it,
+  // a count of milliseconds from an internal caller. The threshold is 2^40
+  // units of 100 ns, some 30 hours after the 1601 epoch as a time and 35
+  // years as milliseconds.
+  static constexpr int64_t kAbsoluteTimeoutThreshold = int64_t(1) << 40;
+  // The milliseconds left until an absolute system time, 0 if it has passed.
+  static uint32_t AbsoluteTimeToMs(int64_t absolute_time);
   static uint32_t TimeoutTicksToMs(int64_t timeout_ticks);
 
   KernelState* kernel_state_;

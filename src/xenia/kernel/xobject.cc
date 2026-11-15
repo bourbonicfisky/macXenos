@@ -241,8 +241,23 @@ void XObject::SetAttributes(uint32_t obj_attributes_ptr) {
   }
 }
 
+uint32_t XObject::AbsoluteTimeToMs(int64_t absolute_time) {
+  const int64_t remaining =
+      absolute_time - int64_t(Clock::QueryGuestSystemTime());
+  if (remaining <= 0) {
+    return 0;
+  }
+  // Round up, so the wait does not end before the time.
+  const int64_t ms = (remaining + 9999) / 10000;
+  return ms > 0x7FFFFFFF ? 0x7FFFFFFF : uint32_t(ms);
+}
+
 uint32_t XObject::TimeoutTicksToMs(int64_t timeout_ticks) {
-  if (timeout_ticks > 0) {
+  if (timeout_ticks >= kAbsoluteTimeoutThreshold) {
+    // An absolute system time (100 ns units since 1601): wait for what is
+    // left of it, or not at all if it has passed (nt_timer_absolute probe).
+    return AbsoluteTimeToMs(timeout_ticks);
+  } else if (timeout_ticks > 0) {
     // NetDll_WSAWaitForMultipleEvents provides timeout in form of MS.
     return (uint32_t)timeout_ticks;
   } else if (timeout_ticks < 0) {
