@@ -1036,12 +1036,24 @@ dword_result_t KeSetAffinityThread_entry(lpvoid_t thread_ptr, dword_t affinity,
 }
 DECLARE_XBOXKRNL_EXPORT1(KeSetAffinityThread, kThreading, kImplemented);
 
+// XE_KERNEL_BASE_PRIORITY=0: diagnostic rollback to the behaviour before
+// 2026-11-15 (the query returns the host priority and the set takes its
+// offset as an absolute priority), for A/B frame-cost runs.
+static bool BasePriorityOffsets() {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_KERNEL_BASE_PRIORITY");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return enabled;
+}
+
 dword_result_t KeQueryBasePriorityThread_entry(lpvoid_t thread_ptr) {
   int32_t priority = 0;
 
   auto thread = XObject::GetNativeObject<XThread>(kernel_state(), thread_ptr);
   if (thread) {
-    priority = thread->QueryBasePriorityIncrement();
+    priority = BasePriorityOffsets() ? thread->QueryBasePriorityIncrement()
+                                     : thread->QueryPriority();
   }
 
   return priority;
@@ -1054,7 +1066,12 @@ dword_result_t KeSetBasePriorityThread_entry(lpvoid_t thread_ptr,
   auto thread = XObject::GetNativeObject<XThread>(kernel_state(), thread_ptr);
 
   if (thread) {
-    prev_priority = thread->SetBasePriorityIncrement(int32_t(increment));
+    if (BasePriorityOffsets()) {
+      prev_priority = thread->SetBasePriorityIncrement(int32_t(increment));
+    } else {
+      prev_priority = thread->QueryPriority();
+      thread->SetPriority(increment);
+    }
   }
 
   return prev_priority;
