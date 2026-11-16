@@ -41,6 +41,17 @@ DEFINE_bool(xnet_resolve_own_address, true,
             "restores the old stubs, which fail both.",
             "Network");
 
+DEFINE_bool(xnet_console_link, true,
+            "Report the network the way a wired Xbox 360 does (measured on "
+            "the console, tools/xamgen/corpus/xnet.py): XNetGetTitleXnAddr "
+            "returns DHCP|GATEWAY|DNS (0x68), XNetGetEthernetLinkStatus an "
+            "active 100 Mbit full-duplex link (0x0B), and a new live listener "
+            "is not told the link went down. Otherwise EA's DirtySock "
+            "(Madden NFL 06) never sees a usable link and polls "
+            "XNetGetTitleXnAddr on every tick. false restores the old "
+            "static-address, no-link reports.",
+            "Network");
+
 namespace xe {
 namespace kernel {
 namespace xam {
@@ -211,13 +222,27 @@ struct XNetStartupParams {
 };
 static_assert_size(XNetStartupParams, 0xD);
 
-XNetStartupParams xnet_startup_params = {0};
+// What XNetGetOpt(XNET_OPTID_STARTUP_PARAMS) reads on the console after
+// XNetStartup with every setting 0: XAM's defaults in force.
+static const XNetStartupParams kXNetDefaultStartupParams = {
+    sizeof(XNetStartupParams), 0, 8, 32, 16, 16, 8, 32, 64, 2, 3, 8, 2};
+
+XNetStartupParams xnet_startup_params = kXNetDefaultStartupParams;
 
 dword_result_t NetDll_XNetStartup_entry(dword_t caller,
                                         pointer_t<XNetStartupParams> params) {
+  xnet_startup_params = kXNetDefaultStartupParams;
   if (params) {
     assert_true(params->cfgSizeOfStruct == sizeof(XNetStartupParams));
-    std::memcpy(&xnet_startup_params, params, sizeof(XNetStartupParams));
+    // A setting left 0 takes XAM's default, which XNetGetOpt then reports.
+    const uint8_t* in = reinterpret_cast<const uint8_t*>(params.host_address());
+    uint8_t* out = reinterpret_cast<uint8_t*>(&xnet_startup_params);
+    out[1] = in[1];
+    for (size_t i = 2; i < sizeof(XNetStartupParams); ++i) {
+      if (in[i]) {
+        out[i] = in[i];
+      }
+    }
   }
 
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
@@ -267,6 +292,16 @@ dword_result_t XNetLogonGetTitleID_entry(dword_t caller, lpvoid_t params) {
 }
 DECLARE_XAM_EXPORT1(XNetLogonGetTitleID, kNetworking, kImplemented);
 
+// Not logged on to Live: the console zeroes the ID and returns
+// 0x80151802 (tools/xamgen/corpus/xnet.py).
+dword_result_t XNetLogonGetMachineID_entry(lpqword_t machine_id_ptr) {
+  if (machine_id_ptr) {
+    *machine_id_ptr = 0;
+  }
+  return 0x80151802;
+}
+DECLARE_XAM_EXPORT1(XNetLogonGetMachineID, kNetworking, kStub);
+
 dword_result_t NetDll_XNetGetOpt_entry(dword_t one, dword_t option_id,
                                        lpvoid_t buffer_ptr,
                                        lpdword_t buffer_size) {
@@ -278,6 +313,8 @@ dword_result_t NetDll_XNetGetOpt_entry(dword_t one, dword_t option_id,
         return uint32_t(X_WSAError::X_WSAEMSGSIZE);
       }
       std::memcpy(buffer_ptr, &xnet_startup_params, sizeof(XNetStartupParams));
+      // The console writes back the size it filled.
+      *buffer_size = sizeof(XNetStartupParams);
       return 0;
     default:
       XELOGE("NetDll_XNetGetOpt: option {} unimplemented",
@@ -526,7 +563,8 @@ struct XnAddrStatus {
 };
 
 static void FillTitleXnAddrInternal(XNADDR* addr_ptr) {
-  // Just return a loopback address atm.
+  // Just return a loopback address atm. (The console reports its LAN address;
+  // XNetXnAddrToInAddr of its own XNADDR gives 127.0.0.1 there too.)
   addr_ptr->ina.s_addr = htonl(INADDR_LOOPBACK);
   addr_ptr->inaOnline.s_addr = 0;
   addr_ptr->wPortOnline = 0;
@@ -545,6 +583,10 @@ static void FillTitleXnAddrInternal(XNADDR* addr_ptr) {
   std::memset(addr_ptr->abEnet, 0xCC, 6);
 
   std::memset(addr_ptr->abOnline, 0, 20);
+  if (cvars::xnet_console_link) {
+    // The console's abOnline while not signed in to Live: zero but byte 16.
+    addr_ptr->abOnline[16] = 1;
+  }
 }
 
 void FillTitleXnAddr(void* xnaddr) {
@@ -554,14 +596,20 @@ void FillTitleXnAddr(void* xnaddr) {
 dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> addr_ptr) {
   FillTitleXnAddrInternal(addr_ptr);
+  // The console reports 0x68 at once, before XNetStartup and after
+  // XNetCleanup too, on a wired console that has been on.
+  if (cvars::xnet_console_link) {
+    return XnAddrStatus::XNET_GET_XNADDR_DHCP |
+           XnAddrStatus::XNET_GET_XNADDR_GATEWAY |
+           XnAddrStatus::XNET_GET_XNADDR_DNS;
+  }
   return XnAddrStatus::XNET_GET_XNADDR_STATIC;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetGetTitleXnAddr, kNetworking, kStub);
 
 dword_result_t NetDll_XNetGetDebugXnAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> addr_ptr) {
-  addr_ptr.Zero();
-
+  // A retail console has no debugger address: NONE, the buffer untouched.
   // XNET_GET_XNADDR_NONE causes caller to gracefully return.
   return XnAddrStatus::XNET_GET_XNADDR_NONE;
 }
@@ -638,9 +686,22 @@ struct XEthernetStatus {
 };
 
 dword_result_t NetDll_XNetGetEthernetLinkStatus_entry(dword_t caller) {
+  if (cvars::xnet_console_link) {
+    return XEthernetStatus::XNET_ETHERNET_LINK_ACTIVE |
+           XEthernetStatus::XNET_ETHERNET_LINK_100MBPS |
+           XEthernetStatus::XNET_ETHERNET_LINK_FULL_DUPLEX;
+  }
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetGetEthernetLinkStatus, kNetworking, kStub);
+
+// XNET_CONNECT_STATUS_LOST: what the console gives for its own address and
+// for an address it has no connection to.
+dword_result_t NetDll_XNetGetConnectStatus_entry(dword_t caller,
+                                                 dword_t in_addr) {
+  return 3;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetGetConnectStatus, kNetworking, kStub);
 
 dword_result_t NetDll_XNetDnsLookup_entry(dword_t caller, lpstring_t host,
                                           dword_t event_handle,

@@ -57,6 +57,7 @@ DEFINE_uint32(kernel_build_version, 1888, "Define current kernel version",
 
 DECLARE_string(cl);
 DECLARE_bool(guest_wait_profile);  // defined in xthread.cc
+DECLARE_bool(xnet_console_link);  // defined in xam/xam_net.cc
 
 DEFINE_bool(
     jit_sampler, false,
@@ -1561,7 +1562,11 @@ void KernelState::RegisterNotifyListener(XNotifyListener* listener) {
     // X_ONLINE_S_LOGON_DISCONNECTED
     listener->EnqueueNotification(kXNotificationLiveConnectionChanged,
                                   0x001510F1L);
-    listener->EnqueueNotification(kXNotificationLiveLinkStateChanged, 0);
+    // A console with its cable in sends no link change to a new listener
+    // (tools/xamgen/corpus/xnet.py); 0 here told titles the link was down.
+    if (!cvars::xnet_console_link) {
+      listener->EnqueueNotification(kXNotificationLiveLinkStateChanged, 0);
+    }
   }
 }
 
