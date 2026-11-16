@@ -3383,6 +3383,15 @@
 "description": "XNetXnAddrToInAddr resolves the console's own XNADDR (what XNetGetTitleXnAddr and a hosted session report) to its address, and XNetQosListen succeeds. A title that hosts a local or system-link session looks itself up this way (Shadowrun). false restores the old stubs, which fail both.",
 "changed": false
 },
+"xnet_console_link": {
+"name": "xnet_console_link",
+"category": "Network",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Report the network the way a wired Xbox 360 does (measured on the console, tools/xamgen/corpus/xnet.py): XNetGetTitleXnAddr returns DHCP|GATEWAY|DNS (0x68), XNetGetEthernetLinkStatus an active 100 Mbit full-duplex link (0x0B), and a new live listener is not told the link went down. Otherwise EA's DirtySock (Madden NFL 06) never sees a usable link and polls XNetGetTitleXnAddr on every tick. false restores the old static-address, no-link reports.",
+"changed": false
+},
 "avpack": {
 "name": "avpack",
 "category": "Video",
