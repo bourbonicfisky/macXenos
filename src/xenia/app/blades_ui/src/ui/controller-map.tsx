@@ -15,6 +15,28 @@ type Spot = { x: number; y: number; text: string; className: string };
 
 // The drawing's frame (in the coordinates its shapes are drawn in), and
 // where each remappable output sits on it.
+/* Each button's name in the list. The app sends English (blades_model.cc,
+   kRebindable); the words are translated here and the names printed on the
+   pads themselves (LB, L1, Back, Share, Start, Options) kept. */
+const OUTPUT_LABELS: Record<string, () => string> = {
+  a: () => `A / ${t("controller.map.cross")}`,
+  b: () => `B / ${t("controller.map.circle")}`,
+  x: () => `X / ${t("controller.map.square")}`,
+  y: () => `Y / ${t("controller.map.triangle")}`,
+  leftshoulder: () => `${t("controller.leftBumper")} (LB / L1)`,
+  rightshoulder: () => `${t("controller.rightBumper")} (RB / R1)`,
+  lefttrigger: () => `${t("controller.map.leftTrigger")} (LT / L2)`,
+  righttrigger: () => `${t("controller.map.rightTrigger")} (RT / R2)`,
+  leftstick: () => `${t("controller.map.leftStickClick")} (LS / L3)`,
+  rightstick: () => `${t("controller.map.rightStickClick")} (RS / R3)`,
+  dpup: () => t("controller.dpadUp"),
+  dpdown: () => t("controller.dpadDown"),
+  dpleft: () => t("controller.dpadLeft"),
+  dpright: () => t("controller.dpadRight")
+};
+
+const outputLabel = (output: string, english: string) => OUTPUT_LABELS[output]?.() ?? english;
+
 const VIEW = { x: 110, y: 52, w: 530, h: 358 };
 const SPOTS: Record<string, Spot> = {
   leftshoulder: { x: 226, y: 126, text: "LB", className: "pad-chip" },
@@ -150,7 +172,7 @@ function Spot({ output, capturing }: { output: RebindOutput; capturing: boolean 
       className={`pad-spot ${spot.className} absolute`}
       style={{ left: `${((spot.x - VIEW.x) / VIEW.w) * 100}%`, top: `${((spot.y - VIEW.y) / VIEW.h) * 100}%` }}
       data-capturing={capturing || undefined}
-      aria-label={t(capturing ? "controller.map.listening" : "controller.map.choose", { button: output.label })}
+      aria-label={t(capturing ? "controller.map.listening" : "controller.map.choose", { button: outputLabel(output.output, output.label) })}
       aria-pressed={capturing}
       onClick={() => send(capturing ? { op: "rebindCancel" } : { op: "rebind", output: output.output })}
     >
@@ -175,7 +197,7 @@ export function ControllerMap() {
         ))}
       </div>
       <p className={`m-0 text-[0.85em] ${capturing ? "pad-capture" : "pad-status"}`}>
-        {capturing ? t("controller.map.press", { button: capturing.label }) : t("controller.map.hint")}
+        {capturing ? t("controller.map.press", { button: outputLabel(capturing.output, capturing.label) }) : t("controller.map.hint")}
       </p>
       {/* Every button, as a list: choosing one listens, as on the drawing. */}
       <ul className="pad-bindings m-0 grid list-none grid-cols-1 gap-[0.2em] p-0 text-[0.8em] @min-[520px]:grid-cols-2">
@@ -189,7 +211,7 @@ export function ControllerMap() {
                 data-capturing={listening || undefined}
                 onClick={() => send(listening ? { op: "rebindCancel" } : { op: "rebind", output: output.output })}
               >
-                <span className="truncate font-semibold">{output.label}</span>
+                <span className="truncate font-semibold">{outputLabel(output.output, output.label)}</span>
                 <span className="pad-status">{listening ? t("controller.map.waiting") : bindingText(output.binding)}</span>
               </button>
             </li>
