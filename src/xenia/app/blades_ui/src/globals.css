@@ -41,6 +41,50 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Selawik and Michroma have no Hangul or Han. Name the Mac's own faces for
+   those languages rather than leave the pick to system-ui: given no hint,
+   WebKit can draw Traditional Chinese text with Simplified glyph shapes.
+   Latin letters and digits in that text stay in Selawik. A language's name
+   in the Dashboard language list carries its own lang, so it gets its face
+   in any dashboard language. */
+:root:lang(ko) {
+  --font-ui: "Selawik", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --font-badge: "Michroma", "Apple SD Gothic Neo", sans-serif;
+}
+:root:lang(zh-Hant) {
+  --font-ui: "Selawik", "PingFang TC", system-ui, sans-serif;
+  --font-badge: "Michroma", "PingFang TC", sans-serif;
+}
+:root:lang(zh-Hans) {
+  --font-ui: "Selawik", "PingFang SC", system-ui, sans-serif;
+  --font-badge: "Michroma", "PingFang SC", sans-serif;
+}
+:root:lang(ja) {
+  --font-ui: "Selawik", "Hiragino Sans", system-ui, sans-serif;
+  --font-badge: "Michroma", "Hiragino Sans", sans-serif;
+}
+[lang="ko"] {
+  font-family: "Selawik", "Apple SD Gothic Neo", system-ui, sans-serif;
+}
+[lang="zh-Hant"] {
+  font-family: "Selawik", "PingFang TC", system-ui, sans-serif;
+}
+[lang="zh-Hans"] {
+  font-family: "Selawik", "PingFang SC", system-ui, sans-serif;
+}
+[lang="ja"] {
+  font-family: "Selawik", "Hiragino Sans", system-ui, sans-serif;
+}
+/* Korean is spaced into words and breaks between them, as Apple's Korean
+   UI does, rather than inside a word; a word too long for its box still
+   wraps instead of spilling. Chinese and Japanese break between characters
+   (the default), with WebKit keeping closing punctuation and small kana off
+   a line's start. */
+:root:lang(ko) {
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
 :where(a, button, [tabindex]):focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 3px;

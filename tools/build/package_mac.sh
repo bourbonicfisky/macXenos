@@ -169,6 +169,16 @@ if [[ -f "${BLADES_SRC}/index.html" ]]; then
 else
   log "warning: no built Preferences page at ${BLADES_SRC}; run npm run build in src/xenia/app/blades_ui"
 fi
+# The menus, About panel, alert and open-panel titles in each language the
+# dashboard has (<code>.lproj/Localizable.strings, generated from its
+# catalogs by npm run build in src/xenia/app/blades_ui). AppKit picks the
+# Mac's language from these; the system's own panels follow it.
+LOCALIZATION_SRC="${REPO_ROOT}/src/xenia/app/localization"
+if compgen -G "${LOCALIZATION_SRC}/*.lproj" > /dev/null; then
+  cp -R "${LOCALIZATION_SRC}"/*.lproj "${CONTENTS}/Resources/"
+else
+  log "warning: no localizations at ${LOCALIZATION_SRC}; run npm run build in src/xenia/app/blades_ui"
+fi
 cp -R "${REPO_ROOT}/docs/game_configs" "${CONTENTS}/Resources/game_configs"
 cp -R "${REPO_ROOT}/docs/game_patches" "${CONTENTS}/Resources/game_patches"
 

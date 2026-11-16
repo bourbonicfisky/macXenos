@@ -56,8 +56,9 @@ is what the app ships):
 | Command | What it does |
 |---|---|
 | `npm run build` | Type-checks and builds `dist/`. |
-| `npm run check` | Fails if `src/mock-cvars.json` no longer matches the emulator's `DEFINE_*` settings (fix: `npm run gen:cvars`), if the page doesn't type-check, if the dashboard's text fails its checks (see Languages), or if `dist/` isn't what the sources build to (fix: `npm run build`). |
-| `npm test` | Unit tests (`tests/*.test.mjs`), then smoke tests (`tests/smoke.mjs`): every blade opens, B and Y on the blades, the stacked legend, All Games (open, move, the four sort orders, the card view, back), Game Folders (add, two-press remove), the Game folders pane and the Dashboard sounds pane. |
+| `npm run check` | Fails if `src/mock-cvars.json` no longer matches the emulator's `DEFINE_*` settings (fix: `npm run gen:cvars`), if the page doesn't type-check, if the dashboard's text fails its checks (see Languages), if `dist/` isn't what the sources build to, or if the app's menu and dialog text (`../localization/`) isn't what the catalogs give (fix for both: `npm run build`). |
+| `npm test` | Unit tests (`tests/*.test.mjs`), then smoke tests (`tests/smoke.mjs`): every blade opens, B and Y on the blades, the stacked legend, All Games (open, move, the four sort orders, the card view, back), Game Folders (add, two-press remove), the Game folders pane, the Dashboard sounds pane, Russian on every blade, and every language. |
+| `npm run layout -- <dir>` | Every pane in every language: text that is cut off or wraps where it shouldn't, against English's own, and a screenshot of each blade per language in `<dir>`. |
 | `npm run screens -- record <dir>` then `compare <dir>` | Screenshots of a fixed set of states, byte for byte, for changes meant to look the same (a stylesheet refactor). Differing ones are written beside the originals. |
 
 The tests run the page on the mock in a headless Chromium (Chrome,
@@ -80,37 +81,68 @@ sub-blade tabs both set.
 
 ## Languages
 
-The dashboard's text goes through `t()` (`src/i18n/`), so it can be
-translated into the console's sixteen languages. Only English exists today;
-the wiring, the checks and the tests are in place for the rest.
+The dashboard and the app's own menus are in English, Danish, German,
+Spanish, French, Italian, Japanese, Korean, Dutch, Norwegian Bokmål, Polish,
+Brazilian Portuguese, Russian, Finnish, Swedish, and Simplified and
+Traditional Chinese.
+How to add a language or correct one, for translators:
+[docs/translating.md](../../../../docs/translating.md). Russian is foxsetDev's
+(public PR #4); the others are machine-assisted and await review by native
+speakers. Game content and the emulated console's own language (System >
+Language and region) are separate from the dashboard's language, and changing
+one never changes the other.
 
 - **The text.** `src/i18n/en.ts` is every message in English, keyed
-  `"area.thing"`, and the source for translators. Messages take `{name}`
+  `"area.thing"`: the one source for every language. Messages take `{name}`
   placeholders and ICU plurals (`{count, plural, one {# game} other {# games}}`,
   `src/i18n/format.ts`). `MessageKey` types every key, so a key that doesn't
   exist fails the build.
-- **A translation** is `src/i18n/catalogs/<code>.ts` (`ja.ts`, `zh-Hant.ts`…,
-  the codes in `src/i18n/locales.ts`) exporting the messages it has translated:
+- **A translation** is one file, `src/i18n/catalogs/<code>.ts` (the codes in
+  `src/i18n/locales.ts`), exporting every message:
   `export default { "legend.back": "…" } satisfies Catalog`. It is picked up
-  without other wiring and appears under System > Dashboard language; missing
-  keys fall back to English.
+  without other wiring and appears under System > Dashboard language, named
+  in its own language. At run time any key a catalog lacks shows in English.
+- **The app's menus** (the menu bar, About, alert titles, open-panel titles)
+  are the `native.*` messages of the same files. `npm run build` writes them
+  as `../localization/<code>.lproj/Localizable.strings`
+  (`tools/native-strings.mjs`), keyed by the English text, which the native
+  code looks up with `NSLocalizedString`; `package_mac.sh` copies them into
+  `Contents/Resources` and the CMake build beside the binary. They follow the
+  Mac's language, as every Mac app's menus do, not the Dashboard language.
 - **Which language.** Dashboard language defaults to Same as my Mac: the first
   of the Mac's preferred languages (the app reports them; `NSLocale`) that has
-  a translation, else English. Taiwan, Hong Kong and Macau read Traditional
-  Chinese, other Chinese Simplified; Norwegian of any kind reads Bokmål.
-- **Checks** (`npm run check`, `tools/i18n.mjs`): every English key is used;
-  every translation keeps each message's placeholders and uses only English's
-  keys; and English written straight into a `.tsx` instead of through `t()`
-  never grows. `tools/i18n-baseline.json` holds each file's count of such
-  text (Home, the Dashboard rows, the legend, the sub-blades and the sound
-  offer are at zero; Graphics, Controller, Audio & CPU, Profiles, the rest of
-  System and Advanced are still to convert). Convert a file, then
-  `npm run i18n:baseline` to lock the lower count in. `npm run i18n` prints the
-  report, with each language's coverage.
+  a translation, a regional variant reading its language's (pt-BR reads `pt`,
+  fr-CA `fr`, es-MX `es`), else English. Taiwan, Hong Kong and Macau, and any
+  `zh-Hant` tag, read Traditional Chinese; other Chinese reads Simplified.
+  Every Portuguese reads the Brazilian catalog (`pt-BR`, written as Apple's
+  `pt.lproj` for the menus). Norwegian of any kind reads Bokmål.
+- **Numbers, dates, times and lists** go through Intl in the active language
+  (`formatNumber`, `formatPercent`, `formatDate`, `formatTime`, `formatList`
+  in `src/i18n/index.ts`; `t()` formats its numbers the same way), in the
+  Mac's regional variant of it when it has one.
+- **Fonts.** Selawik and Michroma carry Latin only; other scripts fall back
+  to the Mac's faces, named outright for Japanese (Hiragino Sans), Korean
+  (Apple SD Gothic Neo) and Chinese (PingFang SC, PingFang TC) in
+  `globals.css`. Korean breaks lines between words, Chinese and Japanese
+  between characters. Tab labels run along the ribbon in every script.
+- **Checks** (`npm run check`, `tools/i18n.mjs`): every English key is used
+  (a `native.*` one by the native code); every translation has all of
+  English's keys and no others, keeps each message's placeholders, and gives
+  each plural its own language's categories (Intl.PluralRules: none the
+  language lacks, and every one a whole number selects there, plus `other`);
+  the generated `.strings` match the catalogs; and English written straight
+  into a `.tsx` instead of through `t()` never grows.
+  `tools/i18n-baseline.json` holds each file's count of such text; the
+  entries left are names kept as written (CPU, Discord, Guide, Back + Start).
+  Convert a file, then `npm run i18n:baseline` to lock the lower count in.
+  `npm run i18n` prints the report, with each language's coverage.
 - **Tests**: `tests/i18n.test.mjs` (language matching, plurals, placeholders,
-  the scanner) and smoke tests that switch to the pseudo-locale (`en-XA`,
-  development only: every word accented, so untranslated text stands out) and
-  check the converted text follows.
+  every catalog's completeness, the `.strings` formats, the scanner) and
+  smoke tests that switch to the pseudo-locale (`en-XA`, development only:
+  every word accented, so untranslated text stands out), to Russian across
+  every blade, and to every language in turn. `npm run layout -- <dir>` opens
+  every pane in every language and lists text that is cut off or wraps where
+  it shouldn't, against English's own, with a screenshot of each blade.
 
 ## Sounds are downloaded, not shipped
 

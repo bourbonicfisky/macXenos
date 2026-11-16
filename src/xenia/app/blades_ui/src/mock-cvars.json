@@ -3158,6 +3158,15 @@
 "description": "PC sampler frequency in Hz when --jit_sampler is set (clamped 1..4000). Lower it if the sampler perturbs the measurement.",
 "changed": false
 },
+"strict_handle_lookup": {
+"name": "strict_handle_lookup",
+"category": "Kernel",
+"type": "bool",
+"value": true,
+"defaultValue": true,
+"description": "Resolve a handle only when it is exactly the value the kernel handed out (as the console does); a garbage value whose low bits match a live handle is an invalid handle. false = the old lookup, which masked the high bits off.",
+"changed": false
+},
 "force_mount_devkit": {
 "name": "force_mount_devkit",
 "category": "Storage",

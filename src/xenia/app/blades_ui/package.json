@@ -6,14 +6,15 @@
   "description": "The in-app Preferences, as Xbox 360 dashboard blades. Built into dist/ and bundled beside the binary as blades/.",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node tools/native-strings.mjs",
     "preview": "vite preview",
     "gen:cvars": "python3 tools/gen-mock-cvars.py ../.. src/mock-cvars.json",
     "check": "node tools/check.mjs",
     "test": "node --test tests/*.test.mjs && node tests/smoke.mjs",
     "screens": "node tests/screens.mjs",
     "i18n": "node tools/i18n.mjs",
-    "i18n:baseline": "node tools/i18n.mjs --update-baseline"
+    "i18n:baseline": "node tools/i18n.mjs --update-baseline",
+    "layout": "node tests/layout.mjs"
   },
   "dependencies": {
     "react": "^19.0.0",

@@ -185,6 +185,9 @@ if(APPLE)
   add_custom_target(xenia-app-blades ALL
     COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_FILE_DIR:xenia-app>/blades"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/blades_ui/dist" "$<TARGET_FILE_DIR:xenia-app>/blades"
+    # The menus' and dialogs' <code>.lproj tables (blades_ui/tools/native-strings.mjs),
+    # beside the binary, where an unbundled binary's main bundle looks.
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/localization" "$<TARGET_FILE_DIR:xenia-app>"
     COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/build/collect_licenses.py"
             --out "$<TARGET_FILE_DIR:xenia-app>/blades/acknowledgements.json"
             --sparkle-dir "${PROJECT_BINARY_DIR}/sparkle/Sparkle-2.10.0/x"

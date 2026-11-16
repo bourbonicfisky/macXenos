@@ -1,3 +1,4 @@
+import { t } from "../i18n";
 import type { BladeDef } from "../ui/blade";
 import { send, type NativeState } from "../native";
 import { NEXT_LAUNCH } from "../ui/settings-controls";
@@ -27,10 +28,10 @@ function audioAndCpu(state: NativeState): BladeDef {
   const processor = cpu(state);
   return {
     ...sound,
-    label: "audio & cpu",
-    title: "Audio & CPU",
+    label: t("blades.tab"),
+    title: t("blades.audioCpu.title"),
     menu: [
-      ...sound.menu.map((item, index) => (index === 0 ? { ...item, section: "Audio" } : item)),
+      ...sound.menu.map((item, index) => (index === 0 ? { ...item, section: t("advanced.audio") } : item)),
       ...processor.menu.map((item, index) => (index === 0 ? { ...item, section: "CPU" } : item))
     ]
   };
@@ -54,7 +55,7 @@ export function buildBlades(state: NativeState): BladeDef[] {
     Object.values(state.cvars).some((cvar) => cvar.changed && NEXT_LAUNCH.has(cvar.name));
   if (waiting) {
     const tray = {
-      label: "Restart the game to apply your changes",
+      label: t("blades.restartToApply"),
       onSelect: () => send({ op: "action", id: "relaunch" })
     };
     for (const blade of blades) blade.tray = tray;

@@ -14,6 +14,8 @@
 
 - [Building macXenos](building.md): building, running and packaging from
   source on a Mac.
+- [Translating macXenos](translating.md): adding a language to the dashboard
+  and the app's menus, or correcting one.
 - [Developer documentation](dev/README.md): the app's interface, ideas for
   later, and documentation inherited from Xenia.
 
@@ -23,6 +25,7 @@
 | --- | --- |
 | `user_guide.md`, `compatibility.md`, `troubleshooting.md` | Documentation for players |
 | `building.md` | Building from source |
+| `translating.md` | Translating the dashboard and the menus |
 | `releases/` | Release notes, one file per build |
 | `dev/` | Developer documentation, including documentation inherited from Xenia |
 | `game_configs/` | Built-in per-game settings, copied into the app by the build |

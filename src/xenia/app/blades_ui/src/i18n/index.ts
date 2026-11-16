@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { AVAILABLE, CATALOGS } from "./catalogs";
 import { en, type MessageKey } from "./en";
 import { format, pseudo, type MessageParams } from "./format";
-import { matchLocale, SOURCE_LOCALE, type LocaleCode } from "./locales";
+import { localeForTag, matchLocale, SOURCE_LOCALE, type LocaleCode } from "./locales";
 
 /**
  * The dashboard's text in the reader's language.
@@ -17,6 +17,11 @@ import { matchLocale, SOURCE_LOCALE, type LocaleCode } from "./locales";
  *
  * The pseudo-locale (PSEUDO), offered only in development and used by the
  * tests, accents every message so text that bypasses t() stands out.
+ *
+ * Numbers, dates, times and lists are formatted with Intl in the same
+ * language (formatNumber, formatPercent, formatDate, formatTime, formatList),
+ * in the Mac's own regional variant of it when it has one: a Mac set to
+ * Canadian French reads the French text with fr-CA dates.
  */
 
 export type { MessageKey } from "./en";
@@ -42,9 +47,13 @@ function resolve(): ActiveLanguage {
 
 function update() {
   const next = resolve();
-  if (typeof document !== "undefined") document.documentElement.lang = next === PSEUDO ? "en" : next;
-  if (next === active) return;
+  const changed = next !== active;
   active = next;
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = next === PSEUDO ? "en" : next;
+    document.title = t("dashboard.pageTitle");
+  }
+  if (!changed) return;
   for (const listener of listeners) listener();
 }
 
@@ -65,11 +74,51 @@ export function getLanguage(): ActiveLanguage {
   return active;
 }
 
-/** The text for `key` in the current language. */
+/**
+ * The locale Intl formats in: the first of the Mac's languages that reads
+ * the active language (en-GB, fr-CA, zh-Hant-TW), else the language itself.
+ */
+export function intlLocale(): string {
+  if (active === PSEUDO) return "en";
+  for (const tag of systemLanguages) {
+    if (localeForTag(tag) !== active) continue;
+    try {
+      return Intl.getCanonicalLocales(tag)[0] ?? active;
+    } catch {
+      // Not a tag Intl knows; try the next.
+    }
+  }
+  return active;
+}
+
+/** The text for `key` in the current language; English for any key the
+    translation lacks. */
 export function t(key: MessageKey, params?: MessageParams): string {
   if (active === PSEUDO) return format(pseudo(en[key]), params, "en");
   const message = CATALOGS[active]?.[key] ?? en[key];
-  return format(message, params, active);
+  return format(message, params, intlLocale());
+}
+
+export function formatNumber(value: number, options?: Intl.NumberFormatOptions): string {
+  return new Intl.NumberFormat(intlLocale(), options).format(value);
+}
+
+/** 0.24 -> "24%" ("24 %" in French and German, "%24" in Turkish). */
+export function formatPercent(fraction: number): string {
+  return formatNumber(fraction, { style: "percent", maximumFractionDigits: 0 });
+}
+
+export function formatDate(date: Date, options: Intl.DateTimeFormatOptions): string {
+  return new Intl.DateTimeFormat(intlLocale(), options).format(date);
+}
+
+export function formatTime(date: Date): string {
+  return formatDate(date, { hour: "numeric", minute: "2-digit" });
+}
+
+/** ["a", "b", "c"] -> "a, b and c" ("a, b ou c" with "disjunction"). */
+export function formatList(items: readonly string[], type: Intl.ListFormatType = "conjunction"): string {
+  return new Intl.ListFormat(intlLocale(), { type }).format(items);
 }
 
 function subscribe(listener: () => void) {

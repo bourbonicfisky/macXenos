@@ -4,6 +4,11 @@
      time. Not used by the bare-binary dev build. -->
 <plist version="1.0">
 <dict>
+	<!-- English is the fallback for a Mac language with no <code>.lproj in
+	     Contents/Resources (src/xenia/app/localization, generated from the
+	     dashboard's catalogs). -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
 	<key>CFBundleName</key>
 	<string>macXenos</string>
 	<key>CFBundleDisplayName</key>

@@ -1,7 +1,8 @@
 /**
  * The dashboard's languages: the console's own sixteen (the Language setting
- * under System > Language and region), each named in itself. Pure, so the
- * tests can run it in Node.
+ * under System > Language and region), then Danish and Finnish, which the
+ * console never had; each named in itself. Pure, so the tests can run it in
+ * Node.
  */
 
 export const LOCALES = [
@@ -13,21 +14,24 @@ export const LOCALES = [
   { code: "it", name: "Italiano" },
   { code: "ko", name: "한국어" },
   { code: "zh-Hant", name: "繁體中文" },
-  { code: "pt", name: "Português" },
+  { code: "pt-BR", name: "Português (Brasil)" },
   { code: "pl", name: "Polski" },
   { code: "ru", name: "Русский" },
   { code: "sv", name: "Svenska" },
   { code: "tr", name: "Türkçe" },
-  { code: "nb", name: "Norsk" },
+  { code: "nb", name: "Norsk bokmål" },
   { code: "nl", name: "Nederlands" },
-  { code: "zh-Hans", name: "简体中文" }
+  { code: "zh-Hans", name: "简体中文" },
+  { code: "da", name: "Dansk" },
+  { code: "fi", name: "Suomi" }
 ] as const;
 
 export type LocaleCode = (typeof LOCALES)[number]["code"];
 
 export const SOURCE_LOCALE: LocaleCode = "en";
 
-/** Which of our locales a BCP 47 tag (en-GB, zh-TW, pt-BR, no) means. */
+/** Which of our locales a BCP 47 tag (en-GB, zh-TW, pt-PT, no) means: a
+    regional variant reads its language's catalog. */
 export function localeForTag(tag: string): LocaleCode | null {
   const parts = tag.toLowerCase().replace(/_/g, "-").split("-");
   const language = parts[0];
@@ -40,6 +44,9 @@ export function localeForTag(tag: string): LocaleCode | null {
   }
   // Norwegian: Bokmål, Nynorsk and plain "no" all read the Norwegian text.
   if (language === "nb" || language === "nn" || language === "no") return "nb";
+  // Portuguese: the catalog is Brazil's, and every Portuguese (Portugal's
+  // included) reads it until there is a European one.
+  if (language === "pt") return "pt-BR";
   const match = LOCALES.find((locale) => locale.code === language);
   return match ? match.code : null;
 }

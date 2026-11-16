@@ -100,6 +100,9 @@ class Page {
     await this.call("Page.enable");
     await this.call("Page.addScriptToEvaluateOnNewDocument", {
       source: `(() => {
+        // English fixtures must not depend on the test machine's languages.
+        Object.defineProperty(navigator, "languages", { value: ["en-US"], configurable: true });
+        Object.defineProperty(navigator, "language", { value: "en-US", configurable: true });
         const frozen = ${FROZEN_TIME};
         const RealDate = Date;
         class FrozenDate extends RealDate {

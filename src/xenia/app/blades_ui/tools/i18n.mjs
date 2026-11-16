@@ -5,10 +5,15 @@
 //   node tools/i18n.mjs --update-baseline   record today's hard-coded counts
 //
 // Checks:
-//   - every key in src/i18n/en.ts is used somewhere (a key nothing reads is
-//     text a translator would translate for nothing);
-//   - every translation (src/i18n/catalogs/<code>.ts) uses only English's
-//     keys and keeps each message's placeholders;
+//   - every key in src/i18n/en.ts is used: by the page's sources, or, for a
+//     "native.*" key, by the app's native code (its English text, the key
+//     NSLocalizedString looks up, is still there);
+//   - every translation (src/i18n/catalogs/<code>.ts) is named for one of the
+//     dashboard's languages (src/i18n/locales.ts) and has every one of
+//     English's keys and no others, each with English's placeholders;
+//   - every plural in a translation uses its language's own categories
+//     (Intl.PluralRules): none the language doesn't have, and every one a
+//     whole number can select there, plus "other";
 //   - the English still written straight into the sources (not through t())
 //     never grows: tools/i18n-baseline.json holds each file's count, and a
 //     file may only go down. New files start at 0.
@@ -17,10 +22,18 @@
 import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { nativeKey } from "./native-strings.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = join(ROOT, "src");
 const BASELINE = join(ROOT, "tools", "i18n-baseline.json");
+// Where the native code that reads the "native.*" messages lives.
+const NATIVE_SOURCES = [
+  "../emulator_window.cc",
+  "../blades_model.cc",
+  "../../ui/window_mac.mm",
+  "../../base/system_mac.mm"
+].map((path) => join(ROOT, path));
 
 function files(dir, test) {
   const out = [];
@@ -46,6 +59,72 @@ function placeholders(message) {
     } else if (message[i] === "}") depth--;
   }
   return [...names].sort().join(",");
+}
+
+/** Each plural in a message: the categories its branches use (not =N). */
+export function pluralCategories(message) {
+  const found = [];
+  for (const match of message.matchAll(/\{\s*[A-Za-z_]\w*\s*,\s*plural\s*,/g)) {
+    let depth = 0;
+    let end = match.index;
+    for (; end < message.length; end++) {
+      if (message[end] === "{") depth++;
+      else if (message[end] === "}" && --depth === 0) break;
+    }
+    const body = message.slice(match.index + match[0].length, end);
+    const categories = [];
+    let level = 0;
+    for (let i = 0; i < body.length; i++) {
+      if (body[i] === "{") level++;
+      else if (body[i] === "}") level--;
+      else if (level === 0) {
+        const word = /^\s*(=\d+|[a-z]+)\s*(?=\{)/.exec(body.slice(i));
+        if (word) {
+          if (!word[1].startsWith("=")) categories.push(word[1]);
+          i += word[0].length - 1;
+        }
+      }
+    }
+    found.push(categories);
+  }
+  return found;
+}
+
+/** A language's plural categories: those it has, and those a message must
+    give (every one a whole number up to 1000 selects, and "other"). */
+const CLDR_ORDER = ["zero", "one", "two", "few", "many", "other"];
+const inCldrOrder = (categories) => [...categories].sort((a, b) => CLDR_ORDER.indexOf(a) - CLDR_ORDER.indexOf(b));
+
+export function pluralRules(code) {
+  const rules = new Intl.PluralRules(code);
+  const allowed = new Set(inCldrOrder(rules.resolvedOptions().pluralCategories));
+  const hit = new Set(["other"]);
+  for (let n = 0; n <= 1000; n++) hit.add(rules.select(n));
+  return { allowed, required: new Set(inCldrOrder(hit)) };
+}
+
+/** What is wrong with a translation, against English. */
+export function catalogProblems(code, catalog, en) {
+  const problems = [];
+  const missing = Object.keys(en).filter((key) => typeof catalog[key] !== "string" || !catalog[key].trim());
+  if (missing.length) problems.push(`${code}: ${missing.length} keys missing: ${missing.slice(0, 12).join(", ")}${missing.length > 12 ? ", …" : ""}`);
+  const unknown = Object.keys(catalog).filter((key) => !(key in en));
+  if (unknown.length) problems.push(`${code}: keys English doesn't have: ${unknown.join(", ")}`);
+  const mismatched = Object.keys(catalog).filter(
+    (key) => key in en && typeof catalog[key] === "string" && placeholders(catalog[key]) !== placeholders(en[key])
+  );
+  if (mismatched.length) problems.push(`${code}: placeholders differ from English in ${mismatched.join(", ")}`);
+  const { allowed, required } = pluralRules(code);
+  for (const key of Object.keys(catalog)) {
+    if (!(key in en) || typeof catalog[key] !== "string") continue;
+    for (const categories of pluralCategories(catalog[key])) {
+      const foreign = categories.filter((c) => !allowed.has(c));
+      const lacking = [...required].filter((c) => !categories.includes(c));
+      if (foreign.length) problems.push(`${code}: ${key}: plural categories ${code} doesn't have: ${foreign.join(", ")} (it has ${[...allowed].join(", ")})`);
+      if (lacking.length) problems.push(`${code}: ${key}: plural lacks ${lacking.join(", ")}, which ${code} needs`);
+    }
+  }
+  return problems;
 }
 
 // --- English text written straight into a source file -----------------------
@@ -104,27 +183,39 @@ export async function report({ updateBaseline = false, log = console.log } = {})
   const { en } = await import(join(SRC, "i18n", "en.ts"));
   const keys = Object.keys(en);
 
-  // Every key used somewhere outside en.ts.
-  const sources = files(SRC, (p) => /\.(ts|tsx)$/.test(p) && !p.endsWith(join("i18n", "en.ts")));
+  // Every key used: by the page (not counting en.ts and the catalogs, which
+  // list every key), or, for a native.* key, by the app's native code.
+  const sources = files(
+    SRC,
+    (p) => /\.(ts|tsx)$/.test(p) && !p.endsWith(join("i18n", "en.ts")) && !p.includes(`${join("i18n", "catalogs")}/`)
+  );
   const corpus = sources.map((p) => readFileSync(p, "utf8")).join("\n");
-  const unused = keys.filter((key) => !corpus.includes(`"${key}"`) && !corpus.includes(`'${key}'`));
-  if (unused.length) problems.push(`keys nothing uses (remove them from en.ts): ${unused.join(", ")}`);
+  // Menu titles carry Windows' "&" mnemonics, which the Mac drops.
+  const native = NATIVE_SOURCES.filter(existsSync).map((p) => readFileSync(p, "utf8").replace(/&(?=[A-Za-z])/g, "")).join("\n");
+  const unused = keys.filter((key) =>
+    key.startsWith("native.")
+      ? !native.includes(`"${nativeKey(en[key])}"`)
+      : !corpus.includes(`"${key}"`) && !corpus.includes(`'${key}'`)
+  );
+  if (unused.length) problems.push(`keys nothing uses (remove them from en.ts, or for native.* put the same English in the code): ${unused.join(", ")}`);
 
-  // Translations: known keys, same placeholders; coverage.
+  // Translations: a known language, every key and no other, the same
+  // placeholders, its own plural categories; coverage.
+  const { LOCALES } = await import(join(SRC, "i18n", "locales.ts"));
   const catalogDir = join(SRC, "i18n", "catalogs");
   const catalogs = existsSync(catalogDir) ? files(catalogDir, (p) => p.endsWith(".ts")) : [];
   log(`Languages: en (source, ${keys.length} messages)`);
-  for (const path of catalogs) {
+  for (const path of catalogs.sort()) {
     const code = path.replace(/^.*\/(.+)\.ts$/, "$1");
+    if (!LOCALES.some((locale) => locale.code === code)) {
+      problems.push(`${relative(ROOT, path)}: ${code} isn't one of the dashboard's languages (src/i18n/locales.ts)`);
+      continue;
+    }
     const catalog = (await import(path)).default ?? {};
-    const unknown = Object.keys(catalog).filter((key) => !(key in en));
-    if (unknown.length) problems.push(`${code}: keys English doesn't have: ${unknown.join(", ")}`);
-    const mismatched = Object.keys(catalog).filter(
-      (key) => key in en && placeholders(catalog[key]) !== placeholders(en[key])
-    );
-    if (mismatched.length) problems.push(`${code}: placeholders differ from English in ${mismatched.join(", ")}`);
+    problems.push(...catalogProblems(code, catalog, en));
     const done = keys.filter((key) => typeof catalog[key] === "string" && catalog[key].trim()).length;
-    log(`           ${code} ${done}/${keys.length} (${Math.round((100 * done) / keys.length)}%)`);
+    const name = LOCALES.find((locale) => locale.code === code).name;
+    log(`           ${code.padEnd(7)} ${String(done).padStart(4)}/${keys.length} (${Math.floor((100 * done) / keys.length)}%)  ${name}`);
   }
 
   // Hard-coded English: may only go down.

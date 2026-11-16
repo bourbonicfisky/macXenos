@@ -6,7 +6,7 @@ import { openFolderEditor } from "../ui/folder-editor";
 import { ScanProgress } from "../ui/scan-progress";
 import { send, useNative, type NativeState } from "../native";
 import { Aside, PaneAction } from "./parts";
-import { getLanguage, t } from "../i18n";
+import { formatDate, formatList, t } from "../i18n";
 
 /* ==========================================================================
    Home: the dashboard you land on, as the console's own was. What is
@@ -21,12 +21,7 @@ export function whenPlayed(seconds: number): string {
   if (days <= 0) return t("played.today");
   if (days === 1) return t("played.yesterday");
   if (days < 7) return t("played.daysAgo", { days });
-  const language = getLanguage();
-  const date = then.toLocaleDateString(language === "en" || language === "en-XA" ? undefined : language, {
-    month: "long",
-    day: "numeric",
-    year: "numeric"
-  });
+  const date = formatDate(then, { month: "long", day: "numeric", year: "numeric" });
   return t("played.on", { date });
 }
 
@@ -105,9 +100,7 @@ export function dashboardShortcuts(state: NativeState): string {
   const key = String(state.cvars.preferences_key?.value ?? "F6");
   if (key && key !== "none") ways.push(key);
   ways.push("⌘,");
-  return ways.length > 1
-    ? t("shortcuts.list", { first: ways.slice(0, -1).join(", "), last: ways[ways.length - 1] })
-    : ways[0];
+  return formatList(ways, "disjunction");
 }
 
 export function home(state: NativeState): BladeDef {

@@ -76,8 +76,8 @@ export const NEXT_LAUNCH = new Set([
 
 /** "Setting saved — VSync: On", the site's achievement-style toast. */
 export function announceSetting(name: string, valueLabel: string) {
-  const later = NEXT_LAUNCH.has(name) ? " (next launch)" : "";
-  showToast("Setting saved", `${name}: ${valueLabel}${later}`);
+  const later = NEXT_LAUNCH.has(name) ? t("settings.nextLaunchSuffix") : "";
+  showToast(t("toast.preferenceSaved"), t("settings.savedValue", { name, value: valueLabel, later }));
 }
 
 export function useCvar(name: CvarName): Cvar | undefined {
@@ -146,7 +146,7 @@ export function Options({
           onClick={() => choose(option)}
         >
           {option.label}
-          {option.recommended ? <span className="pref-tag">Recommended</span> : null}
+          {option.recommended ? <span className="pref-tag">{t("settings.recommended")}</span> : null}
         </button>
       ))}
     </div>
@@ -157,8 +157,8 @@ export function Options({
 export function Toggle({
   name,
   title,
-  off = "Off",
-  on = "On",
+  off = t("common.off"),
+  on = t("common.on"),
   invert = false
 }: {
   name: CvarName;
@@ -309,7 +309,7 @@ export function TextField({
       value = parsed;
     }
     setCvar(name, value);
-    announceSetting(title, String(value) || "(empty)");
+    announceSetting(title, String(value) || t("settings.empty"));
   };
 
   return (
@@ -368,14 +368,14 @@ export function Check({
         onChange={(event) => {
           const next = invert ? !event.target.checked : event.target.checked;
           setCvar(name, next);
-          announceSetting(typeof label === "string" ? label : name, event.target.checked ? "On" : "Off");
+          announceSetting(typeof label === "string" ? label : name, event.target.checked ? t("common.on") : t("common.off"));
         }}
       />
       <span className="grid">
         <span>{label}</span>
         {recommended ? (
           <span className="pref-recommended" data-differs={checked !== recommendedOn || undefined}>
-            Recommended {recommendedOn ? "on" : "off"}
+            {t("settings.recommendedValue", { value: recommendedOn ? t("common.on") : t("common.off") })}
           </span>
         ) : null}
       </span>
@@ -389,7 +389,7 @@ export function UseRecommended({ names, title }: { names: CvarName[]; title: str
   const { cvars } = useNative();
   const differing = names.filter((n) => cvars[n] && !same(cvars[n].value, cvars[n].defaultValue));
   if (differing.length === 0) {
-    return <p className="menu-note m-0 text-[0.78em]">These are the recommended settings.</p>;
+    return <p className="menu-note m-0 text-[0.78em]">{t("settings.alreadyRecommended")}</p>;
   }
   return (
     <button
@@ -397,10 +397,10 @@ export function UseRecommended({ names, title }: { names: CvarName[]; title: str
       className="pane-button rounded-row mt-[0.3em] inline-flex min-h-[2.2em] cursor-pointer items-center justify-self-start px-[0.9em]"
       onClick={() => {
         for (const name of differing) send({ op: "reset", name });
-        announceSetting(title, "Recommended");
+        announceSetting(title, t("settings.recommended"));
       }}
     >
-      Use recommended settings
+      {t("settings.useRecommended")}
     </button>
   );
 }
@@ -424,8 +424,8 @@ export function Value({
     return <>{found?.short ?? found?.label ?? String(cvar.value)}</>;
   }
   if (format) return <>{format(cvar.value)}</>;
-  if (typeof cvar.value === "boolean") return <>{cvar.value ? "On" : "Off"}</>;
-  return <>{String(cvar.value) || "Default"}</>;
+  if (typeof cvar.value === "boolean") return <>{cvar.value ? t("common.on") : t("common.off")}</>;
+  return <>{String(cvar.value) || t("settings.defaults")}</>;
 }
 
 /** Shown under a pane once one of its settings waits for the next launch. */
@@ -436,8 +436,8 @@ export function NextLaunchNote({ names }: { names: CvarName[] }) {
   return (
     <p className="menu-note m-0 text-[0.78em]">
       {titleOpen
-        ? "Takes effect when the game restarts. The tray below restarts it now."
-        : "Takes effect when you next start a game."}
+        ? t("settings.nextLaunchRunning")
+        : t("settings.nextLaunch")}
     </p>
   );
 }
@@ -476,10 +476,10 @@ export function ResetButton({ name, title }: { name: CvarName; title: string }) 
       className="pane-button rounded-row mt-[0.3em] inline-flex min-h-[2.2em] cursor-pointer items-center justify-self-start px-[0.9em]"
       onClick={() => {
         send({ op: "reset", name });
-        announceSetting(title, "Default");
+        announceSetting(title, t("settings.defaults"));
       }}
     >
-      Reset to default
+      {t("settings.resetDefault")}
     </button>
   );
 }
