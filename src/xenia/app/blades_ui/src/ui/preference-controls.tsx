@@ -4,6 +4,7 @@ import {
   Choice,
   ChoicePref,
   choiceText,
+  type ChoiceText,
   PREFERENCE_CHOICES,
   PREFERENCE_NAMES,
   Preferences,
@@ -13,11 +14,17 @@ import {
 } from "./preferences";
 import { announcePreference } from "./toast";
 
+/** An option's text; a language's own name carries its lang, so a screen
+    reader says it in that language and the right CJK face is picked. */
+export function ChoiceLabel({ text }: { text: ChoiceText }) {
+  return typeof text !== "string" && text.lang ? <span lang={text.lang}>{text.raw}</span> : <>{choiceText(text)}</>;
+}
+
 /** The current setting, shown at the right of its menu row. */
 export function PreferenceValue({ pref }: { pref: ChoicePref }) {
   const prefs = usePreferences();
   const choice = (PREFERENCE_CHOICES[pref] as Choice<typeof pref>[]).find((c) => c.value === prefs[pref]);
-  return <>{choice ? choiceText(choice.short ?? choice.label) : null}</>;
+  return choice ? <ChoiceLabel text={choice.short ?? choice.label} /> : null;
 }
 
 /** The Sound row's value: "Off", or the volume when sound is on. */
@@ -55,7 +62,7 @@ export function PreferenceOptions({ pref }: { pref: ChoicePref }) {
           className="pref-option rounded-row inline-flex min-h-[2.2em] cursor-pointer items-center px-[0.85em]"
           onClick={() => choose(choice.value)}
         >
-          {choiceText(choice.label)}
+          <ChoiceLabel text={choice.label} />
         </button>
       ))}
     </div>

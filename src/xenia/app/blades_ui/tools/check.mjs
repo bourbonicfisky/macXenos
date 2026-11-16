@@ -8,6 +8,8 @@
 //      written straight into it instead of through t().
 //   4. dist/, which is checked in and is what the app ships, is what the
 //      sources build to now.
+//   5. The app's menu and dialog text (../localization/<code>.lproj), also
+//      checked in, is what the catalogs give now.
 //
 // Each failure says how to fix it. Exit status 1 if any failed.
 
@@ -17,6 +19,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { report as textReport } from "./i18n.mjs";
+import { staleTables } from "./native-strings.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCES = join(ROOT, "..", "..");
@@ -93,6 +96,14 @@ try {
       return `stale (${[...missing, ...extra, ...differ].join(", ")}). Run npm run build and commit dist/.`;
     }
   });
+
+  const staleNative = await staleTables();
+  if (staleNative.length) {
+    failed++;
+    console.log(`FAIL  the app's menu and dialog text\n      stale (${staleNative.join(", ")}). Run npm run build and commit src/xenia/app/localization/.`);
+  } else {
+    console.log("ok    the app's menu and dialog text");
+  }
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }

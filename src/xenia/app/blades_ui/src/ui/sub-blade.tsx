@@ -6,6 +6,7 @@ import {
   useSyncExternalStore,
   type ReactNode
 } from "react";
+import { formatTime } from "../i18n";
 import { SHOWN_EVENT, useNative } from "../native";
 import type { BladeTone } from "./blade";
 import { isDashboardKey } from "./keys";
@@ -64,7 +65,7 @@ if (typeof window !== "undefined") {
 }
 
 function useClock() {
-  const format = () => new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const format = () => formatTime(new Date());
   const [now, setNow] = useState(format);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(format()), 15_000);

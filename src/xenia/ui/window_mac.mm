@@ -34,9 +34,11 @@ static void ShowMacAboutPanel() {
   };
   NSMutableAttributedString* credits =
       [[NSMutableAttributedString alloc] init];
+  // Each line is a label (localized: Localizable.strings, generated from the
+  // dashboard's catalogs) over its link.
   void (^add_line)(NSString*, NSString*) = ^(NSString* label, NSString* url) {
     [credits appendAttributedString:[[NSAttributedString alloc]
-                                         initWithString:label
+                                         initWithString:[label stringByAppendingString:@"\n"]
                                              attributes:text_attrs]];
     NSMutableDictionary* link_attrs = [text_attrs mutableCopy];
     link_attrs[NSLinkAttributeName] = url;
@@ -48,15 +50,15 @@ static void ShowMacAboutPanel() {
                                              attributes:text_attrs]];
   };
 
-  add_line(@"macXenos — an unofficial macOS build of Xenia Canary. Ported by dmg:\n",
+  add_line(NSLocalizedString(@"macXenos — an unofficial macOS build of Xenia Canary. Ported by dmg:", @"About panel"),
            @"https://www.patreon.com/dmug");
-  add_line(@"Official website:\n", @"https://macxenos.com");
-  add_line(@"Source code and bug reports:\n",
+  add_line(NSLocalizedString(@"Official website:", @"About panel"), @"https://macxenos.com");
+  add_line(NSLocalizedString(@"Source code and bug reports:", @"About panel"),
            @"https://github.com/bourbonicfisky/macXenos");
-  add_line(@"Original project:\n",
+  add_line(NSLocalizedString(@"Original project:", @"About panel"),
            @"https://github.com/xenia-canary/xenia-canary");
-  add_line(@"Xenia project:\n", @"https://xenia.jp/about/");
-  add_line(@"Game compatibility:\n",
+  add_line(NSLocalizedString(@"Xenia project:", @"About panel"), @"https://xenia.jp/about/");
+  add_line(NSLocalizedString(@"Game compatibility:", @"About panel"),
            @"https://xenia-manager.github.io/compatibility");
 
   [NSApp orderFrontStandardAboutPanel:@{
@@ -304,7 +306,10 @@ VirtualKey TranslateMacKeyCode(uint16_t key_code) {
 }
 
 // Strips Windows-style '&' mnemonic markers for native display, collapsing the
-// literal "&&" escape to a single '&' (mirrors the Win32/GTK convention).
+// literal "&&" escape to a single '&' (mirrors the Win32/GTK convention), then
+// looks the English title up in the app's Localizable.strings (generated from
+// the dashboard's catalogs, blades_ui/tools/native-strings.mjs). A title the
+// tables don't have, such as a game's name in Open Recent, stays as it is.
 NSString* MakeNativeMenuTitle(const std::string& text) {
   std::string out;
   out.reserve(text.size());
@@ -319,7 +324,8 @@ NSString* MakeNativeMenuTitle(const std::string& text) {
       out.push_back(text[i]);
     }
   }
-  return [NSString stringWithUTF8String:out.c_str()];
+  NSString* title = [NSString stringWithUTF8String:out.c_str()];
+  return title ? NSLocalizedString(title, nil) : @"";
 }
 
 // Builds the standard macOS application menu (the first, app-named menu) with
@@ -340,7 +346,7 @@ NSMenuItem* CreateApplicationMenuItem(XeniaWindowDelegate* delegate) {
   }
 
   NSMenuItem* about =
-      [[NSMenuItem alloc] initWithTitle:[@"About " stringByAppendingString:app_name]
+      [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:NSLocalizedString(@"About %@", @"app menu"), app_name]
                                  action:@selector(openAbout:)
                           keyEquivalent:@""];
   about.target = delegate;
@@ -348,7 +354,7 @@ NSMenuItem* CreateApplicationMenuItem(XeniaWindowDelegate* delegate) {
   // Only in a bundle packaged with Sparkle and a feed (updater_mac.h).
   if (xe::ui::StartMacUpdater()) {
     NSMenuItem* updates =
-        [[NSMenuItem alloc] initWithTitle:@"Check for Updates…"
+        [[NSMenuItem alloc] initWithTitle:NSLocalizedString(@"Check for Updates…", @"app menu")
                                    action:@selector(checkForUpdates:)
                             keyEquivalent:@""];
     updates.target = delegate;
@@ -357,7 +363,7 @@ NSMenuItem* CreateApplicationMenuItem(XeniaWindowDelegate* delegate) {
   [app_menu addItem:[NSMenuItem separatorItem]];
 
   // Preferences, as every Mac app has them: ⌘, opens the blades.
-  NSMenuItem* settings = [[NSMenuItem alloc] initWithTitle:@"Settings…"
+  NSMenuItem* settings = [[NSMenuItem alloc] initWithTitle:NSLocalizedString(@"Settings…", @"app menu")
                                                     action:@selector(openSettings:)
                                              keyEquivalent:@","];
   settings.target = delegate;
@@ -365,24 +371,24 @@ NSMenuItem* CreateApplicationMenuItem(XeniaWindowDelegate* delegate) {
   [app_menu addItem:[NSMenuItem separatorItem]];
 
   NSMenuItem* hide =
-      [[NSMenuItem alloc] initWithTitle:[@"Hide " stringByAppendingString:app_name]
+      [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:NSLocalizedString(@"Hide %@", @"app menu"), app_name]
                                  action:@selector(hide:)
                           keyEquivalent:@"h"];
   [app_menu addItem:hide];
   NSMenuItem* hide_others =
-      [[NSMenuItem alloc] initWithTitle:@"Hide Others"
+      [[NSMenuItem alloc] initWithTitle:NSLocalizedString(@"Hide Others", @"app menu")
                                  action:@selector(hideOtherApplications:)
                           keyEquivalent:@"h"];
   hide_others.keyEquivalentModifierMask =
       NSEventModifierFlagCommand | NSEventModifierFlagOption;
   [app_menu addItem:hide_others];
-  [app_menu addItem:[[NSMenuItem alloc] initWithTitle:@"Show All"
+  [app_menu addItem:[[NSMenuItem alloc] initWithTitle:NSLocalizedString(@"Show All", @"app menu")
                                                action:@selector(unhideAllApplications:)
                                         keyEquivalent:@""]];
   [app_menu addItem:[NSMenuItem separatorItem]];
 
   NSMenuItem* quit =
-      [[NSMenuItem alloc] initWithTitle:[@"Quit " stringByAppendingString:app_name]
+      [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:NSLocalizedString(@"Quit %@", @"app menu"), app_name]
                                  action:@selector(quit:)
                           keyEquivalent:@"q"];
   if (delegate) {

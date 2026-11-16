@@ -28,6 +28,14 @@ class MacFilePicker : public FilePicker {
   bool ShowOnMainThread(Window* parent_window);
 };
 
+// The panel's title, from the app's Localizable.strings (generated from the
+// dashboard's catalogs) when it has one; the dashboard passes its titles
+// already in the reader's language, and those stay as they are.
+static NSString* LocalizedTitle(const std::string& title) {
+  NSString* english = [NSString stringWithUTF8String:title.c_str()];
+  return english ? NSLocalizedString(english, nil) : @"";
+}
+
 std::unique_ptr<FilePicker> FilePicker::Create() {
   return std::make_unique<MacFilePicker>();
 }
@@ -55,7 +63,7 @@ bool MacFilePicker::ShowOnMainThread(Window* parent_window) {
 
     if (mode() == Mode::kSave) {
       NSSavePanel* panel = [NSSavePanel savePanel];
-      [panel setTitle:[NSString stringWithUTF8String:title().c_str()]];
+      [panel setTitle:LocalizedTitle(title())];
       if ([panel runModal] == NSModalResponseOK) {
         NSURL* url = [panel URL];
         if (url) {
@@ -64,7 +72,7 @@ bool MacFilePicker::ShowOnMainThread(Window* parent_window) {
       }
     } else {
       NSOpenPanel* panel = [NSOpenPanel openPanel];
-      [panel setTitle:[NSString stringWithUTF8String:title().c_str()]];
+      [panel setTitle:LocalizedTitle(title())];
       bool directories = type() == Type::kDirectory;
       [panel setCanChooseFiles:directories ? NO : YES];
       [panel setCanChooseDirectories:directories ? YES : NO];

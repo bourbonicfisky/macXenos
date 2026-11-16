@@ -83,8 +83,9 @@ const ALLOWED: { [K in keyof Preferences]: readonly Preferences[K][] } = {
 /** The settings offered as a row of options (the override is a checkbox). */
 export type ChoicePref = Exclude<keyof Preferences, "motionOverride">;
 
-/** Text on an option: a catalog key, or (a language's own name) as is. */
-export type ChoiceText = MessageKey | { raw: string };
+/** Text on an option: a catalog key, or (a language's own name) as is, with
+    the language it is written in, so it is read and set as that language. */
+export type ChoiceText = MessageKey | { raw: string; lang?: string };
 export const choiceText = (text: ChoiceText) => (typeof text === "string" ? t(text) : text.raw);
 
 export type Choice<K extends keyof Preferences> = {
@@ -102,7 +103,7 @@ export const PREFERENCE_CHOICES: { [K in ChoicePref]: Choice<K>[] } = {
     { value: "system", label: "pref.language.system" },
     ...AVAILABLE.map((code) => ({
       value: code,
-      label: { raw: LOCALES.find((locale) => locale.code === code)!.name }
+      label: { raw: LOCALES.find((locale) => locale.code === code)!.name, lang: code }
     })),
     ...(import.meta.env.DEV ? [{ value: PSEUDO, label: { raw: "Pseudo" } } as Choice<"language">] : [])
   ],

@@ -226,6 +226,35 @@ const tests = {
     expect((await page.eval("document.title")) === "Preferences", "page title stayed Russian");
   },
 
+  async "every language switches the blades, in its own name, and follows the Mac"(page, base) {
+    const { readdirSync } = await import("node:fs");
+    const codes = readdirSync(new URL("../src/i18n/catalogs/", import.meta.url))
+      .filter((file) => file.endsWith(".ts"))
+      .map((file) => file.slice(0, -3));
+    const names = { de: "Deutsch", es: "Español", fr: "Français", it: "Italiano", ko: "한국어", nl: "Nederlands", ru: "Русский", sv: "Svenska", "zh-Hant": "繁體中文" };
+    for (const code of codes) {
+      await page.open(base, "#system/language");
+      const option = `[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].find((b) => b.textContent === ${JSON.stringify(names[code])})`;
+      expect(await page.eval(`!!${option}`), `no option named ${names[code]} for ${code}`);
+      expect((await page.eval(`${option}.querySelector('[lang]')?.lang`)) === code, `${code}'s name is not marked lang=${code}`);
+      await page.eval(`${option}.click()`);
+      expect((await page.eval("document.documentElement.lang")) === code, `${code} did not activate`);
+      const want = await page.eval(`import('/src/i18n/catalogs/${code}.ts').then((m) => m.default["graphics.title"])`);
+      await page.open(base, "#graphics");
+      const title = await page.eval("document.querySelector('.blade[data-state=open] h2')?.textContent");
+      expect(title === want, `${code}: Graphics reads ${title}, not ${want}`);
+      await page.eval("localStorage.clear()");
+    }
+    // Same as my Mac: regional variants find their language; Simplified
+    // Chinese does not read Traditional.
+    await page.open(base, "#system/language");
+    for (const [tags, want] of [[["pt-BR", "fr-CA"], "fr"], [["es-MX"], "es"], [["zh-HK"], "zh-Hant"], [["zh-CN", "de-AT"], "de"], [["zh-Hans-CN"], "en"]]) {
+      await page.eval(`import('/src/i18n/index.ts').then((i18n) => i18n.setSystemLanguages(${JSON.stringify(tags)}))`);
+      const lang = await page.eval("document.documentElement.lang");
+      expect(lang === want, `Mac languages ${tags} gave ${lang}, not ${want}`);
+    }
+  },
+
   async "Dashboard language offers Same as my Mac and English"(page, base) {
     await page.open(base, "#system/language");
     const row = await page.eval(

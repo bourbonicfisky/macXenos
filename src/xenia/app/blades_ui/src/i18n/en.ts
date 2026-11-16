@@ -211,7 +211,6 @@ export const en = {
   // --- How to bring the dashboard back ---------------------------------------
   "shortcuts.guide": "a tap of Guide on a controller",
   "shortcuts.backStart": "Back and Start together on a controller",
-  "shortcuts.list": "{first} or {last}",
 
   // --- System > Dashboard -----------------------------------------------------
   "dashboard.pageTitle": "Preferences",
@@ -239,7 +238,7 @@ export const en = {
   "dashboard.pause": "Pause games",
   "dashboard.pause.detail": "Freezes the game while this dashboard is open, so nothing happens in it until you go back. Games also get the console’s own notice, which most use to pause themselves.",
   "dashboard.notifications": "Notifications",
-  "dashboard.notifications.detail": "Where “Setting saved” appears. The Xbox 360 showed it at the bottom center.",
+  "dashboard.notifications.detail": "Where “Preference saved” appears. The Xbox 360 showed it at the bottom center.",
   "dashboard.language.detail": "The language of these blades. Games use the console’s language, under Language and region.",
   "dashboard.language.more": "More languages are on the way.",
   "dashboard.shortcuts": "Shortcuts",
@@ -684,7 +683,79 @@ export const en = {
   "console.dolbyDigitalWma": "Dolby Digital with WMA Pro",
   "console.parentalControl": "Parental controls",
   "console.macAddress": "MAC address",
-  "console.networkId": "Network ID"
+  "console.networkId": "Network ID",
+
+  // --- Native macOS: the menu bar, the About panel, alerts, open panels -------
+  // Not shown by the page: tools/native-strings.mjs writes these into the
+  // app's <lang>.lproj/Localizable.strings, where the English text (with
+  // {app} as %@) is the key the native code looks up. Change the English here
+  // and in the code together; npm run check finds an English text the code no
+  // longer has. The app menu follows the Mac's language, as every Mac app's
+  // does, not the Dashboard language.
+  "native.app.about": "About {app}",
+  "native.app.checkForUpdates": "Check for Updates…",
+  "native.app.settings": "Settings…",
+  "native.app.hide": "Hide {app}",
+  "native.app.hideOthers": "Hide Others",
+  "native.app.showAll": "Show All",
+  "native.app.quit": "Quit {app}",
+  "native.about.port": "macXenos — an unofficial macOS build of Xenia Canary. Ported by dmg:",
+  "native.about.website": "Official website:",
+  "native.about.source": "Source code and bug reports:",
+  "native.about.original": "Original project:",
+  "native.about.xenia": "Xenia project:",
+  "native.about.compatibility": "Game compatibility:",
+  "native.menu.file": "File",
+  "native.menu.open": "Open...",
+  "native.menu.openRecent": "Open Recent",
+  "native.menu.installContent": "Install Content...",
+  "native.menu.stop": "Stop Emulation",
+  "native.menu.rebootTitle": "Reboot Title",
+  "native.menu.fullReboot": "Full Reboot",
+  "native.menu.showContentDirectory": "Show content directory...",
+  "native.menu.exit": "Exit",
+  "native.menu.profile": "Profile",
+  "native.menu.profiles": "Profiles...",
+  "native.menu.view": "View",
+  "native.menu.graphicsSettings": "Graphics settings...",
+  "native.menu.fullscreen": "Fullscreen",
+  "native.menu.screenshot": "Take Screenshot",
+  "native.menu.controller": "Controller",
+  "native.menu.toggleVibration": "Toggle controller vibration",
+  "native.menu.controllerHotkeys": "Display controller hotkeys",
+  "native.menu.controllerSettings": "Controller settings...",
+  "native.menu.console": "Console",
+  "native.menu.dashboard": "Show or Hide Dashboard",
+  "native.menu.consoleSettings": "Console settings...",
+  "native.menu.debug": "Debug",
+  "native.menu.traceFrame": "Trace Frame",
+  "native.menu.clearCaches": "Clear Runtime Caches",
+  "native.menu.resetTimeScalar": "Reset Time Scalar",
+  "native.menu.halveTimeScalar": "Time Scalar /= 2",
+  "native.menu.doubleTimeScalar": "Time Scalar *= 2",
+  "native.menu.profilerDisplay": "Toggle Profiler Display",
+  "native.menu.profilerPause": "Pause/Resume Profiler",
+  "native.menu.guestDebugger": "Break and Show Guest Debugger",
+  "native.menu.hostDebugger": "Break into Host Debugger",
+  "native.menu.zar": "Zar Package",
+  "native.menu.zarCreate": "Create",
+  "native.menu.zarExtract": "Extract",
+  "native.menu.help": "Help",
+  "native.menu.website": "macXenos Website...",
+  "native.menu.github": "macXenos on GitHub...",
+  "native.menu.reportBug": "Report a Bug...",
+  "native.menu.about": "About...",
+  "native.alert.help": "macXenos Help",
+  "native.alert.warning": "macXenos Warning",
+  "native.alert.error": "macXenos Error",
+  "native.panel.contentPackage": "Select Content Package",
+  "native.panel.zarPackage": "Select Zar Package",
+  "native.panel.extractTo": "Select Directory to Extract",
+  "native.panel.contents": "Select Contents",
+  "native.panel.zarFile": "Zarchive File",
+  "native.panel.outputDirectory": "Output Directory",
+  "native.panel.addGameFolders": "Add Game Folders",
+  "native.panel.chooseFolder": "Choose Folder"
 } as const;
 
 export type MessageKey = keyof typeof en;

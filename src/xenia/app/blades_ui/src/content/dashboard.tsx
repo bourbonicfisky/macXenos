@@ -99,7 +99,8 @@ function BackgroundDetail() {
 /** The language the dashboard is in now, in its own words. */
 function LanguageValue() {
   const language = useLanguage();
-  return <>{language === PSEUDO ? "Pseudo" : LOCALES.find((locale) => locale.code === language)?.name}</>;
+  if (language === PSEUDO) return <>Pseudo</>;
+  return <span lang={language}>{LOCALES.find((locale) => locale.code === language)?.name}</span>;
 }
 
 /** The Sound row's value: what's playing, or why nothing is. */

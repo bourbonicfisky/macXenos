@@ -35,22 +35,25 @@ void LaunchFileExplorer(const std::filesystem::path& path) {
   }
 }
 
+// The title is localized (the app's Localizable.strings, generated from the
+// dashboard's catalogs); the message comes from wherever the error arose, in
+// English.
 void ShowSimpleMessageBox(SimpleMessageBoxType type, std::string_view message) {
   @autoreleasepool {
     NSString* title;
     NSAlertStyle style;
     switch (type) {
       case SimpleMessageBoxType::Help:
-        title = @"macXenos Help";
+        title = NSLocalizedString(@"macXenos Help", @"alert title");
         style = NSAlertStyleInformational;
         break;
       case SimpleMessageBoxType::Warning:
-        title = @"macXenos Warning";
+        title = NSLocalizedString(@"macXenos Warning", @"alert title");
         style = NSAlertStyleWarning;
         break;
       case SimpleMessageBoxType::Error:
       default:
-        title = @"macXenos Error";
+        title = NSLocalizedString(@"macXenos Error", @"alert title");
         style = NSAlertStyleCritical;
         break;
     }

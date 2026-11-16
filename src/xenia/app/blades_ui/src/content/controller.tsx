@@ -13,7 +13,7 @@ import {
 import { Aside, PaneAction } from "./parts";
 import { rendererShown } from "./visibility";
 import { ControllerMap } from "../ui/controller-map";
-import { t, type MessageKey } from "../i18n";
+import { formatPercent, t, type MessageKey } from "../i18n";
 
 const players = () => [1, 2, 3, 4].map((player) => t("controller.player", { player }));
 
@@ -46,7 +46,7 @@ const INPUT_SYSTEMS: Option[] = [
   { value: "nop", get label() { return t("home.gameFolders.none"); }, get short() { return t("home.gameFolders.none"); } }
 ];
 
-const percent = (value: number) => `${Math.round(value * 100)}%`;
+const percent = (value: number) => formatPercent(value);
 
 // Anti-dead zone presets: off, a mild one, and the console's own dead zones
 // for the left stick (7849 of 32767) and the right (8689), which most games
