@@ -55,16 +55,31 @@ body {
   --font-ui: "Selawik", "PingFang TC", system-ui, sans-serif;
   --font-badge: "Michroma", "PingFang TC", sans-serif;
 }
+:root:lang(zh-Hans) {
+  --font-ui: "Selawik", "PingFang SC", system-ui, sans-serif;
+  --font-badge: "Michroma", "PingFang SC", sans-serif;
+}
+:root:lang(ja) {
+  --font-ui: "Selawik", "Hiragino Sans", system-ui, sans-serif;
+  --font-badge: "Michroma", "Hiragino Sans", sans-serif;
+}
 [lang="ko"] {
   font-family: "Selawik", "Apple SD Gothic Neo", system-ui, sans-serif;
 }
 [lang="zh-Hant"] {
   font-family: "Selawik", "PingFang TC", system-ui, sans-serif;
 }
+[lang="zh-Hans"] {
+  font-family: "Selawik", "PingFang SC", system-ui, sans-serif;
+}
+[lang="ja"] {
+  font-family: "Selawik", "Hiragino Sans", system-ui, sans-serif;
+}
 /* Korean is spaced into words and breaks between them, as Apple's Korean
    UI does, rather than inside a word; a word too long for its box still
-   wraps instead of spilling. Chinese breaks between characters (the
-   default), with WebKit keeping closing punctuation off a line's start. */
+   wraps instead of spilling. Chinese and Japanese break between characters
+   (the default), with WebKit keeping closing punctuation and small kana off
+   a line's start. */
 :root:lang(ko) {
   word-break: keep-all;
   overflow-wrap: break-word;

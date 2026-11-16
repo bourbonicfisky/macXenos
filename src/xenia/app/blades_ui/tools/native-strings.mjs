@@ -21,6 +21,10 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const NATIVE_DIR = join(ROOT, "..", "localization");
 const PREFIX = "native.";
+// The .lproj a catalog is written as, where Apple's name differs: pt.lproj
+// is Brazilian Portuguese in Apple's own apps, and a Mac set to Portugal's
+// (pt-PT) falls back to it too.
+const LPROJ = { "pt-BR": "pt" };
 
 /** "About {app}" -> "About %@"; the names in English's order. */
 export function toFormat(message, order) {
@@ -62,7 +66,7 @@ export async function nativeTables() {
       lines.push(`${quote(nativeKey(en[key]))} = ${quote(toFormat(text, order))};`);
       lines.push("");
     }
-    tables[`${code}.lproj/Localizable.strings`] = lines.join("\n");
+    tables[`${LPROJ[code] ?? code}.lproj/Localizable.strings`] = lines.join("\n");
   }
   return tables;
 }

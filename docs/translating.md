@@ -1,24 +1,40 @@
 # Translating macXenos
 
 macXenos's dashboard (the Blades settings, Home, All Games, profiles) and the
-app's own menus can be shown in any of the Xbox 360's sixteen languages. These
-are translated today:
+app's own menus are translated into the Xbox 360's languages, and Danish and
+Finnish besides:
 
 | Language | Code | Translated by |
 | --- | --- | --- |
 | English | `en` | the source |
+| Dansk | `da` | machine-assisted, awaiting native review |
 | Deutsch | `de` | machine-assisted, awaiting native review |
 | Español | `es` | machine-assisted, awaiting native review |
 | Français | `fr` | machine-assisted, awaiting native review |
 | Italiano | `it` | machine-assisted, awaiting native review |
+| 日本語 | `ja` | machine-assisted, awaiting native review |
 | 한국어 | `ko` | machine-assisted, awaiting native review |
 | Nederlands | `nl` | machine-assisted, awaiting native review |
+| Norsk bokmål | `nb` | machine-assisted, awaiting native review |
+| Polski | `pl` | machine-assisted, awaiting native review |
+| Português (Brasil) | `pt-BR` | machine-assisted, awaiting native review |
 | Русский | `ru` | foxsetDev |
+| Suomi | `fi` | machine-assisted, awaiting native review |
 | Svenska | `sv` | machine-assisted, awaiting native review |
+| 简体中文 | `zh-Hans` | machine-assisted, awaiting native review |
 | 繁體中文 | `zh-Hant` | machine-assisted, awaiting native review |
 
-Still to come: 日本語 (`ja`), Português (`pt`), Polski (`pl`), Türkçe
-(`tr`), Norsk (`nb`) and 简体中文 (`zh-Hans`).
+Still to come: Türkçe (`tr`).
+
+A Mac set to a regional variant reads its language's catalog: Canadian
+French reads `fr`, Mexican Spanish `es`. Some cases to know:
+
+- **Portuguese.** There is only a Brazilian catalog, so every Portuguese,
+  Portugal's included, reads it. A European Portuguese catalog is welcome; it
+  would need its own code in `src/i18n/locales.ts`.
+- **Chinese.** Taiwan, Hong Kong and Macau, and any `zh-Hant` setting, read
+  繁體中文; all other Chinese reads 简体中文.
+- **Norwegian.** Nynorsk and plain Norwegian read Bokmål.
 
 **A review by a native speaker is welcome for every language**, including
 the ones above: a pull request that fixes a few wrong or awkward phrases helps
@@ -46,20 +62,21 @@ Everything is under `src/xenia/app/blades_ui/`:
 
 You need Node 22 or later.
 
-1. Check the language's code in `src/i18n/locales.ts` (the console's sixteen
-   languages, each with its name in its own language).
+1. Find the language's code in `src/i18n/locales.ts`, which lists each
+   language with its name in its own language. A language that isn't there
+   yet needs a line added (its BCP 47 code and its own name).
 2. Create `src/i18n/catalogs/<code>.ts`:
 
    ```ts
    /**
-    * Polish (pl) translation of the macXenos dashboard and the app's menus.
+    * Turkish (tr) translation of the macXenos dashboard and the app's menus.
     * Translated by <your name>.
     */
    import type { Catalog } from "../catalogs";
 
    export default {
-     "legend.day": "Dzień",
-     "legend.night": "Noc",
+     "legend.day": "Gündüz",
+     "legend.night": "Gece",
      // ...every key in en.ts, in the same order
    } satisfies Catalog;
    ```
@@ -104,7 +121,8 @@ defines them (what `Intl.PluralRules` uses):
 | Language | Categories to give |
 | --- | --- |
 | English, German, Dutch, Swedish, Italian, Spanish, Portuguese | `one`, `other` |
-| French | `one` (0 and 1), `other` |
+| Danish, Norwegian, Finnish | `one`, `other` |
+| French, Brazilian Portuguese | `one` (0 and 1), `other` |
 | Russian, Polish | `one`, `few`, `many`, `other` |
 | Japanese, Korean, Chinese | `other` only |
 
@@ -138,7 +156,9 @@ longer text (keys ending `.detail`, `.body`, `.aside`, `.note`) has room.
 
 **Typography.** Use your language's quotation marks, apostrophes and spacing
 (for example French « » and a no-break space before `:`), and `…` rather
-than `...`.
+than `...`. Chinese, Japanese and Korean use the Mac's own fonts (PingFang,
+Hiragino Sans, Apple SD Gothic Neo), as the dashboard's font has only Latin
+letters.
 
 ## Correcting a translation
 

@@ -231,7 +231,11 @@ const tests = {
     const codes = readdirSync(new URL("../src/i18n/catalogs/", import.meta.url))
       .filter((file) => file.endsWith(".ts"))
       .map((file) => file.slice(0, -3));
-    const names = { de: "Deutsch", es: "Español", fr: "Français", it: "Italiano", ko: "한국어", nl: "Nederlands", ru: "Русский", sv: "Svenska", "zh-Hant": "繁體中文" };
+    const names = {
+      da: "Dansk", de: "Deutsch", es: "Español", fi: "Suomi", fr: "Français", it: "Italiano", ja: "日本語", ko: "한국어",
+      nb: "Norsk bokmål", nl: "Nederlands", pl: "Polski", "pt-BR": "Português (Brasil)", ru: "Русский", sv: "Svenska",
+      "zh-Hans": "简体中文", "zh-Hant": "繁體中文"
+    };
     for (const code of codes) {
       await page.open(base, "#system/language");
       const option = `[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].find((b) => b.textContent === ${JSON.stringify(names[code])})`;
@@ -245,10 +249,11 @@ const tests = {
       expect(title === want, `${code}: Graphics reads ${title}, not ${want}`);
       await page.eval("localStorage.clear()");
     }
-    // Same as my Mac: regional variants find their language; Simplified
-    // Chinese does not read Traditional.
+    // Same as my Mac: regional variants find their language; Portugal's
+    // Portuguese reads Brazil's, Nynorsk Bokmål, Singapore's Chinese
+    // Simplified.
     await page.open(base, "#system/language");
-    for (const [tags, want] of [[["pt-BR", "fr-CA"], "fr"], [["es-MX"], "es"], [["zh-HK"], "zh-Hant"], [["zh-CN", "de-AT"], "de"], [["zh-Hans-CN"], "en"]]) {
+    for (const [tags, want] of [[["hu-HU", "fr-CA"], "fr"], [["es-MX"], "es"], [["zh-HK"], "zh-Hant"], [["pt-PT"], "pt-BR"], [["nn-NO"], "nb"], [["zh-SG"], "zh-Hans"], [["hu-HU"], "en"]]) {
       await page.eval(`import('/src/i18n/index.ts').then((i18n) => i18n.setSystemLanguages(${JSON.stringify(tags)}))`);
       const lang = await page.eval("document.documentElement.lang");
       expect(lang === want, `Mac languages ${tags} gave ${lang}, not ${want}`);

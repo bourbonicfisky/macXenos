@@ -18,15 +18,24 @@ const catalogs = await Promise.all(
     .map(async (file) => [file.slice(0, -3), (await import(new URL(file, CATALOG_DIR))).default])
 );
 
-test("the sixteen console languages", () => {
-  assert.equal(LOCALES.length, 16);
-  assert.equal(new Set(LOCALES.map((l) => l.code)).size, 16);
+test("the console's sixteen languages, then Danish and Finnish", () => {
+  assert.equal(LOCALES.length, 18);
+  assert.equal(new Set(LOCALES.map((l) => l.code)).size, 18);
+  assert.deepEqual(LOCALES.slice(16).map((l) => l.code), ["da", "fi"]);
 });
 
 test("a Mac language tag picks our locale", () => {
   assert.equal(localeForTag("en-GB"), "en");
   assert.equal(localeForTag("fr-CA"), "fr");
-  assert.equal(localeForTag("pt-BR"), "pt");
+  assert.equal(localeForTag("pt-BR"), "pt-BR");
+  assert.equal(localeForTag("pt-PT"), "pt-BR");
+  assert.equal(localeForTag("pt"), "pt-BR");
+  assert.equal(localeForTag("da-DK"), "da");
+  assert.equal(localeForTag("fi-FI"), "fi");
+  assert.equal(localeForTag("pl-PL"), "pl");
+  assert.equal(localeForTag("ja-JP"), "ja");
+  assert.equal(localeForTag("nb-NO"), "nb");
+  assert.equal(localeForTag("zh-SG"), "zh-Hans");
   assert.equal(localeForTag("zh-Hant-TW"), "zh-Hant");
   assert.equal(localeForTag("zh-TW"), "zh-Hant");
   assert.equal(localeForTag("zh-HK"), "zh-Hant");
@@ -36,7 +45,7 @@ test("a Mac language tag picks our locale", () => {
   assert.equal(localeForTag("no"), "nb");
   assert.equal(localeForTag("nn-NO"), "nb");
   assert.equal(localeForTag("ja_JP"), "ja");
-  assert.equal(localeForTag("fi-FI"), null);
+  assert.equal(localeForTag("hu-HU"), null);
   // Regional variants read their language's catalog.
   assert.equal(localeForTag("es-MX"), "es");
   assert.equal(localeForTag("es-419"), "es");
@@ -59,6 +68,14 @@ test("Traditional Chinese is never what Simplified or plain Chinese read", () =>
     assert.equal(matchLocale([tag], available), "zh-Hant", tag);
   }
   assert.equal(matchLocale(["zh-CN", "zh-TW"], available), "zh-Hant");
+  // With a Simplified catalog, the rest of Chinese reads it.
+  const both = ["en", "zh-Hant", "zh-Hans"];
+  for (const tag of ["zh", "zh-CN", "zh-SG", "zh-Hans", "zh-Hans-HK"]) {
+    assert.equal(matchLocale([tag], both), "zh-Hans", tag);
+  }
+  for (const tag of ["zh-TW", "zh-HK", "zh-MO", "zh-Hant-CN"]) {
+    assert.equal(matchLocale([tag], both), "zh-Hant", tag);
+  }
 });
 
 test("the first Mac language with a translation wins, else English", () => {
@@ -133,6 +150,11 @@ test("plural categories follow Intl.PluralRules", () => {
   assert.deepEqual(catalogProblems("ko", { "x.count": "{count, plural, other {게임 #개}}" }, en1), []);
   assert.match(catalogProblems("ko", { "x.count": "{count, plural, one {#} other {#}}" }, en1).join(), /doesn't have: one/);
   assert.match(catalogProblems("ru", { "x.count": "{count, plural, one {#} other {#}}" }, en1).join(), /lacks few, many/);
+  assert.deepEqual([...pluralRules("pl").required], ["one", "few", "many", "other"]);
+  assert.match(catalogProblems("pl", { "x.count": "{count, plural, one {#} few {#} other {#}}" }, en1).join(), /lacks many/);
+  assert.deepEqual([...pluralRules("fi").allowed], ["one", "other"]);
+  assert.match(catalogProblems("fi", { "x.count": "{count, plural, one {#} few {#} other {#}}" }, en1).join(), /doesn't have: few/);
+  assert.deepEqual([...pluralRules("ja").allowed], ["other"]);
   assert.match(catalogProblems("de", {}, en1).join(), /1 keys missing/);
   assert.match(catalogProblems("de", { "x.count": "{n}", "x.extra": "" }, en1).join(), /English doesn't have: x\.extra.*placeholders differ/);
 });

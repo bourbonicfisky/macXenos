@@ -81,8 +81,10 @@ sub-blade tabs both set.
 
 ## Languages
 
-The dashboard and the app's own menus are in English, German, Spanish,
-French, Italian, Korean, Dutch, Russian, Swedish and Traditional Chinese.
+The dashboard and the app's own menus are in English, Danish, German,
+Spanish, French, Italian, Japanese, Korean, Dutch, Norwegian Bokmål, Polish,
+Brazilian Portuguese, Russian, Finnish, Swedish, and Simplified and
+Traditional Chinese.
 How to add a language or correct one, for translators:
 [docs/translating.md](../../../../docs/translating.md). Russian is foxsetDev's
 (public PR #4); the others are machine-assisted and await review by native
@@ -111,17 +113,18 @@ one never changes the other.
   of the Mac's preferred languages (the app reports them; `NSLocale`) that has
   a translation, a regional variant reading its language's (pt-BR reads `pt`,
   fr-CA `fr`, es-MX `es`), else English. Taiwan, Hong Kong and Macau, and any
-  `zh-Hant` tag, read Traditional Chinese; other Chinese reads Simplified, and
-  English until there is a Simplified catalog. Norwegian of any kind reads
-  Bokmål.
+  `zh-Hant` tag, read Traditional Chinese; other Chinese reads Simplified.
+  Every Portuguese reads the Brazilian catalog (`pt-BR`, written as Apple's
+  `pt.lproj` for the menus). Norwegian of any kind reads Bokmål.
 - **Numbers, dates, times and lists** go through Intl in the active language
   (`formatNumber`, `formatPercent`, `formatDate`, `formatTime`, `formatList`
   in `src/i18n/index.ts`; `t()` formats its numbers the same way), in the
   Mac's regional variant of it when it has one.
 - **Fonts.** Selawik and Michroma carry Latin only; other scripts fall back
-  to the Mac's faces, named outright for Korean (Apple SD Gothic Neo) and
-  Traditional Chinese (PingFang TC) in `globals.css`. Korean breaks lines
-  between words, Chinese between characters.
+  to the Mac's faces, named outright for Japanese (Hiragino Sans), Korean
+  (Apple SD Gothic Neo) and Chinese (PingFang SC, PingFang TC) in
+  `globals.css`. Korean breaks lines between words, Chinese and Japanese
+  between characters. Tab labels run along the ribbon in every script.
 - **Checks** (`npm run check`, `tools/i18n.mjs`): every English key is used
   (a `native.*` one by the native code); every translation has all of
   English's keys and no others, keeps each message's placeholders, and gives

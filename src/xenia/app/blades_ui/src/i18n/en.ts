@@ -414,7 +414,7 @@ export const en = {
   "audio.music.empty": "Nothing is playing. A game that uses the player starts it.",
   "audio.next": "Next",
   "audio.sound.detail": "Mute every game’s sound without touching your Mac’s volume.",
-  "audio.output.detail": "Games play through your Mac’s current output. None runs them without any sound, for troubleshooting.",
+  "audio.output.detail": "Games play through your Mac’s current output. “None” runs them without any sound, for troubleshooting.",
   "audio.latency.detail": "How much sound is queued ahead. Fewer frames reach your ears sooner; too few crackle when a game is busy.",
   "audio.decoder.detail": "Games store sound as XMA. The new decoder is the most stable; try a previous one if a game’s sound is broken.",
   "audio.decoder.threadNote": "Its own thread is faster; turning it off can fix stutter in a few games.",
