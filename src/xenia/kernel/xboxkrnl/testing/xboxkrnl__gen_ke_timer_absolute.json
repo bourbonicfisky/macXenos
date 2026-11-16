@@ -1,0 +1,1514 @@
+{
+ "corpus": "ke_timer_absolute",
+ "source": "Xbox 360 (Aurora), 2026-11-15, two identical runs",
+ "steps": [
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "KeInitializeTimerEx",
+   "export": "KeInitializeTimerEx",
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "arm for 60 ms ahead",
+   "export": "KeSetTimer at now plus an offset 0",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "value": 600000
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "poll before the time",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "wait for the time",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "2 s",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "poll after the wait",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "cancel after expiry",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "arm for a second ago",
+   "export": "KeSetTimer at now plus an offset 0",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "value": 18446744073699551616
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "poll at once",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "cancel a timer armed in the past",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "arm for absolute time 1",
+   "export": "KeSetTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "poll at once after absolute time 1",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "cancel after absolute time 1",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "arm with a zero time",
+   "export": "KeSetTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "poll at once after a zero time",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "cancel after a zero time",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "arm for 5 s ahead",
+   "export": "KeSetTimer at now plus an offset 0",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "value": 50000000
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "poll: not yet",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "cancel while pending",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000001",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "poll after the cancel",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "arm for 5 s ahead again",
+   "export": "KeSetTimer at now plus an offset 0",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "value": 50000000
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "rearm for a second ago while pending",
+   "export": "KeSetTimer at now plus an offset 0",
+   "r3": "0000000000000001",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "value": 18446744073699551616
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "poll after the rearm",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "cancel after the rearm",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic: first expiry 60 ms ahead",
+   "export": "KeSetTimerEx at now plus an offset 0",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "value": 600000
+    },
+    {
+     "value": 50
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic: poll before the first expiry",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic: wait for the first expiry",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "2 s",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic: let later periods pass",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "150 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic: poll after later periods",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic: cancel",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000001",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic: first expiry a second ago",
+   "export": "KeSetTimerEx at now plus an offset 0",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "value": 18446744073699551616
+    },
+    {
+     "value": 50
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic in the past: poll at once",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic in the past: let periods pass",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "150 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic in the past: poll after periods",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "periodic in the past: cancel",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000001",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 0",
+   "name": "poll after the last cancel",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "KeInitializeTimerEx",
+   "export": "KeInitializeTimerEx",
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "arm for 60 ms ahead",
+   "export": "KeSetTimer at now plus an offset 1",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "value": 600000
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "poll before the time",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "wait for the time",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "2 s",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "poll after the wait",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "cancel after expiry",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "arm for a second ago",
+   "export": "KeSetTimer at now plus an offset 1",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "value": 18446744073699551616
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "poll at once",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "cancel a timer armed in the past",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "arm for absolute time 1",
+   "export": "KeSetTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "poll at once after absolute time 1",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "cancel after absolute time 1",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "arm with a zero time",
+   "export": "KeSetTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "poll at once after a zero time",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "cancel after a zero time",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "arm for 5 s ahead",
+   "export": "KeSetTimer at now plus an offset 1",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "value": 50000000
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "poll: not yet",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "cancel while pending",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000001",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "poll after the cancel",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "arm for 5 s ahead again",
+   "export": "KeSetTimer at now plus an offset 1",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "value": 50000000
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "rearm for a second ago while pending",
+   "export": "KeSetTimer at now plus an offset 1",
+   "r3": "0000000000000001",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "value": 18446744073699551616
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "poll after the rearm",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "cancel after the rearm",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic: first expiry 60 ms ahead",
+   "export": "KeSetTimerEx at now plus an offset 1",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "value": 600000
+    },
+    {
+     "value": 50
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic: poll before the first expiry",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic: wait for the first expiry",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "2 s",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic: let later periods pass",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "150 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic: poll after later periods",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic: cancel",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000001",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic: first expiry a second ago",
+   "export": "KeSetTimerEx at now plus an offset 1",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "value": 18446744073699551616
+    },
+    {
+     "value": 50
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic in the past: poll at once",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic in the past: let periods pass",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "150 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic in the past: poll after periods",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "periodic in the past: cancel",
+   "export": "KeCancelTimer",
+   "r3": "0000000000000001",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute due times, timer type 1",
+   "name": "poll after the last cancel",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "timer+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "timer",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 48
+    }
+   ]
+  }
+ ]
+}

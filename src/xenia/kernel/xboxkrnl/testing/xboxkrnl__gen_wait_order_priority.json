@@ -1,0 +1,8379 @@
+{
+ "corpus": "wait_order_priority",
+ "source": "Xbox 360 (Aurora), 2026-11-15, two identical runs",
+ "steps": [
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 0: handle",
+     "offset": 104
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 0: thread pointer",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 1: handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 1: thread pointer",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 2: handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 2: thread pointer",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "set 0",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "after set 0",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "0000000000000001cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "set 1",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "after set 1",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "00000000000000010000000000000002cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "set 2",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "after set 2",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "sync worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, all at the default priority",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 0: handle",
+     "offset": 104
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 0: thread pointer",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 1: handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 1: thread pointer",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 2: handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 2: thread pointer",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "set once",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "after the set",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000020000000000000001"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000020000000000000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000020000000000000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "all worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000020000000000000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, all at the default priority",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "KeInitializeSemaphore",
+   "export": "KeInitializeSemaphore",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 3
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 0: attempting",
+     "offset": 96
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 0: handle",
+     "offset": 112
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 0: thread pointer",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 0: attempting",
+     "offset": 96
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 1: attempting",
+     "offset": 128
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 1: handle",
+     "offset": 144
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 1: thread pointer",
+     "offset": 152
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 1: attempting",
+     "offset": 128
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 2: attempting",
+     "offset": 160
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 2: handle",
+     "offset": 176
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 2: thread pointer",
+     "offset": 184
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 2: attempting",
+     "offset": 160
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "release two",
+   "export": "KeReleaseSemaphore",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 2
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "after releasing two",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "00000000000000020000000000000001cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "release one",
+   "export": "KeReleaseSemaphore",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "after releasing one",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "sem worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, all at the default priority",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 0: handle",
+     "offset": 104
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 0: thread pointer",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 0: priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sync worker 0: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 1: handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 1: thread pointer",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 1: priority 12",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sync worker 1: thread pointer"
+    },
+    {
+     "value": 12
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 2: handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 2: thread pointer",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 2: priority 16",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sync worker 2: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "set 0",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "after set 0",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "0000000000000001cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "set 1",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "after set 1",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "00000000000000010000000000000002cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "set 2",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "after set 2",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "sync worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, rising priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 0: handle",
+     "offset": 104
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 0: thread pointer",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 0: priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "all worker 0: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 1: handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 1: thread pointer",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 1: priority 12",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "all worker 1: thread pointer"
+    },
+    {
+     "value": 12
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 2: handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 2: thread pointer",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 2: priority 16",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "all worker 2: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "set once",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "after the set",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000020000000000000001"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000020000000000000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000020000000000000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "all worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000020000000000000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, rising priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "KeInitializeSemaphore",
+   "export": "KeInitializeSemaphore",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 3
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 0: attempting",
+     "offset": 96
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 0: handle",
+     "offset": 112
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 0: thread pointer",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 0: priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sem worker 0: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 0: attempting",
+     "offset": 96
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 1: attempting",
+     "offset": 128
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 1: handle",
+     "offset": 144
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 1: thread pointer",
+     "offset": 152
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 1: priority 12",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sem worker 1: thread pointer"
+    },
+    {
+     "value": 12
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 1: attempting",
+     "offset": 128
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 2: attempting",
+     "offset": 160
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 2: handle",
+     "offset": 176
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 2: thread pointer",
+     "offset": 184
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 2: priority 16",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sem worker 2: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 2: attempting",
+     "offset": 160
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "release two",
+   "export": "KeReleaseSemaphore",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 2
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "after releasing two",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "00000000000000020000000000000001cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "release one",
+   "export": "KeReleaseSemaphore",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "after releasing one",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "sem worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, rising priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 0: handle",
+     "offset": 104
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 0: thread pointer",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 0: priority 16",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sync worker 0: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 1: handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 1: thread pointer",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 1: priority 12",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sync worker 1: thread pointer"
+    },
+    {
+     "value": 12
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 2: handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 2: thread pointer",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 2: priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sync worker 2: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "set 0",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "after set 0",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "0000000000000001cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "set 1",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "after set 1",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "00000000000000010000000000000002cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "set 2",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "after set 2",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "sync worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, falling priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 0: handle",
+     "offset": 104
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 0: thread pointer",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 0: priority 16",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "all worker 0: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 1: handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 1: thread pointer",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 1: priority 12",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "all worker 1: thread pointer"
+    },
+    {
+     "value": 12
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 2: handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 2: thread pointer",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 2: priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "all worker 2: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "set once",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "after the set",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000100000000000000030000000000000002"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000100000000000000030000000000000002"
+   },
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000100000000000000030000000000000002"
+   },
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "all worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000100000000000000030000000000000002"
+   },
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, falling priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "KeInitializeSemaphore",
+   "export": "KeInitializeSemaphore",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 3
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 0: attempting",
+     "offset": 96
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 0: handle",
+     "offset": 112
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 0: thread pointer",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 0: priority 16",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sem worker 0: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 0: attempting",
+     "offset": 96
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 1: attempting",
+     "offset": 128
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 1: handle",
+     "offset": 144
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 1: thread pointer",
+     "offset": 152
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 1: priority 12",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sem worker 1: thread pointer"
+    },
+    {
+     "value": 12
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 1: attempting",
+     "offset": 128
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 2: attempting",
+     "offset": 160
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 2: handle",
+     "offset": 176
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 2: thread pointer",
+     "offset": 184
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 2: priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sem worker 2: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 2: attempting",
+     "offset": 160
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "release two",
+   "export": "KeReleaseSemaphore",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 2
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "after releasing two",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "00000000000000010000000000000002cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "release one",
+   "export": "KeReleaseSemaphore",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "after releasing one",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "sem worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, falling priorities",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 0: handle",
+     "offset": 104
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 0: thread pointer",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 0: priority 12",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sync worker 0: thread pointer"
+    },
+    {
+     "value": 12
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 1: handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 1: thread pointer",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 1: priority 16",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sync worker 1: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sync worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 2: handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sync worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync worker 2: thread pointer",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 2: priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sync worker 2: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "pointer": "sync: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sync worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "set 0",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "after set 0",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "0000000000000001cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "set 1",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "after set 1",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "00000000000000010000000000000002cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "set 2",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "after set 2",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "sync worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sync: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sync: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sync worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "synchronization event, the middle waiter highest",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sync worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 0: handle",
+     "offset": 104
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 0: thread pointer",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 0: priority 12",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "all worker 0: thread pointer"
+    },
+    {
+     "value": 12
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 1: handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 1: thread pointer",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 1: priority 16",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "all worker 1: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "all worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 2: handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "all worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all worker 2: thread pointer",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 2: priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "all worker 2: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "pointer": "all: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "all worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "set once",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "after the set",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000010000000000000002"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000010000000000000002"
+   },
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000010000000000000002"
+   },
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "all worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "all: status and wake number of each worker": "000000000000000300000000000000010000000000000002"
+   },
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "all: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "all worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "notification event, the middle waiter highest",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "all worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "KeInitializeSemaphore",
+   "export": "KeInitializeSemaphore",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 3
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 0: attempting",
+     "offset": 96
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 0: handle",
+     "offset": 112
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 0: thread pointer",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 0: priority 12",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sem worker 0: thread pointer"
+    },
+    {
+     "value": 12
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 0: attempting",
+     "offset": 96
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 1: attempting",
+     "offset": 128
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 1: handle",
+     "offset": 144
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 1: thread pointer",
+     "offset": 152
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 1: priority 16",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sem worker 1: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 1: attempting",
+     "offset": 128
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "sem worker 2: attempting",
+     "offset": 160
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 2: handle",
+     "offset": 176
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "sem worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem worker 2: thread pointer",
+     "offset": 184
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 2: priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "sem worker 2: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "pointer": "sem: previous suspend count",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "sem worker 2: attempting",
+     "offset": 160
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 5 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "release two",
+   "export": "KeReleaseSemaphore",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 2
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "after releasing two",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "00000000000000020000000000000001cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "release one",
+   "export": "KeReleaseSemaphore",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "semaphore",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "after releasing one",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 30 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "sem worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "sem: status and wake number of each worker": "000000000000000200000000000000010000000000000003"
+   },
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "sem: 15 s",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "sem worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "semaphore released by two, the middle waiter highest",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "sem worker 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "late worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 0: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "late worker 0: handle",
+     "offset": 104
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "late worker 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 0: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "late worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late worker 0: thread pointer",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 0: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "late: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "late worker 0: handle"
+    },
+    {
+     "pointer": "late: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 0: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "late worker 0: attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 0: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "late worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 1: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "late worker 1: handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "late worker 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "late worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late worker 1: thread pointer",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 1: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "late: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "late worker 1: handle"
+    },
+    {
+     "pointer": "late: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "late worker 1: attempting",
+     "offset": 120
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 1: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "late worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 2: create suspended",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "late worker 2: handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "late worker 2"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108865
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "late worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late worker 2: thread pointer",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 2: resume",
+   "export": "NtResumeThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "late: previous suspend count": "00000001"
+   },
+   "args": [
+    {
+     "variable": "late worker 2: handle"
+    },
+    {
+     "pointer": "late: previous suspend count",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "late worker 2: attempting",
+     "offset": 152
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 5 s",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 2: let it park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 0: priority 8 while waiting",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "late worker 0: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 2: priority 16 while waiting",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "late worker 2: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "set 0",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "after set 0",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "late: status and wake number of each worker": "0000000000000001cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "set 1",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "after set 1",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "late: status and wake number of each worker": "00000000000000010000000000000002cdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "set 2",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "after set 2",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "late: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 30 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 0: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "late: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "late worker 0: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "late worker 0: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "late worker 0: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "late: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "late worker 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "late worker 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "late worker 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "late worker 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "late: status and wake number of each worker": "000000000000000100000000000000020000000000000003"
+   },
+   "args": [
+    {
+     "variable": "late worker 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "late: 15 s",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "late worker 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priorities set after the waiters are parked",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "late worker 2: handle"
+    }
+   ]
+  }
+ ]
+}
