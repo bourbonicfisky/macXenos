@@ -83,6 +83,11 @@ bool XTimer::SetNativeTimer(int64_t due_time, uint32_t period_ms, uint32_t dpc,
   auto state = native_state_;
   uint64_t generation;
   bool previous;
+  // An absolute time that has passed, down to 0, expires before the call
+  // returns: the console's signal word is already 1 then, for both timer
+  // types and for a periodic timer's first expiry (ke_timer_absolute probe).
+  const bool expired =
+      due_time >= 0 && due_time <= int64_t(Clock::QueryGuestSystemTime());
   {
     std::lock_guard<std::mutex> lock(state->mutex);
     previous = state->pending;
@@ -99,8 +104,29 @@ bool XTimer::SetNativeTimer(int64_t due_time, uint32_t period_ms, uint32_t dpc,
             : static_cast<uint64_t>(due_time);
     timer->dpc = dpc;
     timer->period = period_ms;
+    if (expired) {
+      state->pending = period_ms != 0;
+      timer->header.inserted = state->pending;
+      state->event->Set();
+      timer->header.signal_state = state->event->Query().state;
+    }
   }
-  auto due = due_time < 0
+  if (expired) {
+    if (callback) {
+      callback();
+    }
+    if (!period_ms) {
+      // Nothing left to schedule. Drop the schedule this one replaced; its
+      // callback, if already on its way, sees the new generation and stops.
+      timer_->Cancel();
+      return previous;
+    }
+  }
+  auto due = expired
+                 ? date::clock_cast<WinSystemClock>(
+                       XSystemClock::now() +
+                       std::chrono::milliseconds(period_ms))
+                 : due_time < 0
                  ? date::clock_cast<WinSystemClock>(
                        XSystemClock::now() +
                        xe::chrono::hundrednanoseconds(-due_time))
