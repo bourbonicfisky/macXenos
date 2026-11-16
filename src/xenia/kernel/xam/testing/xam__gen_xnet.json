@@ -1,0 +1,909 @@
+{
+ "corpus": "xnet",
+ "source": "Xbox 360 (Aurora, XBDM 2.0.21076.11), wired with a DHCP address, no profile signed in, 2026-11-15; two runs identical",
+ "steps": [
+  {
+   "scenario": "before startup",
+   "name": "title xnaddr",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "before startup",
+   "name": "link",
+   "export": "NetDll_XNetGetEthernetLinkStatus",
+   "args": [
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "before startup",
+   "name": "link: low word",
+   "export": "RtlFillMemoryUlong",
+   "capture": {
+    "link": "0000000b"
+   },
+   "args": [
+    {
+     "pointer": "link",
+     "offset": 40
+    },
+    {
+     "value": 4
+    },
+    {
+     "variable": "link"
+    }
+   ]
+  },
+  {
+   "scenario": "before startup",
+   "name": "debug xnaddr",
+   "export": "NetDll_XNetGetDebugXnAddr",
+   "r3": "0000000000000001",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "cdcdcdcdcdcd",
+    "xnaddr+0x10": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "startup",
+   "name": "xnet startup",
+   "export": "NetDll_XNetStartup",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "params",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "startup",
+   "name": "title xnaddr after xnet startup",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "startup",
+   "name": "wsa startup 2.2",
+   "export": "NetDll_WSAStartup",
+   "r3": "0000000000000000",
+   "capture": {
+    "wsadata[:0x4]": "02020202"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 514
+    },
+    {
+     "pointer": "wsadata",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "startup",
+   "name": "wsa startup 0.2",
+   "export": "NetDll_WSAStartup",
+   "r3": "0000000000000000",
+   "capture": {
+    "wsadata[:0x4]": "00020202"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 2
+    },
+    {
+     "pointer": "wsadata",
+     "offset": 456
+    }
+   ]
+  },
+  {
+   "scenario": "startup",
+   "name": "create listener",
+   "export": "XamNotifyCreateListener",
+   "args": [
+    {
+     "value": 47
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "startup",
+   "name": "title xnaddr at once",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 856
+    }
+   ]
+  },
+  {
+   "scenario": "startup",
+   "name": "link at once",
+   "export": "NetDll_XNetGetEthernetLinkStatus",
+   "args": [
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "startup",
+   "name": "link at once: low word",
+   "export": "RtlFillMemoryUlong",
+   "capture": {
+    "link": "0000000b"
+   },
+   "args": [
+    {
+     "pointer": "link",
+     "offset": 896
+    },
+    {
+     "value": 4
+    },
+    {
+     "variable": "link"
+    }
+   ]
+  },
+  {
+   "scenario": "startup",
+   "name": "debug xnaddr",
+   "export": "NetDll_XNetGetDebugXnAddr",
+   "r3": "0000000000000001",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "cdcdcdcdcdcd",
+    "xnaddr+0x10": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 904
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 0",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 0",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 8
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 1",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 1",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 56
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 2",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 96
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 2",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 104
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 3",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 3",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 152
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 4",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 192
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 4",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 200
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 5",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 240
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 5",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 248
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 6",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 288
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 6",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 296
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 7",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 336
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 7",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 344
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 8",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 384
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 8",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 392
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 9",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 432
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 9",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 440
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 10",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 480
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 10",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 488
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "wait 11",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "interval",
+     "offset": 528
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "title xnaddr 11",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 536
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "link settled",
+   "export": "NetDll_XNetGetEthernetLinkStatus",
+   "args": [
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "settling",
+   "name": "link settled: low word",
+   "export": "RtlFillMemoryUlong",
+   "capture": {
+    "link": "0000000b"
+   },
+   "args": [
+    {
+     "pointer": "link",
+     "offset": 576
+    },
+    {
+     "value": 4
+    },
+    {
+     "variable": "link"
+    }
+   ]
+  },
+  {
+   "scenario": "addresses",
+   "name": "title xnaddr",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "addresses",
+   "name": "own xnaddr to in addr",
+   "export": "NetDll_XNetXnAddrToInAddr",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 0
+    },
+    {
+     "pointer": "key id",
+     "offset": 40
+    },
+    {
+     "pointer": "in addr",
+     "offset": 48
+    }
+   ]
+  },
+  {
+   "scenario": "addresses",
+   "name": "connect status of own address",
+   "export": "NetDll_XNetGetConnectStatus",
+   "r3": "0000000000000003",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "variable": "in addr"
+    }
+   ]
+  },
+  {
+   "scenario": "addresses",
+   "name": "connect status of an unknown address",
+   "export": "NetDll_XNetGetConnectStatus",
+   "r3": "0000000000000003",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 16909060
+    }
+   ]
+  },
+  {
+   "scenario": "addresses",
+   "name": "get opt startup params",
+   "export": "NetDll_XNetGetOpt",
+   "r3": "0000000000000000",
+   "capture": {
+    "startup params[:0xd]": "0d000820101008204002030802",
+    "size": "0000000d"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "startup params",
+     "offset": 56
+    },
+    {
+     "pointer": "size",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "addresses",
+   "name": "machine id",
+   "export": "XNetLogonGetMachineID",
+   "r3": "FFFFFFFF80151802",
+   "args": [
+    {
+     "pointer": "machine id",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "cleanup",
+   "name": "close listener",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "listener"
+    }
+   ]
+  },
+  {
+   "scenario": "cleanup",
+   "name": "wsa cleanup",
+   "export": "NetDll_WSACleanup",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "cleanup",
+   "name": "wsa cleanup again",
+   "export": "NetDll_WSACleanup",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "cleanup",
+   "name": "xnet cleanup",
+   "export": "NetDll_XNetCleanup",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "cleanup",
+   "name": "title xnaddr after cleanup",
+   "export": "NetDll_XNetGetTitleXnAddr",
+   "r3": "0000000000000068",
+   "capture": {
+    "xnaddr+0x4[:0x6]": "000000000000",
+    "xnaddr+0x10": "0000000000000000000000000000000001000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "pointer": "xnaddr",
+     "offset": 0
+    }
+   ]
+  },
+  {
+   "scenario": "cleanup",
+   "name": "link after cleanup",
+   "export": "NetDll_XNetGetEthernetLinkStatus",
+   "args": [
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "cleanup",
+   "name": "link after cleanup: low word",
+   "export": "RtlFillMemoryUlong",
+   "capture": {
+    "link": "0000000b"
+   },
+   "args": [
+    {
+     "pointer": "link",
+     "offset": 40
+    },
+    {
+     "value": 4
+    },
+    {
+     "variable": "link"
+    }
+   ]
+  }
+ ]
+}
