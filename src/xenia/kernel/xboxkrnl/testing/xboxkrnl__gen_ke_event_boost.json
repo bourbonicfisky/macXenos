@@ -1,0 +1,329 @@
+{
+ "corpus": "ke_event_boost",
+ "source": "Physical Xbox 360 (Aurora, XBDM), 2026-11-15, bundle 9df4cd7dbf06c182; two runs identical; evidence xbox-hardware-2026-11-15/ke_event_boost",
+ "steps": [
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "attempting",
+     "offset": 16
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "done",
+     "offset": 32
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "boost with nobody waiting",
+   "export": "KeSetEventBoostPriority",
+   "capture": {
+    "event+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "boost an event that is already set",
+   "export": "KeSetEventBoostPriority",
+   "capture": {
+    "event+0x4[:0x4]": "00000001"
+   },
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "the signal is there",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "and only once",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 64
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "create worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker handle",
+     "offset": 56
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "worker started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "attempting",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5000 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "let the worker park",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 72
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "boost with a worker waiting",
+   "export": "KeSetEventBoostPriority",
+   "capture": {
+    "event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "worker finished",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker wait status, flag": "0000000000000001",
+    "event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "done",
+     "offset": 32
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5000 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "join worker",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker wait status, flag": "0000000000000001"
+   },
+   "args": [
+    {
+     "variable": "worker handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5000 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker handle"
+    }
+   ]
+  },
+  {
+   "scenario": "KeSetEventBoostPriority",
+   "name": "no signal is left",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000102",
+   "capture": {
+    "event+0x4[:0x4]": "00000000"
+   },
+   "args": [
+    {
+     "pointer": "event",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 64
+    }
+   ]
+  }
+ ]
+}

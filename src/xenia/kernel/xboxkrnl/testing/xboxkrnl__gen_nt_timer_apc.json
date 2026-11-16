@@ -1,0 +1,1780 @@
+{
+ "corpus": "nt_timer_apc",
+ "source": "Physical Xbox 360 (Aurora, XBDM), 2026-11-15, bundle eb7a411af8d8c881; two runs identical; evidence xbox-hardware-2026-11-15/nt_timer_apc",
+ "steps": [
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "NtCreateTimer",
+   "export": "NtCreateTimer",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "timer handle",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event handle",
+     "offset": 8
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "a: arm 20 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 0"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 2684354561
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "a: nonalertable wait for the expiry",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "a: alertable delay",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000100000000a000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "a: second alertable delay",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000100000000a000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "a: timer after the APC",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000100000000a000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "b: arm 20 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000100000000a000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 0"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 2952790018
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "b: alertable wait on an unset event",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "event handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "b: timer after the APC interrupted the wait",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "b: timer polled again",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "c: arm 5 s",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "5000 ms",
+     "offset": 104
+    },
+    {
+     "routine": "timer APC routine 0"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 3221225475
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "c: cancel while pending",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "00cdcdcd",
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "c: alertable delay after the cancel",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "d: arm 20 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 0"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 3489660932
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "d: nonalertable delay past the expiry",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "d: cancel with the APC undelivered",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "01cdcdcd",
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "d: alertable delay after the cancel",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "e: arm 20 ms then every 100 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 0"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 3758096389
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 100
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "e: alertable delay 1",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000300000000a0000001b0000002e00000050000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "e: alertable delay 2",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000400000000a0000001b0000002e0000005e000000500000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "e: alertable delay 3",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "e: cancel periodic",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "01cdcdcd",
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "e: alertable delay after the cancel",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "f: arm 20 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 0"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 4026531846
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "f: nonalertable delay past the expiry",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "f: arm again with the APC undelivered",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 0"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 4026531847
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "f: nonalertable delay past the second expiry",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "f: alertable delay",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000600000000a0000001b0000002e0000005e0000005e0000005f00000070000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "f: second alertable delay",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000600000000a0000001b0000002e0000005e0000005e0000005f00000070000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "g: arm 20 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000600000000a0000001b0000002e0000005e0000005e0000005f00000070000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 0"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 268435464
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "g: alertable wait on the timer itself",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000600000000a0000001b0000002e0000005e0000005e0000005f00000070000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "g: alertable delay",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000700000000a0000001b0000002e0000005e0000005e0000005f00000071000000800000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "g: timer afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000700000000a0000001b0000002e0000005e0000005e0000005f00000071000000800000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "cancel before closing",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "01cdcdcd",
+    "APC count, IRQL, argument of each call": "0000000700000000a0000001b0000002e0000005e0000005e0000005f00000071000000800000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "event handle"
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "NtCreateTimer",
+   "export": "NtCreateTimer",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "timer handle",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event handle",
+     "offset": 8
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "a: arm 20 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 1"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 2684354561
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "a: nonalertable wait for the expiry",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "a: alertable delay",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000100000000a000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "a: second alertable delay",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000100000000a000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "a: timer after the APC",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000100000000a000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "b: arm 20 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000100000000a000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 1"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 2952790018
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "b: alertable wait on an unset event",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "event handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "b: timer after the APC interrupted the wait",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "b: timer polled again",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "c: arm 5 s",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "5000 ms",
+     "offset": 104
+    },
+    {
+     "routine": "timer APC routine 1"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 3221225475
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "c: cancel while pending",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "00cdcdcd",
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "c: alertable delay after the cancel",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "d: arm 20 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 1"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 3489660932
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "d: nonalertable delay past the expiry",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "d: cancel with the APC undelivered",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "01cdcdcd",
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "d: alertable delay after the cancel",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "e: arm 20 ms then every 100 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000200000000a0000001b0000002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 1"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 3758096389
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 100
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "e: alertable delay 1",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000300000000a0000001b0000002e00000050000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "e: alertable delay 2",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000400000000a0000001b0000002e0000005e000000500000000000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "e: alertable delay 3",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "e: cancel periodic",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "01cdcdcd",
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "e: alertable delay after the cancel",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "f: arm 20 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 1"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 4026531846
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "f: nonalertable delay past the expiry",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "f: arm again with the APC undelivered",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 1"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 4026531847
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "f: nonalertable delay past the second expiry",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000500000000a0000001b0000002e0000005e0000005e0000005000000000000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "100 ms",
+     "offset": 120
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "f: alertable delay",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000600000000a0000001b0000002e0000005e0000005e0000005f00000070000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "f: second alertable delay",
+   "export": "KeDelayExecutionThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000600000000a0000001b0000002e0000005e0000005e0000005f00000070000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "g: arm 20 ms",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000600000000a0000001b0000002e0000005e0000005e0000005f00000070000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "20 ms",
+     "offset": 96
+    },
+    {
+     "routine": "timer APC routine 1"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 268435464
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "g: alertable wait on the timer itself",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000600000000a0000001b0000002e0000005e0000005e0000005f00000070000000000000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "2000 ms",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "g: alertable delay",
+   "export": "KeDelayExecutionThread",
+   "r3": "00000000000000C0",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000700000000a0000001b0000002e0000005e0000005e0000005f00000071000000800000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "60 ms",
+     "offset": 112
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "g: timer afterwards",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "capture": {
+    "APC count, IRQL, argument of each call": "0000000700000000a0000001b0000002e0000005e0000005e0000005f00000071000000800000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "0 ms",
+     "offset": 88
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "cancel before closing",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "00cdcdcd",
+    "APC count, IRQL, argument of each call": "0000000700000000a0000001b0000002e0000005e0000005e0000005f00000071000000800000000000000000000000000000000000000000000000000000000"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    }
+   ]
+  },
+  {
+   "scenario": "timer APC, timer type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "event handle"
+    }
+   ]
+  }
+ ]
+}

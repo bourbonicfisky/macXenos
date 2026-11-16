@@ -1,0 +1,1200 @@
+{
+ "corpus": "nt_timer_absolute",
+ "source": "Physical Xbox 360 (Aurora, XBDM), 2026-11-15, bundle 516bc5455db64e35; two runs identical; evidence xbox-hardware-2026-11-15/nt_timer_absolute",
+ "steps": [
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "NtCreateTimer",
+   "export": "NtCreateTimer",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "timer handle",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event handle",
+     "offset": 8
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "absolute time 60 ms from now",
+   "export": "now plus an offset 0",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 600000
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "arm for 60 ms ahead",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "poll before the time",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "wait for the time",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "2 s",
+     "offset": 40
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "cancel after expiry",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "01cdcdcd"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "absolute time -1000 ms from now",
+   "export": "now plus an offset 0",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 18446744073699551616
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "arm for a second ago",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "poll at once",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "cancel a timer armed in the past",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "01cdcdcd"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "arm for absolute time 1",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "absolute time 1",
+     "offset": 48
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "poll at once after absolute time 1",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "cancel after absolute time 1",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "01cdcdcd"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "arm with a zero time",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "poll at once after a zero time",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "cancel after a zero time",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "01cdcdcd"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "absolute time 5000 ms from now",
+   "export": "now plus an offset 0",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 50000000
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "arm for 5 s ahead",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "poll: not yet",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "cancel while pending",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "00cdcdcd"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker done",
+     "offset": 56
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "create the worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "absolute waits 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "worker: wait to 60 ms ahead, to a second ago, the same with the event set, delay to 40 ms ahead, to a second ago",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker: five statuses, flag": "000001020000010200000000000000000000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "worker done",
+     "offset": 56
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5 s",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "the worker has exited",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker: five statuses, flag": "000001020000010200000000000000000000000000000001"
+   },
+   "args": [
+    {
+     "variable": "worker handle 0"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker handle 0"
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 0",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "event handle"
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "NtCreateTimer",
+   "export": "NtCreateTimer",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "timer handle",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "NtCreateEvent",
+   "export": "NtCreateEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "event handle",
+     "offset": 8
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "absolute time 60 ms from now",
+   "export": "now plus an offset 1",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 600000
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "arm for 60 ms ahead",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "poll before the time",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "wait for the time",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "2 s",
+     "offset": 40
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "cancel after expiry",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "00cdcdcd"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "absolute time -1000 ms from now",
+   "export": "now plus an offset 1",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 18446744073699551616
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "arm for a second ago",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "poll at once",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "cancel a timer armed in the past",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "00cdcdcd"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "arm for absolute time 1",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "absolute time 1",
+     "offset": 48
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "poll at once after absolute time 1",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "cancel after absolute time 1",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "00cdcdcd"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "arm with a zero time",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "poll at once after a zero time",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "cancel after a zero time",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "00cdcdcd"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "absolute time 5000 ms from now",
+   "export": "now plus an offset 1",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 50000000
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "arm for 5 s ahead",
+   "export": "NtSetTimerEx",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "absolute time",
+     "offset": 16
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "poll: not yet",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000102",
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "cancel while pending",
+   "export": "NtCancelTimer",
+   "r3": "0000000000000000",
+   "capture": {
+    "cancel current state": "00cdcdcd"
+   },
+   "args": [
+    {
+     "variable": "timer handle"
+    },
+    {
+     "pointer": "cancel current state",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker done",
+     "offset": 56
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "create the worker",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker handle",
+     "offset": 136
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "absolute waits 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "worker: wait to 60 ms ahead, to a second ago, the same with the event set, delay to 40 ms ahead, to a second ago",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker: five statuses, flag": "000001020000010200000000000000000000000000000001"
+   },
+   "args": [
+    {
+     "pointer": "worker done",
+     "offset": 56
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5 s",
+     "offset": 144
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "the worker has exited",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker: five statuses, flag": "000001020000010200000000000000000000000000000001"
+   },
+   "args": [
+    {
+     "variable": "worker handle 1"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "poll",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker handle 1"
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "timer handle"
+    }
+   ]
+  },
+  {
+   "scenario": "absolute times, timer type 1",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "event handle"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,1668 @@
+{
+ "corpus": "rtl_format_float",
+ "source": "Physical Xbox 360 (Aurora, XBDM), 2026-11-15, bundle 0fa3e65c97bdd2a1; two runs identical; evidence xbox-hardware-2026-11-15/rtl_format_float",
+ "steps": [
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f",
+   "export": "sprintf",
+   "r3": "0000000000000008",
+   "capture": {
+    "output": "302e30303030303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 1: %f",
+     "offset": 96
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f",
+   "export": "sprintf",
+   "r3": "0000000000000009",
+   "capture": {
+    "output": "2d302e30303030303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 2: %f",
+     "offset": 104
+    },
+    {
+     "value": 9223372036854775808
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f",
+   "export": "sprintf",
+   "r3": "0000000000000008",
+   "capture": {
+    "output": "312e30303030303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 3: %f",
+     "offset": 112
+    },
+    {
+     "value": 4607182418800017408
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f",
+   "export": "sprintf",
+   "r3": "0000000000000009",
+   "capture": {
+    "output": "2d312e35303030303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 4: %f",
+     "offset": 120
+    },
+    {
+     "value": 13832806255468478464
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f",
+   "export": "sprintf",
+   "r3": "0000000000000008",
+   "capture": {
+    "output": "302e31303030303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 5: %f",
+     "offset": 128
+    },
+    {
+     "value": 4591870180066957722
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f",
+   "export": "sprintf",
+   "r3": "0000000000000008",
+   "capture": {
+    "output": "302e33333333333300cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 6: %f",
+     "offset": 136
+    },
+    {
+     "value": 4599676419421066581
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f",
+   "export": "sprintf",
+   "r3": "000000000000000D",
+   "capture": {
+    "output": "3132333435362e37383930303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 7: %f",
+     "offset": 144
+    },
+    {
+     "value": 4683220299150161609
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f",
+   "export": "sprintf",
+   "r3": "000000000000001C",
+   "capture": {
+    "output": "3130303030303030303030303030303030303030302e30303030303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 8: %f",
+     "offset": 152
+    },
+    {
+     "value": 4906019910204099648
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f",
+   "export": "sprintf",
+   "r3": "0000000000000008",
+   "capture": {
+    "output": "302e30303030313000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 9: %f",
+     "offset": 160
+    },
+    {
+     "value": 4532020583610935537
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f",
+   "export": "sprintf",
+   "r3": "0000000000000008",
+   "capture": {
+    "output": "302e30303030303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 10: %f",
+     "offset": 168
+    },
+    {
+     "value": 4502148214488346440
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %.0f|%.0f|%.0f|%.0f",
+   "export": "sprintf",
+   "r3": "0000000000000007",
+   "capture": {
+    "output": "317c327c337c3400cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 11: %.0f|%.0f|%.0f|%.0f",
+     "offset": 176
+    },
+    {
+     "value": 4602678819172646912
+    },
+    {
+     "value": 4609434218613702656
+    },
+    {
+     "value": 4612811918334230528
+    },
+    {
+     "value": 4615063718147915776
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %.2f|%.2f|%.2f",
+   "export": "sprintf",
+   "r3": "000000000000000E",
+   "capture": {
+    "output": "302e31337c302e33387c312e303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 12: %.2f|%.2f|%.2f",
+     "offset": 200
+    },
+    {
+     "value": 4593671619917905920
+    },
+    {
+     "value": 4600427019358961664
+    },
+    {
+     "value": 4607204936798154260
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %.3f",
+   "export": "sprintf",
+   "r3": "0000000000000008",
+   "capture": {
+    "output": "313030302e30303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 13: %.3f",
+     "offset": 216
+    },
+    {
+     "value": 4652007305322752167
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %.1f",
+   "export": "sprintf",
+   "r3": "0000000000000003",
+   "capture": {
+    "output": "302e3100cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 14: %.1f",
+     "offset": 224
+    },
+    {
+     "value": 4587366580439587226
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %10.3f|%-10.1f|%010.2f",
+   "export": "sprintf",
+   "r3": "0000000000000020",
+   "capture": {
+    "output": "2020202020332e3134327c322e35202020202020207c2d3030303030372e323500cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 15: %10.3f|%-10.1f|%010.2f",
+     "offset": 232
+    },
+    {
+     "value": 4614256650576692846
+    },
+    {
+     "value": 4612811918334230528
+    },
+    {
+     "value": 13843220829606772736
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %+f|% f|%+.1f",
+   "export": "sprintf",
+   "r3": "0000000000000018",
+   "capture": {
+    "output": "2b312e3030303030307c20312e3030303030307c2d302e3000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 16: %+f|% f|%+.1f",
+     "offset": 256
+    },
+    {
+     "value": 4607182418800017408
+    },
+    {
+     "value": 4607182418800017408
+    },
+    {
+     "value": 13809297465413604475
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %#.0f|%.0f",
+   "export": "sprintf",
+   "r3": "0000000000000004",
+   "capture": {
+    "output": "332e7c3300cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 17: %#.0f|%.0f",
+     "offset": 272
+    },
+    {
+     "value": 4613937818241073152
+    },
+    {
+     "value": 4613937818241073152
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %.20f",
+   "export": "sprintf",
+   "r3": "0000000000000016",
+   "capture": {
+    "output": "302e313030303030303030303030303030303130303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 18: %.20f",
+     "offset": 288
+    },
+    {
+     "value": 4591870180066957722
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %.17f",
+   "export": "sprintf",
+   "r3": "0000000000000013",
+   "capture": {
+    "output": "302e333333333333333333333333333333333100cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 19: %.17f",
+     "offset": 296
+    },
+    {
+     "value": 4599676419421066581
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %e",
+   "export": "sprintf",
+   "r3": "000000000000000D",
+   "capture": {
+    "output": "302e303030303030652b30303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 20: %e",
+     "offset": 304
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %e",
+   "export": "sprintf",
+   "r3": "000000000000000D",
+   "capture": {
+    "output": "312e323334353638652b30303500cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 21: %e",
+     "offset": 312
+    },
+    {
+     "value": 4683220299150161609
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %.2e|%E|%.0e",
+   "export": "sprintf",
+   "r3": "000000000000001E",
+   "capture": {
+    "output": "312e3233652d3030347c312e303030303030452b3130307c36652b30303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 22: %.2e|%E|%.0e",
+     "offset": 320
+    },
+    {
+     "value": 4548686746489558237
+    },
+    {
+     "value": 6103021453049119613
+    },
+    {
+     "value": 4617878467915022336
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %e",
+   "export": "sprintf",
+   "r3": "000000000000000D",
+   "capture": {
+    "output": "312e303030303030652d33303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 23: %e",
+     "offset": 336
+    },
+    {
+     "value": 118622047889322841
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %10.3e|%-12.2e|",
+   "export": "sprintf",
+   "r3": "0000000000000018",
+   "capture": {
+    "output": "312e353030652b3030307c2d322e3235652b30303020207c00cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 24: %10.3e|%-12.2e|",
+     "offset": 344
+    },
+    {
+     "value": 4609434218613702656
+    },
+    {
+     "value": 13835621005235585024
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %g",
+   "export": "sprintf",
+   "r3": "0000000000000001",
+   "capture": {
+    "output": "3000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 25: %g",
+     "offset": 360
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %g",
+   "export": "sprintf",
+   "r3": "0000000000000006",
+   "capture": {
+    "output": "31303030303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 26: %g",
+     "offset": 368
+    },
+    {
+     "value": 4681608360884174848
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %g",
+   "export": "sprintf",
+   "r3": "0000000000000006",
+   "capture": {
+    "output": "31652b30303600cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 27: %g",
+     "offset": 376
+    },
+    {
+     "value": 4696837146684686336
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %g",
+   "export": "sprintf",
+   "r3": "0000000000000006",
+   "capture": {
+    "output": "302e3030303100cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 28: %g",
+     "offset": 384
+    },
+    {
+     "value": 4547007122018943789
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %g",
+   "export": "sprintf",
+   "r3": "0000000000000006",
+   "capture": {
+    "output": "31652d30303500cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 29: %g",
+     "offset": 392
+    },
+    {
+     "value": 4532020583610935537
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %g|%g|%g",
+   "export": "sprintf",
+   "r3": "0000000000000019",
+   "capture": {
+    "output": "302e317c302e3333333333337c312e3233343537652b30303800cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 30: %g|%g|%g",
+     "offset": 400
+    },
+    {
+     "value": 4591870180066957722
+    },
+    {
+     "value": 4599676419421066581
+    },
+    {
+     "value": 4728057454347157504
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %.3g|%.10g|%.15g",
+   "export": "sprintf",
+   "r3": "0000000000000011",
+   "capture": {
+    "output": "312e3233652b3030337c302e317c302e3100cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 31: %.3g|%.10g|%.15g",
+     "offset": 416
+    },
+    {
+     "value": 4653144502051863213
+    },
+    {
+     "value": 4591870180066957722
+    },
+    {
+     "value": 4591870180066957722
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %.17g",
+   "export": "sprintf",
+   "r3": "0000000000000013",
+   "capture": {
+    "output": "302e313030303030303030303030303030303100cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 32: %.17g",
+     "offset": 440
+    },
+    {
+     "value": 4591870180066957722
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %G|%#g|%#.3g",
+   "export": "sprintf",
+   "r3": "0000000000000013",
+   "capture": {
+    "output": "31452d3031307c312e30303030307c322e303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 33: %G|%#g|%#.3g",
+     "offset": 448
+    },
+    {
+     "value": 4457293557087583675
+    },
+    {
+     "value": 4607182418800017408
+    },
+    {
+     "value": 4611686018427387904
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f|%e|%g",
+   "export": "sprintf",
+   "r3": "000000000000001D",
+   "capture": {
+    "output": "312e23494e4630307c312e23494e463030652b3030307c312e23494e4600cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 34: %f|%e|%g",
+     "offset": 464
+    },
+    {
+     "value": 9218868437227405312
+    },
+    {
+     "value": 9218868437227405312
+    },
+    {
+     "value": 9218868437227405312
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f|%e|%g",
+   "export": "sprintf",
+   "r3": "0000000000000020",
+   "capture": {
+    "output": "2d312e23494e4630307c2d312e23494e463030652b3030307c2d312e23494e4600cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 35: %f|%e|%g",
+     "offset": 480
+    },
+    {
+     "value": 18442240474082181120
+    },
+    {
+     "value": 18442240474082181120
+    },
+    {
+     "value": 18442240474082181120
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f|%e|%g",
+   "export": "sprintf",
+   "r3": "000000000000001E",
+   "capture": {
+    "output": "312e23514e414e307c312e23514e414e30652b3030307c312e23514e414e00cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 36: %f|%e|%g",
+     "offset": 496
+    },
+    {
+     "value": 9221120237041090560
+    },
+    {
+     "value": 9221120237041090560
+    },
+    {
+     "value": 9221120237041090560
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %.3f|%5.1f",
+   "export": "sprintf",
+   "r3": "000000000000000C",
+   "capture": {
+    "output": "2d312e23494f7c2020312e2400cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 37: %.3f|%5.1f",
+     "offset": 512
+    },
+    {
+     "value": 18444492273895866368
+    },
+    {
+     "value": 9218868437227405312
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %e|%g",
+   "export": "sprintf",
+   "r3": "000000000000001A",
+   "capture": {
+    "output": "342e393430363536652d3332347c342e3934303636652d33323400cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 38: %e|%g",
+     "offset": 528
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %e|%g",
+   "export": "sprintf",
+   "r3": "000000000000001A",
+   "capture": {
+    "output": "312e373937363933652b3330387c312e3739373639652b33303800cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 39: %e|%g",
+     "offset": 536
+    },
+    {
+     "value": 9218868437227405311
+    },
+    {
+     "value": 9218868437227405311
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %d %f %d",
+   "export": "sprintf",
+   "r3": "000000000000000C",
+   "capture": {
+    "output": "3720322e353030303030203900cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 40: %d %f %d",
+     "offset": 544
+    },
+    {
+     "value": 7
+    },
+    {
+     "value": 4612811918334230528
+    },
+    {
+     "value": 9
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %f %s %f",
+   "export": "sprintf",
+   "r3": "0000000000000017",
+   "capture": {
+    "output": "312e3235303030302074657874202d332e35303030303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 41: %f %s %f",
+     "offset": 560
+    },
+    {
+     "value": 4608308318706860032
+    },
+    {
+     "pointer": "string 42: text",
+     "offset": 576
+    },
+    {
+     "value": 13838435755002691584
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %lf|%Lf|%hf",
+   "export": "sprintf",
+   "r3": "000000000000001A",
+   "capture": {
+    "output": "312e3530303030307c322e3530303030307c332e35303030303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 43: %lf|%Lf|%hf",
+     "offset": 584
+    },
+    {
+     "value": 4609434218613702656
+    },
+    {
+     "value": 4612811918334230528
+    },
+    {
+     "value": 4615063718147915776
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %a",
+   "export": "sprintf",
+   "r3": "0000000000000001",
+   "capture": {
+    "output": "6100cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 44: %a",
+     "offset": 600
+    },
+    {
+     "value": 4607182418800017408
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %lld",
+   "export": "sprintf",
+   "r3": "000000000000000B",
+   "capture": {
+    "output": "2d3136393838393831393200cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 45: %lld",
+     "offset": 608
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %lld",
+   "export": "sprintf",
+   "r3": "0000000000000002",
+   "capture": {
+    "output": "2d3100cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 46: %lld",
+     "offset": 616
+    },
+    {
+     "value": 18446744073709551615
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %lld",
+   "export": "sprintf",
+   "r3": "0000000000000001",
+   "capture": {
+    "output": "3000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 47: %lld",
+     "offset": 624
+    },
+    {
+     "value": 9223372036854775808
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %llu",
+   "export": "sprintf",
+   "r3": "000000000000000A",
+   "capture": {
+    "output": "3432393439363732393500cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 48: %llu",
+     "offset": 632
+    },
+    {
+     "value": 18446744073709551615
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %llx|%llX",
+   "export": "sprintf",
+   "r3": "0000000000000011",
+   "capture": {
+    "output": "39616263646566307c394142434445463000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 49: %llx|%llX",
+     "offset": 640
+    },
+    {
+     "value": 1311768467463790320
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %I64d|%I64u",
+   "export": "sprintf",
+   "r3": "0000000000000017",
+   "capture": {
+    "output": "2d327c313834343637343430373337303935353136313400cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 50: %I64d|%I64u",
+     "offset": 656
+    },
+    {
+     "value": 18446744073709551614
+    },
+    {
+     "value": 18446744073709551614
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %I64x|%#I64x|%020I64x",
+   "export": "sprintf",
+   "r3": "0000000000000038",
+   "capture": {
+    "output": "313233343536373839616263646566307c3078313233343536373839616263646566307c303030303132333435363738396162636465663000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 51: %I64x|%#I64x|%020I64x",
+     "offset": 672
+    },
+    {
+     "value": 1311768467463790320
+    },
+    {
+     "value": 1311768467463790320
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %I64o",
+   "export": "sprintf",
+   "r3": "0000000000000015",
+   "capture": {
+    "output": "31313036343235343734323332353731353733363000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 52: %I64o",
+     "offset": 696
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %d|%u|%x",
+   "export": "sprintf",
+   "r3": "000000000000001F",
+   "capture": {
+    "output": "2d313639383839383139327c323539363036393130347c396162636465663000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 53: %d|%u|%x",
+     "offset": 704
+    },
+    {
+     "value": 1311768467463790320
+    },
+    {
+     "value": 1311768467463790320
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %ld|%lx",
+   "export": "sprintf",
+   "r3": "0000000000000014",
+   "capture": {
+    "output": "2d313639383839383139327c396162636465663000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 54: %ld|%lx",
+     "offset": 720
+    },
+    {
+     "value": 1311768467463790320
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %hd|%hx",
+   "export": "sprintf",
+   "r3": "000000000000000A",
+   "capture": {
+    "output": "2d383436347c6465663000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 55: %hd|%hx",
+     "offset": 728
+    },
+    {
+     "value": 1311768467463790320
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %I32d|%I32x",
+   "export": "sprintf",
+   "r3": "0000000000000014",
+   "capture": {
+    "output": "2d313639383839383139327c396162636465663000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 56: %I32d|%I32x",
+     "offset": 736
+    },
+    {
+     "value": 1311768467463790320
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %lld %d %lld",
+   "export": "sprintf",
+   "r3": "0000000000000005",
+   "capture": {
+    "output": "352036203700cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 57: %lld %d %lld",
+     "offset": 752
+    },
+    {
+     "value": 5
+    },
+    {
+     "value": 6
+    },
+    {
+     "value": 7
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %25lld|%-25lld|",
+   "export": "sprintf",
+   "r3": "0000000000000034",
+   "capture": {
+    "output": "20202020202020202020202020202d313639383839383139327c2d3136393838393831393220202020202020202020202020207c00cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 58: %25lld|%-25lld|",
+     "offset": 768
+    },
+    {
+     "value": 1311768467463790320
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %p",
+   "export": "sprintf",
+   "r3": "0000000000000008",
+   "capture": {
+    "output": "394142434445463000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 59: %p",
+     "offset": 784
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "sprintf %c",
+   "export": "sprintf",
+   "r3": "0000000000000001",
+   "capture": {
+    "output": "4100cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 60: %c",
+     "offset": 792
+    },
+    {
+     "value": 1311768464867721281
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "_snprintf 4 %f",
+   "export": "_snprintf",
+   "r3": "00000000FFFFFFFF",
+   "capture": {
+    "output": "31323334cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "value": 4
+    },
+    {
+     "pointer": "string 61: %f",
+     "offset": 800
+    },
+    {
+     "value": 4683220299150161609
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "_snprintf 64 %f",
+   "export": "_snprintf",
+   "r3": "000000000000000D",
+   "capture": {
+    "output": "3132333435362e37383930303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "value": 64
+    },
+    {
+     "pointer": "string 62: %f",
+     "offset": 808
+    },
+    {
+     "value": 4683220299150161609
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "_snprintf 4 %.3e",
+   "export": "_snprintf",
+   "r3": "00000000FFFFFFFF",
+   "capture": {
+    "output": "312e3530cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "value": 4
+    },
+    {
+     "pointer": "string 63: %.3e",
+     "offset": 816
+    },
+    {
+     "value": 4609434218613702656
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "_snprintf 64 %.3e",
+   "export": "_snprintf",
+   "r3": "000000000000000A",
+   "capture": {
+    "output": "312e353030652b30303000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "value": 64
+    },
+    {
+     "pointer": "string 64: %.3e",
+     "offset": 824
+    },
+    {
+     "value": 4609434218613702656
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "_snprintf 4 %lld",
+   "export": "_snprintf",
+   "r3": "00000000FFFFFFFF",
+   "capture": {
+    "output": "2d313639cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "value": 4
+    },
+    {
+     "pointer": "string 65: %lld",
+     "offset": 832
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "_snprintf 64 %lld",
+   "export": "_snprintf",
+   "r3": "000000000000000B",
+   "capture": {
+    "output": "2d3136393838393831393200cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "value": 64
+    },
+    {
+     "pointer": "string 66: %lld",
+     "offset": 840
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "swprintf %f|%.2f",
+   "export": "swprintf",
+   "r3": "000000000000000D",
+   "capture": {
+    "output": "0031002e003500300030003000300030007c0030002e003100330000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 67: %f|%.2f",
+     "offset": 848
+    },
+    {
+     "value": 4609434218613702656
+    },
+    {
+     "value": 4593671619917905920
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "swprintf %e|%g",
+   "export": "swprintf",
+   "r3": "0000000000000011",
+   "capture": {
+    "output": "0031002e0035003000300030003000300065002b003000300030007c0030002e00310000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 68: %e|%g",
+     "offset": 864
+    },
+    {
+     "value": 4609434218613702656
+    },
+    {
+     "value": 4591870180066957722
+    }
+   ]
+  },
+  {
+   "scenario": "sprintf with doubles and 64-bit integers",
+   "name": "swprintf %lld|%I64x",
+   "export": "swprintf",
+   "r3": "000000000000001C",
+   "capture": {
+    "output": "002d0031003600390038003800390038003100390032007c00310032003300340035003600370038003900610062006300640065006600300000cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+   },
+   "args": [
+    {
+     "pointer": "output",
+     "offset": 0
+    },
+    {
+     "pointer": "string 69: %lld|%I64x",
+     "offset": 880
+    },
+    {
+     "value": 1311768467463790320
+    },
+    {
+     "value": 1311768467463790320
+    }
+   ]
+  }
+ ]
+}

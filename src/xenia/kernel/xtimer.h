@@ -10,6 +10,7 @@
 #ifndef XENIA_KERNEL_XTIMER_H_
 #define XENIA_KERNEL_XTIMER_H_
 
+#include <atomic>
 #include <mutex>
 
 #include "xenia/base/threading.h"
@@ -59,9 +60,18 @@ class XTimer : public XObject {
   };
   std::shared_ptr<NativeState> native_state_;
 
+  // Takes back this timer's APC if it has expired but not run. Called with
+  // timer_lock_ held, before a cancel or a new schedule.
+  void RetractApc();
+
   XThread* callback_thread_ = nullptr;
+  uint32_t callback_thread_handle_ = 0;
   uint32_t callback_routine_ = 0;
   uint32_t callback_routine_arg_ = 0;
+  // Bumped by every cancel and every new schedule; a fire that was dispatched
+  // under an older value queues nothing.
+  std::shared_ptr<std::atomic<uint64_t>> apc_generation_ =
+      std::make_shared<std::atomic<uint64_t>>(0);
 };
 
 }  // namespace kernel

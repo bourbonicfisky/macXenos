@@ -1,0 +1,1738 @@
+{
+ "corpus": "thread_priority",
+ "source": "Physical Xbox 360 (Aurora, XBDM), 2026-11-15, bundle b5b867de5c3bf309; two runs identical; evidence xbox-hardware-2026-11-15/thread_priority",
+ "steps": [
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "gate",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "process type on the main thread",
+   "export": "KeGetCurrentProcessType",
+   "r3": "0000000000000001",
+   "args": []
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "worker: attempting",
+     "offset": 40
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "worker: create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker: handle",
+     "offset": 72
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "worker: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "worker: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "worker: attempting",
+     "offset": 40
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "20 s",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "worker: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "worker: thread pointer",
+     "offset": 80
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "base priority when new",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority 1",
+   "export": "KeSetBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set base priority 1",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority 2",
+   "export": "KeSetBasePriorityThread",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 2
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set base priority 2",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000002",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority -1",
+   "export": "KeSetBasePriorityThread",
+   "r3": "0000000000000002",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 18446744073709551615
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set base priority -1",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "FFFFFFFFFFFFFFFF",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority -2",
+   "export": "KeSetBasePriorityThread",
+   "r3": "FFFFFFFFFFFFFFFF",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 18446744073709551614
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set base priority -2",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "FFFFFFFFFFFFFFFE",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority 3",
+   "export": "KeSetBasePriorityThread",
+   "r3": "FFFFFFFFFFFFFFFE",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 3
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set base priority 3",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000003",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority 15",
+   "export": "KeSetBasePriorityThread",
+   "r3": "0000000000000003",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 15
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set base priority 15",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000004",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority -15",
+   "export": "KeSetBasePriorityThread",
+   "r3": "0000000000000004",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 18446744073709551601
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set base priority -15",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "FFFFFFFFFFFFFFFD",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority 16",
+   "export": "KeSetBasePriorityThread",
+   "r3": "FFFFFFFFFFFFFFFD",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set base priority 16",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000010",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority -16",
+   "export": "KeSetBasePriorityThread",
+   "r3": "0000000000000010",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 18446744073709551600
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set base priority -16",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "00000000FFFFFFF0",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority 0",
+   "export": "KeSetBasePriorityThread",
+   "r3": "00000000FFFFFFF0",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set base priority 0",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set priority 4",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000D",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 4
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set priority 4",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "0000000000000004",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set priority 8",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set priority 12",
+   "export": "KeSetPriorityThread",
+   "r3": "0000000000000008",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 12
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set priority 12",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set priority 15",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000C",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 15
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set priority 15",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set priority 16",
+   "export": "KeSetPriorityThread",
+   "r3": "000000000000000F",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 16
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set priority 16",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set priority 24",
+   "export": "KeSetPriorityThread",
+   "r3": "0000000000000010",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 24
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set priority 24",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set priority 8",
+   "export": "KeSetPriorityThread",
+   "r3": "0000000000000018",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after set priority 8",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set base priority 0 after the absolute ones",
+   "export": "KeSetBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "query after the last base priority",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "read the priority back",
+   "export": "KeSetPriorityThread",
+   "r3": "0000000000000008",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 8
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "disable boost 1",
+   "export": "KeSetDisableBoostThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "disable boost 1",
+   "export": "KeSetDisableBoostThread",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 1
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "disable boost 0",
+   "export": "KeSetDisableBoostThread",
+   "r3": "0000000000000001",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "disable boost 0",
+   "export": "KeSetDisableBoostThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set affinity 0x01 (0)",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000001"
+   },
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set affinity 0x02 (1)",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000001"
+   },
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 2
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set affinity 0x04 (2)",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000002"
+   },
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 4
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set affinity 0x08 (3)",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000004"
+   },
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 8
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set affinity 0x10 (4)",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000008"
+   },
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 16
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set affinity 0x20 (5)",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000010"
+   },
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 32
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set affinity 0x3f (6)",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000020"
+   },
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 63
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set affinity 0x15 (7)",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000020"
+   },
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 21
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "set affinity 0x3f (8)",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000010"
+   },
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    },
+    {
+     "value": 63
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "flag 1: attempting",
+     "offset": 88
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 1: create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "flag 1: handle",
+     "offset": 120
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "flag 1: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 16777216
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 1: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "flag 1: attempting",
+     "offset": 88
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "20 s",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 1: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "flag 1: thread pointer",
+     "offset": 128
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 1: base priority",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 1: affinity the thread was created with",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000001"
+   },
+   "args": [
+    {
+     "variable": "flag 1: thread pointer"
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "flag 2: attempting",
+     "offset": 136
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 2: create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "flag 2: handle",
+     "offset": 168
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "flag 2: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 33554432
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 2: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "flag 2: attempting",
+     "offset": 136
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "20 s",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 2: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "flag 2: thread pointer",
+     "offset": 176
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 2: base priority",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 2: affinity the thread was created with",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000002"
+   },
+   "args": [
+    {
+     "variable": "flag 2: thread pointer"
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "flag 3: attempting",
+     "offset": 184
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 3: create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "flag 3: handle",
+     "offset": 216
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "flag 3: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 50331648
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 3: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "flag 3: attempting",
+     "offset": 184
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "20 s",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 3: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 3: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "flag 3: thread pointer",
+     "offset": 224
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 3: base priority",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 3: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 3: affinity the thread was created with",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000002"
+   },
+   "args": [
+    {
+     "variable": "flag 3: thread pointer"
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "flag 4: attempting",
+     "offset": 232
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 4: create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "flag 4: handle",
+     "offset": 264
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "flag 4: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 67108864
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 4: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "flag 4: attempting",
+     "offset": 232
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "20 s",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 4: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 4: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "flag 4: thread pointer",
+     "offset": 272
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 4: base priority",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 4: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 4: affinity the thread was created with",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000004"
+   },
+   "args": [
+    {
+     "variable": "flag 4: thread pointer"
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "KeInitializeEvent",
+   "export": "KeInitializeEvent",
+   "args": [
+    {
+     "pointer": "flag 5: attempting",
+     "offset": 280
+    },
+    {
+     "value": 1
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 5: create",
+   "export": "ExCreateThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "flag 5: handle",
+     "offset": 312
+    },
+    {
+     "value": 16384
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "routine": "flag 5: worker"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 83886080
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 5: started",
+   "export": "KeWaitForSingleObject",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "flag 5: attempting",
+     "offset": 280
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "20 s",
+     "offset": 16
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 5: reference",
+   "export": "ObReferenceObjectByHandle",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 5: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "flag 5: thread pointer",
+     "offset": 320
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 5: base priority",
+   "export": "KeQueryBasePriorityThread",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 5: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 5: affinity the thread was created with",
+   "export": "KeSetAffinityThread",
+   "r3": "0000000000000000",
+   "capture": {
+    "previous affinity": "00000004"
+   },
+   "args": [
+    {
+     "variable": "flag 5: thread pointer"
+    },
+    {
+     "value": 1
+    },
+    {
+     "pointer": "previous affinity",
+     "offset": 32
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "open the gate",
+   "export": "KeSetEvent",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "pointer": "gate",
+     "offset": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "worker: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "worker: process type, gate status, flag": "000000010000000000000001"
+   },
+   "args": [
+    {
+     "variable": "worker: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5 s",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "worker: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "worker: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 1: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "flag 1: process type, gate status, flag": "000000010000000000000001"
+   },
+   "args": [
+    {
+     "variable": "flag 1: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5 s",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "flag 1: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 1: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 2: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "flag 2: process type, gate status, flag": "000000010000000000000001"
+   },
+   "args": [
+    {
+     "variable": "flag 2: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5 s",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "flag 2: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 2: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 3: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "flag 3: process type, gate status, flag": "000000010000000000000001"
+   },
+   "args": [
+    {
+     "variable": "flag 3: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5 s",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "flag 3: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 3: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 4: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "flag 4: process type, gate status, flag": "000000010000000000000001"
+   },
+   "args": [
+    {
+     "variable": "flag 4: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5 s",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "flag 4: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 4: handle"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "flag 5: join",
+   "export": "NtWaitForSingleObjectEx",
+   "r3": "0000000000000000",
+   "capture": {
+    "flag 5: process type, gate status, flag": "000000010000000000000001"
+   },
+   "args": [
+    {
+     "variable": "flag 5: handle"
+    },
+    {
+     "value": 0
+    },
+    {
+     "value": 0
+    },
+    {
+     "pointer": "5 s",
+     "offset": 24
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "ObDereferenceObject",
+   "export": "ObDereferenceObject",
+   "args": [
+    {
+     "variable": "flag 5: thread pointer"
+    }
+   ]
+  },
+  {
+   "scenario": "priority, boost and affinity of a parked worker",
+   "name": "NtClose",
+   "export": "NtClose",
+   "r3": "0000000000000000",
+   "args": [
+    {
+     "variable": "flag 5: handle"
+    }
+   ]
+  }
+ ]
+}

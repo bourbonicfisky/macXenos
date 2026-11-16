@@ -458,6 +458,12 @@ class XThread : public XObject, public cpu::Thread {
                   uint32_t arg1, uint32_t arg2, bool from_timer = false);
 
   int32_t priority() const { return priority_; }
+
+  // The thread's base priority as an offset from its process's default, which
+  // is what KeQueryBasePriorityThread returns and KeSetBasePriorityThread
+  // takes (thread_priority probe). Setting returns the previous offset.
+  int32_t QueryBasePriorityIncrement();
+  int32_t SetBasePriorityIncrement(int32_t increment);
   int32_t QueryPriority();
   void SetPriority(int32_t increment);
 
@@ -610,6 +616,9 @@ class XThread : public XObject, public cpu::Thread {
   int32_t priority_ = 0;       // current effective priority (may be decayed)
   int32_t base_priority_ = 0;  // priority floor — decay never goes below this
   int32_t boost_amount_ = 0;   // accumulated priority boost above base
+  // +1 or -1 after a base priority offset of 16 or more either way, which
+  // the console reports back as 16 or -16 whatever the base came to.
+  int32_t base_saturation_ = 0;
   uint64_t quantum_start_ms_ = 0;  // host uptime (ms) when quantum last reset
 
   // Guest wait profiling (see the public Note*/guest_wait_stats accessors).

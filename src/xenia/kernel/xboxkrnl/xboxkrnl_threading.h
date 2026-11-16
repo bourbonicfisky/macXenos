@@ -57,6 +57,9 @@ void xeKeInitializeApc(XAPC* apc, uint32_t thread_ptr, uint32_t kernel_routine,
 uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
                             uint32_t priority_increment,
                             cpu::ppc::PPCContext* context);
+void xeRemoveTimerApcs(uint32_t thread_handle, uint32_t apc_routine,
+                       uint32_t apc_routine_context,
+                       cpu::ppc::PPCContext* context);
 uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
                             uint32_t apc_routine_context, uint32_t arg1,
                             uint32_t arg2, cpu::ppc::PPCContext* context,

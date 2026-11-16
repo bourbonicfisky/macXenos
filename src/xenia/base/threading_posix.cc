@@ -117,6 +117,9 @@ struct WaitBlock {
   // all-signaled check itself and unregisters when done.
   bool notify_only = false;
   bool pending = false;
+  // WaitAll: the objects waited on, in the caller's order, so a pulse can
+  // tell whether it completes the wait (see CompleteWaitAllForPulseLocked).
+  const std::vector<class PosixConditionBase*>* members = nullptr;
 };
 
 // A thread's user callbacks (Thread::QueueUserCallback) and the wake for its
@@ -863,6 +866,7 @@ class PosixConditionBase {
     const size_t n = handles.size();
     WaitBlock block;
     block.notify_only = true;
+    block.members = &handles;
     AlertArm alert(&block.m, &block.cv);
     std::vector<PosixConditionBase*> sorted(handles);
     std::sort(sorted.begin(), sorted.end());
@@ -889,6 +893,15 @@ class PosixConditionBase {
         locks.reserve(sorted.size());
         for (auto* h : sorted) {
           locks.emplace_back(h->mutex_);
+        }
+        {
+          // A pulse completed the wait and consumed every member for it.
+          std::lock_guard<std::mutex> bl(block.m);
+          if (block.satisfied) {
+            completion_index = static_cast<size_t>(block.fired_index);
+            result = WaitResult::kSuccess;
+            break;
+          }
         }
         bool all_signaled = true;
         for (size_t i = 0; i < n; ++i) {
@@ -927,9 +940,10 @@ class PosixConditionBase {
             std::chrono::duration_cast<std::chrono::milliseconds>(end - now));
       }
       std::unique_lock<std::mutex> bl(block.m);
-      if (!block.pending) {
-        block.cv.wait_for(bl, backstop,
-                          [&] { return block.pending || alert.pending(); });
+      if (!block.pending && !block.satisfied) {
+        block.cv.wait_for(bl, backstop, [&] {
+          return block.pending || block.satisfied || alert.pending();
+        });
       }
       block.pending = false;
     }
@@ -943,6 +957,15 @@ class PosixConditionBase {
         } else {
           ++it;
         }
+      }
+    }
+    // As in WaitAnyBlocking: a pulse can complete the wait any time before
+    // the unregistration above, and has then consumed the members for it.
+    if (result != WaitResult::kSuccess) {
+      std::lock_guard<std::mutex> bl(block.m);
+      if (block.satisfied) {
+        completion_index = static_cast<size_t>(block.fired_index);
+        result = WaitResult::kSuccess;
       }
     }
     return std::make_pair(result, completion_index);
@@ -981,13 +1004,58 @@ class PosixConditionBase {
   // objects (auto-reset event, semaphore) it consumes via post_execution() —
   // exactly once per available signal. Returns true if the signal was fully
   // consumed (caller should then NOT also notify single Wait() waiters).
-  bool DeliverToWaitBlocksLocked() {
+  // Called WITH mutex_ held, from a pulse, for a WaitAll waiter registered
+  // here. A pulse's signal is gone before the waiter can run its own check,
+  // so the check is made for it: if every other member is signaled, all of
+  // them are consumed and the wait is latched as complete, as on the console
+  // (pulse_wait_multi probe). The other members are only try-locked, since
+  // the waiter takes member locks in address order; a member that is busy at
+  // this instant leaves the pulse lost, as it is when a member is clear.
+  bool CompleteWaitAllForPulseLocked(WaitBlock* b, size_t idx) {
+    if (!b->members) {
+      return false;
+    }
+    std::vector<PosixConditionBase*> others;
+    for (auto* member : *b->members) {
+      if (member != this &&
+          std::find(others.begin(), others.end(), member) == others.end()) {
+        others.push_back(member);
+      }
+    }
+    std::vector<std::unique_lock<std::mutex>> locks;
+    locks.reserve(others.size());
+    for (auto* member : others) {
+      locks.emplace_back(member->mutex_, std::try_to_lock);
+      if (!locks.back().owns_lock() || !member->signaled()) {
+        return false;
+      }
+    }
+    std::lock_guard<std::mutex> bl(b->m);
+    if (b->satisfied) {
+      return false;
+    }
+    for (auto* member : others) {
+      member->post_execution();
+    }
+    post_execution();
+    b->fired_index = static_cast<int>(idx);
+    b->satisfied = true;
+    b->cv.notify_all();
+    return true;
+  }
+
+  bool DeliverToWaitBlocksLocked(bool pulse = false) {
     for (auto it = wait_blocks_.begin(); it != wait_blocks_.end();) {
       if (!signaled()) {
         return true;  // consumed by a prior block this pass
       }
       WaitBlock* b = it->first;
       const size_t idx = it->second;
+      if (b->notify_only && pulse) {
+        CompleteWaitAllForPulseLocked(b, idx);
+        ++it;
+        continue;
+      }
       if (b->notify_only) {
         // WaitAll waiter: poke it and leave the signal and the registration
         // alone (it consumes every member itself once all are signaled).
@@ -1066,7 +1134,7 @@ class PosixCondition<Event> : public PosixConditionBase {
   void Pulse() {
     auto lock = std::unique_lock(mutex_);
     signal_ = true;
-    DeliverToWaitBlocksLocked();
+    DeliverToWaitBlocksLocked(/*pulse=*/true);
     signal_ = false;
   }
 
@@ -1210,11 +1278,21 @@ class PosixCondition<Timer> final : public PosixConditionBase {
                std::function<void()> opt_callback) {
     Cancel();
 
-    std::lock_guard lock(mutex_);
+    // A time that has already passed signals the timer before this returns,
+    // as arming a timer for the past does on the console (nt_timer_absolute
+    // probe); the queue still runs the callback, and skips its own Signal.
+    const bool due_now = due_time <= std::chrono::steady_clock::now();
+    {
+      std::lock_guard lock(mutex_);
 
-    callback_ = std::move(opt_callback);
-    signal_ = false;
-    wait_item_ = QueueTimerOnce(&CompletionRoutine, this, due_time);
+      callback_ = std::move(opt_callback);
+      signal_ = false;
+      presignaled_ = due_now;
+      wait_item_ = QueueTimerOnce(&CompletionRoutine, this, due_time);
+    }
+    if (due_now) {
+      Signal();
+    }
   }
 
   void SetRepeating(std::chrono::steady_clock::time_point due_time,
@@ -1226,6 +1304,7 @@ class PosixCondition<Timer> final : public PosixConditionBase {
 
     callback_ = std::move(opt_callback);
     signal_ = false;
+    presignaled_ = false;
     wait_item_ =
         QueueTimerRecurring(&CompletionRoutine, this, due_time, period);
   }
@@ -1245,7 +1324,15 @@ class PosixCondition<Timer> final : public PosixConditionBase {
   static void CompletionRoutine(void* userdata) {
     assert_not_null(userdata);
     auto timer = static_cast<PosixCondition*>(userdata);
-    timer->Signal();
+    bool presignaled;
+    {
+      std::lock_guard lock(timer->mutex_);
+      presignaled = timer->presignaled_;
+      timer->presignaled_ = false;
+    }
+    if (!presignaled) {
+      timer->Signal();
+    }
     // As the callback may reset the timer, store local.
     std::function<void()> callback;
     {
@@ -1266,6 +1353,8 @@ class PosixCondition<Timer> final : public PosixConditionBase {
   std::weak_ptr<TimerQueueWaitItem> wait_item_;
   std::function<void()> callback_;
   bool signal_;  // Protected by mutex_
+  // SetOnce signaled the timer itself; protected by mutex_.
+  bool presignaled_ = false;
   const bool manual_reset_;
 };
 
