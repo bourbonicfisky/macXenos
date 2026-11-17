@@ -5955,7 +5955,7 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
   static_assert(sizeof(ResolveParams) == 28u * sizeof(uint32_t));
   // Match the guest-memory writer's quantization, including half-way cases.
   static const bool s_scaled_packed_color = ParseMetalEnvironmentFlag(
-      std::getenv("XE_METAL_SCALED_PACKED_COLOR"), false);
+      std::getenv("XE_METAL_SCALED_PACKED_COLOR"), true);
   if (s_scaled_packed_color && (sx > 1 || sy > 1) && !is_depth &&
       dest_pixel_format == uint64_t(MTLPixelFormatRGB10A2Unorm)) {
     params.dest_format = uint32_t(xenos::ColorFormat::k_2_10_10_10);

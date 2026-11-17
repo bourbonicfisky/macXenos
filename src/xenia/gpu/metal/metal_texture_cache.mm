@@ -996,7 +996,7 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
     const bool fetch_is_rgba16_float =
         ScaledCoverRGBA16FloatFormat(fetch.format, s_expand_cover);
     static const bool s_packed_cover = ParseMetalEnvironmentFlag(
-        std::getenv("XE_METAL_SCALED_PACKED_COLOR"), false);
+        std::getenv("XE_METAL_SCALED_PACKED_COLOR"), true);
     const bool fetch_is_packed_color = s_packed_cover &&
         (fetch.format == xenos::TextureFormat::k_2_10_10_10 ||
          fetch.format == xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16);

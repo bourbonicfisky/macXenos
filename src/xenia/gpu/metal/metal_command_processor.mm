@@ -16180,7 +16180,7 @@ bool MetalCommandProcessor::IssueCopy() {
         // the sampled float4 — exactly the hardware's 8888→k_32_FLOAT rule.
         uint64_t dest_pixel_format = src_pixel_format;
         static const bool s_scaled_packed_color = metal::ParseMetalEnvironmentFlag(
-            std::getenv("XE_METAL_SCALED_PACKED_COLOR"), false);
+            std::getenv("XE_METAL_SCALED_PACKED_COLOR"), true);
         switch (resolve_info.copy_dest_info.copy_dest_format) {
           case xenos::ColorFormat::k_2_10_10_10:
           case xenos::ColorFormat::k_2_10_10_10_AS_16_16_16_16:
