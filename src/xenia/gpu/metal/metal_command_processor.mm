@@ -13001,15 +13001,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              pixel_shader->GetTextureBindingsAfterTranslation()) {
           auto f = regs.GetTextureFetch(binding.fetch_constant);
           uint32_t fetch_base = f.base_address << 12;
+          // Snapshot existence alone does not prove the consumer uses it.
+          // Include the actual serve classification and host snapshot extent
+          // to expose native-resolution fallbacks in scaled postprocess passes.
+          id<MTLTexture> fetch_snapshot = (__bridge id<MTLTexture>)
+              render_target_cache_->GetResolveSnapshot(fetch_base);
+          const uint32_t fetch_service = texture_cache_
+              ? uint32_t(texture_cache_->ClassifyFetchService(
+                    f, binding.is_signed))
+              : 99u;
           XELOGW("MetalVP   fetch fc={} base={:08X}{} fmt={} {}x{} swz={:03X} "
-                 "endian={} tiled={} pitch={}",
+                 "endian={} tiled={} pitch={} service={} scaled={} "
+                 "snapshot={}x{} snapshot_pf={}",
                  binding.fetch_constant, fetch_base,
                  render_target_cache_->GetResolveSnapshot(fetch_base)
                      ? " [SNAP]"
                      : "",
                  uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1,
                  f.swizzle & 0xFFF, uint32_t(f.endianness), uint32_t(f.tiled),
-                 uint32_t(f.pitch) << 5);
+                 uint32_t(f.pitch) << 5, fetch_service,
+                 (system_constants.textures_resolution_scaled >>
+                  binding.fetch_constant) & 1u,
+                 uint32_t(fetch_snapshot.width),
+                 uint32_t(fetch_snapshot.height),
+                 uint32_t(fetch_snapshot.pixelFormat));
         }
       }
       // Geometry-side audit (zero-raster dissection): VTE transform bits,
@@ -16164,7 +16179,18 @@ bool MetalCommandProcessor::IssueCopy() {
         // ~0 (the black flicker/darkness). R32Float attachments keep .r of
         // the sampled float4 — exactly the hardware's 8888→k_32_FLOAT rule.
         uint64_t dest_pixel_format = src_pixel_format;
+        static const bool s_scaled_packed_color = metal::ParseMetalEnvironmentFlag(
+            std::getenv("XE_METAL_SCALED_PACKED_COLOR"), false);
         switch (resolve_info.copy_dest_info.copy_dest_format) {
+          case xenos::ColorFormat::k_2_10_10_10:
+          case xenos::ColorFormat::k_2_10_10_10_AS_16_16_16_16:
+            if (s_scaled_packed_color && canonical_resolve &&
+                (draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1) &&
+                resolve_info.copy_dest_info.copy_dest_number ==
+                    xenos::SurfaceNumberFormat::kUnsignedRepeatingFraction) {
+              dest_pixel_format = uint64_t(MTLPixelFormatRGB10A2Unorm);
+            }
+            break;
           case xenos::ColorFormat::k_8_8_8_8:
           case xenos::ColorFormat::k_8_8_8_8_A:
           case xenos::ColorFormat::k_8_8_8_8_AS_16_16_16_16:
@@ -16456,7 +16482,9 @@ bool MetalCommandProcessor::IssueCopy() {
           uint32_t bpp_log2 =
               dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float) ? 3u
               : (dest_pixel_format == uint64_t(MTLPixelFormatRGBA8Unorm) ||
-                 dest_pixel_format == uint64_t(MTLPixelFormatR32Float))
+                 dest_pixel_format == uint64_t(MTLPixelFormatR32Float) ||
+                 (s_scaled_packed_color &&
+                  dest_pixel_format == uint64_t(MTLPixelFormatRGB10A2Unorm)))
                   ? 2u
                   : 0u;
           if (bpp_log2 && dest_pitch > rw && !dca.offset_x_div_8 &&

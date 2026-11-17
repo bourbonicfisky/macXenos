@@ -1883,6 +1883,14 @@ inline uint2 xe_resolve_snapshot_source(constant CanonicalResolveParams& p,
   return uint2(p.source_x + dest.x, p.source_y + dest.y - p.dest_y) * scale +
          host_dest % scale;
 }
+inline float4 xe_resolve_snapshot_value(float4 value,
+                                        constant CanonicalResolveParams& p) {
+  // Match RAM's packed words while retaining every scaled host subpixel.
+  if (p.dest_format == 7u) {
+    return xe_unpack_color32(xe_resolve_pack_1010102(value, 0u), 2u);
+  }
+  return value;
+}
 fragment float4 resolve_canonical_color_fs(
     ColorVOut in [[stage_in]],
     device const uint* canonical [[buffer(0)]],
@@ -1893,8 +1901,9 @@ fragment float4 resolve_canonical_color_fs(
       dest.y - p.dest_y >= p.height) {
     discard_fragment();
   }
-  return xe_resolve_color_value(canonical, p,
-                                xe_resolve_snapshot_source(p, host_dest, dest));
+  return xe_resolve_snapshot_value(
+      xe_resolve_color_value(canonical, p,
+                            xe_resolve_snapshot_source(p, host_dest, dest)), p);
 }
 fragment float4 resolve_canonical_depth_fs(
     ColorVOut in [[stage_in]],
@@ -1934,9 +1943,9 @@ kernel void resolve_canonical_color_cs(
       dest.y - p.dest_y >= p.height) {
     return;
   }
-  snapshot.write(xe_resolve_color_value(
+  snapshot.write(xe_resolve_snapshot_value(xe_resolve_color_value(
                      canonical, p,
-                     xe_resolve_snapshot_source(p, host_dest, dest)),
+                     xe_resolve_snapshot_source(p, host_dest, dest)), p),
                  host_dest, 0u);
 }
 kernel void resolve_canonical_depth_cs(
@@ -2117,9 +2126,9 @@ inline uint xe_direct_word_ms(texture2d_ms<float, access::read> t,
         dest.y - p.dest_y >= p.height) {                                       \
       return;                                                                  \
     }                                                                          \
-    snapshot.write(xe_direct_color_value_##SUFFIX(                             \
+    snapshot.write(xe_resolve_snapshot_value(xe_direct_color_value_##SUFFIX(   \
                        source_texture, p, rt_format,                           \
-                       xe_resolve_snapshot_source(p, host_dest, dest)),        \
+                       xe_resolve_snapshot_source(p, host_dest, dest)), p),    \
                    host_dest, 0u);                                             \
   }                                                                            \
   kernel void resolve_direct_color_packed_##SUFFIX(                            \

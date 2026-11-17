@@ -346,6 +346,103 @@ TEST_CASE("Scaled canonical clear covers exactly the rectangle's host samples",
   }
 }
 
+TEST_CASE("Packed color snapshots retain every scaled subpixel",
+          "[l1][metal][draw_resolution_scale][packed_snapshot]") {
+  for (uint32_t scale : {1u, 2u, 3u}) {
+    ScaledMsl msl;
+    REQUIRE(msl.Init(scale, scale));
+    const uint32_t width = 2 * scale, height = 2 * scale;
+    std::vector<uint32_t> expected(width * height);
+    std::vector<uint32_t> edram(80 * 16 * scale * scale);
+    for (uint32_t y = 0; y < height; ++y) {
+      for (uint32_t x = 0; x < width; ++x) {
+        const uint32_t i = y * width + x;
+        // Distinct 10-bit channels and all four alpha codes, including ends.
+        const uint32_t word = ((i * 29) & 1023) |
+            (((1023 - i * 17) & 1023) << 10) |
+            (((i * 113) & 1023) << 20) | ((i & 3) << 30);
+        expected[i] = word;
+        edram[ScaledEdramOffsetBytes(x, y, 0, 1, 0, false, 0, 0,
+                                    scale, scale) / 4] = word;
+      }
+    }
+    id<MTLBuffer> source = [msl.device newBufferWithBytes:edram.data()
+        length:edram.size() * 4 options:MTLResourceStorageModeShared];
+    MTLTextureDescriptor* desc = [[MTLTextureDescriptor alloc] init];
+    desc.textureType = MTLTextureType2DArray;
+    desc.pixelFormat = MTLPixelFormatRGB10A2Unorm;
+    desc.width = width;
+    desc.height = height;
+    desc.arrayLength = 1;
+    desc.storageMode = MTLStorageModeShared;
+    desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> output = [msl.device newTextureWithDescriptor:desc];
+    REQUIRE(output != nil);
+    desc.textureType = MTLTextureType2D;
+    id<MTLTexture> direct_source = [msl.device newTextureWithDescriptor:desc];
+    REQUIRE(direct_source != nil);
+    [direct_source replaceRegion:MTLRegionMake2D(0, 0, width, height)
+        mipmapLevel:0 withBytes:expected.data() bytesPerRow:width * 4];
+    // Madden reinterprets an HDR attachment as packed UNORM at resolve time.
+    // Preserve the 7e3 words through the direct source's RGBA16Float container.
+    desc.pixelFormat = MTLPixelFormatRGBA16Float;
+    id<MTLTexture> hdr_source = [msl.device newTextureWithDescriptor:desc];
+    REQUIRE(hdr_source != nil);
+    std::vector<_Float16> hdr(expected.size() * 4);
+    for (size_t i = 0; i < expected.size(); ++i) {
+      for (uint32_t c = 0; c < 3; ++c) {
+        hdr[i * 4 + c] = _Float16(xenos::Float7e3To32(
+            (expected[i] >> (c * 10)) & 1023));
+      }
+      hdr[i * 4 + 3] = _Float16(float(expected[i] >> 30) / 3.0f);
+    }
+    [hdr_source replaceRegion:MTLRegionMake2D(0, 0, width, height)
+        mipmapLevel:0 withBytes:hdr.data() bytesPerRow:width * 8];
+    // CanonicalResolveParams (28 words), identical to the production layout.
+    uint32_t params[28] = {};
+    params[1] = 1;  // pitch in tiles
+    params[5] = uint32_t(edram.size());
+    params[10] = 2;  // source k_2_10_10_10
+    float bias = 1.0f;
+    std::memcpy(&params[13], &bias, 4);
+    params[14] = 2;  // guest width
+    params[15] = 2;  // guest height
+    params[16] = 7;  // destination packed 10:10:10:2
+    uint32_t origin[2] = {}, rt_format = 2;
+    for (uint32_t source_kind : {0u, 1u, 2u}) {
+      bool direct = source_kind != 0;
+      rt_format = source_kind == 2 ? 3 : 2;
+      auto pipeline = msl.Pipeline(direct ? "resolve_direct_color_cs_1x"
+                                         : "resolve_canonical_color_cs");
+      auto command = [msl.queue commandBuffer];
+      auto encoder = [command computeCommandEncoder];
+      [encoder setComputePipelineState:pipeline];
+      [encoder setBuffer:source offset:0 atIndex:0];
+      [encoder setBytes:params length:sizeof(params) atIndex:1];
+      [encoder setBytes:origin length:sizeof(origin) atIndex:2];
+      [encoder setBytes:&rt_format length:sizeof(rt_format) atIndex:3];
+      [encoder setTexture:output atIndex:0];
+      if (direct) {
+        [encoder setTexture:source_kind == 2 ? hdr_source : direct_source
+                    atIndex:1];
+      }
+      [encoder dispatchThreads:MTLSizeMake(width, height, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [encoder endEncoding];
+      [command commit];
+      [command waitUntilCompleted];
+      REQUIRE(command.error == nil);
+      std::vector<uint32_t> actual(expected.size());
+      [output getBytes:actual.data() bytesPerRow:width * 4
+          bytesPerImage:width * height * 4
+          fromRegion:MTLRegionMake2D(0, 0, width, height)
+          mipmapLevel:0 slice:0];
+      INFO("scale=" << scale << " source_kind=" << source_kind);
+      CHECK(actual == expected);
+    }
+  }
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace xe

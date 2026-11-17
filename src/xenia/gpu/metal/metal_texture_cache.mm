@@ -989,11 +989,23 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
     // Snapshot formats whose texels are exactly what the RAM upload of the
     // fetch format decodes to.
     MTLPixelFormat snapshot_format = MTLPixelFormat(rt.texture_pixel_format);
+    // GTA IV's full-screen HDR chain uses EXPAND. Refusing this alias loses
+    // scaled scene detail before FXAA. Set to 0 for the pre-fix RAM fallback.
+    static const bool s_expand_cover = ParseMetalEnvironmentFlag(
+        std::getenv("XE_METAL_SCALED_COVER_EXPAND"), true);
+    const bool fetch_is_rgba16_float =
+        ScaledCoverRGBA16FloatFormat(fetch.format, s_expand_cover);
+    static const bool s_packed_cover = ParseMetalEnvironmentFlag(
+        std::getenv("XE_METAL_SCALED_PACKED_COLOR"), false);
+    const bool fetch_is_packed_color = s_packed_cover &&
+        (fetch.format == xenos::TextureFormat::k_2_10_10_10 ||
+         fetch.format == xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16);
     bool format_matches =
+        (snapshot_format == MTLPixelFormatRGB10A2Unorm && fetch_is_packed_color) ||
         (snapshot_format == MTLPixelFormatRGBA8Unorm &&
          fetch.format == xenos::TextureFormat::k_8_8_8_8) ||
         (snapshot_format == MTLPixelFormatRGBA16Float &&
-         fetch.format == xenos::TextureFormat::k_16_16_16_16_FLOAT) ||
+         fetch_is_rgba16_float) ||
         (snapshot_format == MTLPixelFormatR32Float &&
          fetch.format == xenos::TextureFormat::k_32_FLOAT);
     ScaledCoverInputs& scaled = out->scaled;
@@ -1010,7 +1022,7 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
     static const bool s_signed_float_cover = ParseMetalEnvironmentFlag(
         std::getenv("XE_METAL_SCALED_COVER_SIGNED_FLOAT"), true);
     const bool fetch_is_float =
-        fetch.format == xenos::TextureFormat::k_16_16_16_16_FLOAT ||
+        fetch_is_rgba16_float ||
         fetch.format == xenos::TextureFormat::k_32_FLOAT;
     scaled.is_signed = is_signed && !(s_signed_float_cover && fetch_is_float);
     scaled.snapshot_format_matches_fetch = format_matches;
@@ -1040,10 +1052,11 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
           (__bridge id<MTLTexture>)assembly.texture;
       MTLPixelFormat assembly_format = assembly_texture.pixelFormat;
       scaled.snapshot_format_matches_fetch =
+          (assembly_format == MTLPixelFormatRGB10A2Unorm && fetch_is_packed_color) ||
           (assembly_format == MTLPixelFormatRGBA8Unorm &&
            fetch.format == xenos::TextureFormat::k_8_8_8_8) ||
           (assembly_format == MTLPixelFormatRGBA16Float &&
-           fetch.format == xenos::TextureFormat::k_16_16_16_16_FLOAT) ||
+           fetch_is_rgba16_float) ||
           (assembly_format == MTLPixelFormatR32Float &&
            fetch.format == xenos::TextureFormat::k_32_FLOAT);
       scaled.snapshot_width = assembly.width;
