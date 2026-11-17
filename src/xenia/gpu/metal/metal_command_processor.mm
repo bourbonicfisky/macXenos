@@ -25,6 +25,7 @@
 #include <dlfcn.h>
 #include <objc/runtime.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 // Public ObjC ABI for manual autorelease-pool scopes that span calls (the
 // per-frame pool cycled at IssueSwap can't be an @autoreleasepool block).
@@ -14589,8 +14590,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // an encoder without one is a Metal validation error. norm_depth already
     // collapsed "always, no write" to disabled. (D2: a by-use pass may leave
     // depth unbound; its draws then neither test nor write it.)
+    // Diagnostic only: isolate depth rejection in one pixel shader without
+    // changing the geometry passes that produced its depth input.
+    static const uint64_t s_depth_always_ps = [] {
+      const char* value = std::getenv("XE_METAL_DEPTH_ALWAYS_PS");
+      return value ? strtoull(value, nullptr, 16) : 0ull;
+    }();
+    auto host_depth_control = norm_depth;
+    if (s_depth_always_ps && pixel_shader &&
+        pixel_shader->ucode_data_hash() == s_depth_always_ps) {
+      host_depth_control.zfunc = xenos::CompareFunction::kAlways;
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        XELOGW("MetalDepthAlwaysPS: diagnostic engaged ps={:016X}",
+               s_depth_always_ps);
+      }
+    }
     void* depth_state = GetOrCreateDepthStencilState(
-        norm_depth.value, stencil_ref_mask.value, stencil_ref_mask_back.value);
+        host_depth_control.value, stencil_ref_mask.value,
+        stencil_ref_mask_back.value);
     if (depth_state) {
       // Encoder state persists across draws; skip re-setting what the open
       // encoder already carries.
@@ -21832,14 +21851,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // for the Xcode GPU debugger / shader profiler (the only reader of
   // per-pipeline registers and occupancy). Needs MTL_CAPTURE_ENABLED=1 in
   // the environment before the device is created.
+  // XE_METAL_GPUTRACE_TRIGGER=<file> replaces the swap-number trigger with
+  // existence of a caller-owned marker file. One attempt per process; the
+  // marker is never changed or removed by the emulator.
   {
     static const char* const s_trace_path = std::getenv("XE_METAL_GPUTRACE");
+    static const char* const s_trace_trigger =
+        std::getenv("XE_METAL_GPUTRACE_TRIGGER");
     static const uint32_t s_trace_frame = [] {
       const char* v = std::getenv("XE_METAL_GPUTRACE_FRAME");
       return v ? uint32_t(strtoul(v, nullptr, 10)) : 600u;
     }();
     static uint32_t s_trace_swaps = 0;
     static bool s_trace_active = false;
+    static bool s_trace_attempted = false;
     if (s_trace_path && s_trace_path[0]) {
       ++s_trace_swaps;
       MTLCaptureManager* manager = [MTLCaptureManager sharedCaptureManager];
@@ -21847,7 +21872,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         [manager stopCapture];
         s_trace_active = false;
         XELOGI("MetalCommandProcessor: GPU trace written to {}", s_trace_path);
-      } else if (s_trace_swaps == s_trace_frame) {
+      } else if (!s_trace_attempted && [&] {
+                   if (s_trace_trigger && s_trace_trigger[0]) {
+                     struct stat marker;
+                     return stat(s_trace_trigger, &marker) == 0;
+                   }
+                   return s_trace_swaps == s_trace_frame;
+                 }()) {
+        s_trace_attempted = true;
         auto* provider = static_cast<xe::ui::metal::MetalProvider*>(
             graphics_system_->provider());
         if (![manager supportsDestination:MTLCaptureDestinationGPUTraceDocument]) {
