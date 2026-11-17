@@ -132,6 +132,21 @@ TEST_CASE("Scaled cover: classified only where RAM would otherwise serve",
         ResolvedFetchService::kNotResolveBacked);
 }
 
+TEST_CASE("Scaled cover: HDR alias preserves float representation only",
+          "[metal][draw_resolution_scale]") {
+  using xenos::TextureFormat;
+  CHECK(metal::ScaledCoverRGBA16FloatFormat(
+      TextureFormat::k_16_16_16_16_FLOAT, false));
+  CHECK_FALSE(metal::ScaledCoverRGBA16FloatFormat(
+      TextureFormat::k_16_16_16_16_EXPAND, false));
+  CHECK(metal::ScaledCoverRGBA16FloatFormat(
+      TextureFormat::k_16_16_16_16_EXPAND, true));
+  CHECK_FALSE(metal::ScaledCoverRGBA16FloatFormat(
+      TextureFormat::k_16_16_16_16, true));
+  CHECK_FALSE(metal::ScaledCoverRGBA16FloatFormat(
+      TextureFormat::k_16_16_EXPAND, true));
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace xe

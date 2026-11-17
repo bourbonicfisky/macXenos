@@ -18,6 +18,15 @@ namespace xe {
 namespace gpu {
 namespace metal {
 
+// EXPAND uses the same half-float texels and signed view as FLOAT. Keep this
+// alias decision shared by snapshot matching and signed-float eligibility.
+inline bool ScaledCoverRGBA16FloatFormat(xenos::TextureFormat format,
+                                       bool expand_enabled) {
+  return format == xenos::TextureFormat::k_16_16_16_16_FLOAT ||
+         (expand_enabled &&
+          format == xenos::TextureFormat::k_16_16_16_16_EXPAND);
+}
+
 // Scaled-cover serving (implement-metal-draw-resolution-scaling): at a draw
 // resolution scale, a RAM-backed color resolve's guest RAM holds the
 // representative pixels of its snapshot, so while the registration is live

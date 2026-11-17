@@ -25,6 +25,7 @@
 #include <dlfcn.h>
 #include <objc/runtime.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 // Public ObjC ABI for manual autorelease-pool scopes that span calls (the
 // per-frame pool cycled at IssueSwap can't be an @autoreleasepool block).
@@ -13000,15 +13001,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
              pixel_shader->GetTextureBindingsAfterTranslation()) {
           auto f = regs.GetTextureFetch(binding.fetch_constant);
           uint32_t fetch_base = f.base_address << 12;
+          // Snapshot existence alone does not prove the consumer uses it.
+          // Include the actual serve classification and host snapshot extent
+          // to expose native-resolution fallbacks in scaled postprocess passes.
+          id<MTLTexture> fetch_snapshot = (__bridge id<MTLTexture>)
+              render_target_cache_->GetResolveSnapshot(fetch_base);
+          const uint32_t fetch_service = texture_cache_
+              ? uint32_t(texture_cache_->ClassifyFetchService(
+                    f, binding.is_signed))
+              : 99u;
           XELOGW("MetalVP   fetch fc={} base={:08X}{} fmt={} {}x{} swz={:03X} "
-                 "endian={} tiled={} pitch={}",
+                 "endian={} tiled={} pitch={} service={} scaled={} "
+                 "snapshot={}x{} snapshot_pf={}",
                  binding.fetch_constant, fetch_base,
                  render_target_cache_->GetResolveSnapshot(fetch_base)
                      ? " [SNAP]"
                      : "",
                  uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1,
                  f.swizzle & 0xFFF, uint32_t(f.endianness), uint32_t(f.tiled),
-                 uint32_t(f.pitch) << 5);
+                 uint32_t(f.pitch) << 5, fetch_service,
+                 (system_constants.textures_resolution_scaled >>
+                  binding.fetch_constant) & 1u,
+                 uint32_t(fetch_snapshot.width),
+                 uint32_t(fetch_snapshot.height),
+                 uint32_t(fetch_snapshot.pixelFormat));
         }
       }
       // Geometry-side audit (zero-raster dissection): VTE transform bits,
@@ -14589,8 +14605,26 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
     // an encoder without one is a Metal validation error. norm_depth already
     // collapsed "always, no write" to disabled. (D2: a by-use pass may leave
     // depth unbound; its draws then neither test nor write it.)
+    // Diagnostic only: isolate depth rejection in one pixel shader without
+    // changing the geometry passes that produced its depth input.
+    static const uint64_t s_depth_always_ps = [] {
+      const char* value = std::getenv("XE_METAL_DEPTH_ALWAYS_PS");
+      return value ? strtoull(value, nullptr, 16) : 0ull;
+    }();
+    auto host_depth_control = norm_depth;
+    if (s_depth_always_ps && pixel_shader &&
+        pixel_shader->ucode_data_hash() == s_depth_always_ps) {
+      host_depth_control.zfunc = xenos::CompareFunction::kAlways;
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        XELOGW("MetalDepthAlwaysPS: diagnostic engaged ps={:016X}",
+               s_depth_always_ps);
+      }
+    }
     void* depth_state = GetOrCreateDepthStencilState(
-        norm_depth.value, stencil_ref_mask.value, stencil_ref_mask_back.value);
+        host_depth_control.value, stencil_ref_mask.value,
+        stencil_ref_mask_back.value);
     if (depth_state) {
       // Encoder state persists across draws; skip re-setting what the open
       // encoder already carries.
@@ -16145,7 +16179,18 @@ bool MetalCommandProcessor::IssueCopy() {
         // ~0 (the black flicker/darkness). R32Float attachments keep .r of
         // the sampled float4 — exactly the hardware's 8888→k_32_FLOAT rule.
         uint64_t dest_pixel_format = src_pixel_format;
+        static const bool s_scaled_packed_color = metal::ParseMetalEnvironmentFlag(
+            std::getenv("XE_METAL_SCALED_PACKED_COLOR"), false);
         switch (resolve_info.copy_dest_info.copy_dest_format) {
+          case xenos::ColorFormat::k_2_10_10_10:
+          case xenos::ColorFormat::k_2_10_10_10_AS_16_16_16_16:
+            if (s_scaled_packed_color && canonical_resolve &&
+                (draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1) &&
+                resolve_info.copy_dest_info.copy_dest_number ==
+                    xenos::SurfaceNumberFormat::kUnsignedRepeatingFraction) {
+              dest_pixel_format = uint64_t(MTLPixelFormatRGB10A2Unorm);
+            }
+            break;
           case xenos::ColorFormat::k_8_8_8_8:
           case xenos::ColorFormat::k_8_8_8_8_A:
           case xenos::ColorFormat::k_8_8_8_8_AS_16_16_16_16:
@@ -16437,7 +16482,9 @@ bool MetalCommandProcessor::IssueCopy() {
           uint32_t bpp_log2 =
               dest_pixel_format == uint64_t(MTLPixelFormatRGBA16Float) ? 3u
               : (dest_pixel_format == uint64_t(MTLPixelFormatRGBA8Unorm) ||
-                 dest_pixel_format == uint64_t(MTLPixelFormatR32Float))
+                 dest_pixel_format == uint64_t(MTLPixelFormatR32Float) ||
+                 (s_scaled_packed_color &&
+                  dest_pixel_format == uint64_t(MTLPixelFormatRGB10A2Unorm)))
                   ? 2u
                   : 0u;
           if (bpp_log2 && dest_pitch > rw && !dca.offset_x_div_8 &&
@@ -21832,14 +21879,20 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   // for the Xcode GPU debugger / shader profiler (the only reader of
   // per-pipeline registers and occupancy). Needs MTL_CAPTURE_ENABLED=1 in
   // the environment before the device is created.
+  // XE_METAL_GPUTRACE_TRIGGER=<file> replaces the swap-number trigger with
+  // existence of a caller-owned marker file. One attempt per process; the
+  // marker is never changed or removed by the emulator.
   {
     static const char* const s_trace_path = std::getenv("XE_METAL_GPUTRACE");
+    static const char* const s_trace_trigger =
+        std::getenv("XE_METAL_GPUTRACE_TRIGGER");
     static const uint32_t s_trace_frame = [] {
       const char* v = std::getenv("XE_METAL_GPUTRACE_FRAME");
       return v ? uint32_t(strtoul(v, nullptr, 10)) : 600u;
     }();
     static uint32_t s_trace_swaps = 0;
     static bool s_trace_active = false;
+    static bool s_trace_attempted = false;
     if (s_trace_path && s_trace_path[0]) {
       ++s_trace_swaps;
       MTLCaptureManager* manager = [MTLCaptureManager sharedCaptureManager];
@@ -21847,7 +21900,14 @@ void MetalCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
         [manager stopCapture];
         s_trace_active = false;
         XELOGI("MetalCommandProcessor: GPU trace written to {}", s_trace_path);
-      } else if (s_trace_swaps == s_trace_frame) {
+      } else if (!s_trace_attempted && [&] {
+                   if (s_trace_trigger && s_trace_trigger[0]) {
+                     struct stat marker;
+                     return stat(s_trace_trigger, &marker) == 0;
+                   }
+                   return s_trace_swaps == s_trace_frame;
+                 }()) {
+        s_trace_attempted = true;
         auto* provider = static_cast<xe::ui::metal::MetalProvider*>(
             graphics_system_->provider());
         if (![manager supportsDestination:MTLCaptureDestinationGPUTraceDocument]) {
