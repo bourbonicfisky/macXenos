@@ -6,6 +6,18 @@
 import type { Catalog } from "../catalogs";
 
 export default {
+  // Color vision accessibility
+  "pref.colorVision": "色覺輔助",
+  "pref.colorVision.redGreen": "紅–綠",
+  "pref.colorVision.blueYellow": "藍–黃",
+  "dashboard.colorVision.heading": "讓介面更易辨認",
+  "dashboard.colorVision.detail": "選擇適合紅綠色覺差異（紅色盲或綠色盲）或藍黃色覺差異（藍色盲）的配色方案。兩種方案都會加強輪廓，並為視覺提示保留文字標籤。請選擇您覺得最清晰的方案。",
+  "dashboard.colorVision.scope": "變更會立即套用至 macXenos 介面的日間和夜間主題。遊戲顏色保持不變。",
+  "dashboard.colorVision.preview": "預覽",
+  "dashboard.colorVision.selected": "已選取",
+  "dashboard.colorVision.warning": "警告",
+  "dashboard.colorVision.unavailable": "無法使用",
+
   // --- Legend and buttons, on every blade ---------------------------------
   "legend.day": "白天",
   "legend.night": "夜晚",

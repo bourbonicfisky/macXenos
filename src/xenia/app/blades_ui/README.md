@@ -190,6 +190,12 @@ no profile yet): what is playing, recent games, Open a game, Hide menu.
 Graphics, Controller, Audio, CPU and Profiles carry the settings most people
 change, in player-facing words. System opens with the Dashboard's own look
 and sound (kept in the page's local storage), then the console's settings.
+System > Color vision offers Off, Red–green, and Blue–yellow palettes. The
+accessible palettes use neutral surfaces, contrasting selection fills and focus outlines,
+and labeled cues in both day and night themes. The choice applies immediately
+and persists across launches; Off restores the original palette. It affects
+the dashboard only, leaving game rendering and artwork unchanged.
+
 Advanced lists every setting in the config file by category, with a search,
 a warning, and Reset to defaults at the end.
 

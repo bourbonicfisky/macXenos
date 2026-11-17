@@ -6,6 +6,18 @@
 import type { Catalog } from "../catalogs";
 
 export default {
+  // Color vision accessibility
+  "pref.colorVision": "색각 지원",
+  "pref.colorVision.redGreen": "적색–녹색",
+  "pref.colorVision.blueYellow": "청색–황색",
+  "dashboard.colorVision.heading": "인터페이스를 더 쉽게 구별하기",
+  "dashboard.colorVision.detail": "적색–녹색(제1색맹 또는 제2색맹)이나 청색–황색(제3색맹) 색각 차이에 맞는 팔레트를 선택하세요. 두 팔레트 모두 윤곽선을 강조하고 시각적 표시와 함께 텍스트를 제공합니다. 가장 잘 보이는 것을 선택하세요.",
+  "dashboard.colorVision.scope": "변경 사항은 낮과 밤 테마 모두에서 macXenos 인터페이스에 즉시 적용됩니다. 게임 색상은 바뀌지 않습니다.",
+  "dashboard.colorVision.preview": "미리 보기",
+  "dashboard.colorVision.selected": "선택됨",
+  "dashboard.colorVision.warning": "경고",
+  "dashboard.colorVision.unavailable": "사용 불가",
+
   // --- Legend and buttons, on every blade ---------------------------------
   "legend.day": "낮",
   "legend.night": "밤",

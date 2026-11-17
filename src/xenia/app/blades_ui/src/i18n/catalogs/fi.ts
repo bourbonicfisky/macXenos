@@ -6,6 +6,18 @@
 import type { Catalog } from "../catalogs";
 
 export default {
+  // Color vision accessibility
+  "pref.colorVision": "Värinäkö",
+  "pref.colorVision.redGreen": "Puna–vihreä",
+  "pref.colorVision.blueYellow": "Sini–keltainen",
+  "dashboard.colorVision.heading": "Erota käyttöliittymän osat helpommin",
+  "dashboard.colorVision.detail": "Valitse paletti puna–vihervärinäön (protanopia tai deuteranopia) tai sini–keltavärinäön (tritanopia) poikkeamille. Molemmat vahvistavat ääriviivoja ja täydentävät visuaalisia vihjeitä teksteillä. Valitse itsellesi selkein vaihtoehto.",
+  "dashboard.colorVision.scope": "Muutokset tulevat heti voimaan macXenos-käyttöliittymän päivä- ja yöteemassa. Pelin värit eivät muutu.",
+  "dashboard.colorVision.preview": "Esikatselu",
+  "dashboard.colorVision.selected": "Valittu",
+  "dashboard.colorVision.warning": "Varoitus",
+  "dashboard.colorVision.unavailable": "Ei käytettävissä",
+
   // --- Legend and buttons, on every blade ---------------------------------
   "legend.day": "Päivä",
   "legend.night": "Yö",

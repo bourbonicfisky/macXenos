@@ -13,10 +13,13 @@
           var s = localStorage.getItem("macxenos-theme");
           var d = window.matchMedia("(prefers-color-scheme: dark)").matches;
           r.dataset.theme = s === "dark" || s === "light" ? s : d ? "dark" : "light";
+          var cv = localStorage.getItem("macxenos-color-vision");
+          r.dataset.colorVision = cv === "red-green" || cv === "blue-yellow" ? cv : "off";
           var m = localStorage.getItem("macxenos-motion");
           r.dataset.motion = m === "slow" || m === "reduced" ? m : "fast";
           r.dataset.motionOverride = localStorage.getItem("macxenos-motion-override") === "on" ? "on" : "off";
         } catch (e) {
+          r.dataset.colorVision = "off";
           r.dataset.theme = "dark";
           r.dataset.motion = "fast";
           r.dataset.motionOverride = "off";
@@ -25,8 +28,8 @@
     </script>
     <link rel="preload" as="font" type="font/woff2" href="/fonts/selawik-300.woff2" crossorigin="anonymous" />
     <link rel="preload" as="font" type="font/woff2" href="/fonts/selawik-400.woff2" crossorigin="anonymous" />
-    <script type="module" crossorigin src="/assets/index-Dx0dPMic.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-Biw_m3RR.css">
+    <script type="module" crossorigin src="/assets/index-xTEG6BIR.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-Cw-qHCUk.css">
   </head>
   <body>
     <div id="root"></div>

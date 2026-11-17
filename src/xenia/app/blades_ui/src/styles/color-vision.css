@@ -1,0 +1,99 @@
+/* Optional interface palettes; never filter the game image or artwork.
+   Neutral surfaces keep text readable without distinguishing blade hues. */
+:root[data-color-vision]:not([data-color-vision="off"]) {
+  --cv-hi: #ffffff;
+  --cv-base: #eef3f8;
+  --cv-lo: #d9e2ed;
+  --cv-ink: #152535;
+  --cv-soft: #34495e;
+  --cv-accent: #005a9c;
+  --cv-selected-ink: #ffffff;
+  --cv-hover: #c5dff3;
+  --ink: var(--cv-ink);
+  --ink-soft: var(--cv-soft);
+  --ink-faint: var(--cv-soft);
+  --focus: var(--cv-accent);
+  --emboss: none;
+  --hl-a: var(--cv-hover);
+  --hl-b: var(--cv-hover);
+  --hl-c: var(--cv-hover);
+  --hl-gloss: transparent;
+  --hl-rim: var(--cv-soft);
+}
+:root[data-color-vision="blue-yellow"]:not([data-color-vision="off"]) {
+  --cv-accent: #81345d;
+  --cv-hover: #eed0de;
+}
+:root[data-color-vision]:not([data-color-vision="off"])[data-theme="dark"] {
+  --cv-hi: #23364a;
+  --cv-base: #172635;
+  --cv-lo: #101a24;
+  --cv-ink: #f5f7fa;
+  --cv-soft: #ccd8e2;
+  --cv-accent: #8ecbff;
+  --cv-selected-ink: #101a24;
+  --cv-hover: #304d66;
+}
+:root[data-color-vision="blue-yellow"]:not([data-color-vision="off"])[data-theme="dark"] {
+  --cv-accent: #ffb0cf;
+  --cv-hover: #523349;
+}
+:root[data-color-vision]:not([data-color-vision="off"]) :is(.blade, .subblade, .deck-menu-item) {
+  --b-hi: var(--cv-hi);
+  --b-base: var(--cv-base);
+  --b-lo: var(--cv-lo);
+  --b-rim: var(--cv-soft);
+  --b-title: var(--cv-ink);
+  --b-title-shadow: none;
+  --b-ink: var(--cv-ink);
+  --b-ink-soft: var(--cv-soft);
+}
+/* Solid selection, dashed focus: identifiable without hue differences. */
+:root[data-color-vision]:not([data-color-vision="off"]) :is(.menu-row, .subblade-row, .pref-dropdown-item)[data-focused="true"],
+:root[data-color-vision]:not([data-color-vision="off"]) .pref-option[aria-checked="true"],
+:root[data-color-vision]:not([data-color-vision="off"]) .color-vision-preview-selected {
+  --b-ink: var(--cv-selected-ink);
+  --b-ink-soft: var(--cv-selected-ink);
+  color: var(--cv-selected-ink);
+  background: var(--cv-accent);
+  text-shadow: none;
+  box-shadow: inset 0 0 0 3px var(--cv-accent);
+  font-weight: 600;
+}
+:root[data-color-vision]:not([data-color-vision="off"]) :is(button, a, input, select, [role="slider"]):focus {
+  outline: 3px dashed var(--focus);
+  outline-offset: 3px;
+}
+:root[data-color-vision]:not([data-color-vision="off"]) .pad-key {
+  background: var(--cv-ink);
+  color: var(--cv-base);
+  text-shadow: none;
+  border: 2px solid var(--cv-base);
+}
+:root[data-color-vision]:not([data-color-vision="off"]) .pane-warning {
+  border: 2px dashed var(--cv-soft);
+  background: var(--cv-base);
+  color: var(--cv-ink);
+}
+:root[data-color-vision]:not([data-color-vision="off"]) .pane-warning-mark {
+  background: var(--cv-ink);
+  color: var(--cv-base);
+}
+.color-vision-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6em;
+  padding: 0;
+  list-style: none;
+}
+.color-vision-preview li {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.4em 0.7em;
+  border-radius: 6px;
+}
+.color-vision-preview-selected {
+  border: 2px solid var(--cv-accent, var(--b-ink));
+  font-weight: 600;
+}

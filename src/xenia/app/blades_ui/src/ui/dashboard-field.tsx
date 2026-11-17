@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useTheme, useTone } from "./theme";
+import { usePreferences } from "./preferences";
 
 const vertexShader = `
 attribute vec2 position;
@@ -119,15 +120,16 @@ export function DashboardField() {
   const targetRef = useRef({ dark: 0, tone: TONES.green });
   const theme = useTheme();
   const tone = useTone();
+  const { colorVision } = usePreferences();
 
   useEffect(() => {
     const dark = theme === "dark";
     const table = dark ? TONES_DARK : TONES;
     targetRef.current = {
       dark: dark ? 1 : 0,
-      tone: table[tone] ?? table.green
+      tone: colorVision === "off" ? (table[tone] ?? table.green) : table.steel
     };
-  }, [theme, tone]);
+  }, [theme, tone, colorVision]);
 
   useEffect(() => {
     const canvas = canvasRef.current;

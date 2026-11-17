@@ -6,6 +6,18 @@
 import type { Catalog } from "../catalogs";
 
 export default {
+  // Color vision accessibility
+  "pref.colorVision": "Kleurenzien",
+  "pref.colorVision.redGreen": "Rood–groen",
+  "pref.colorVision.blueYellow": "Blauw–geel",
+  "dashboard.colorVision.heading": "Maak de interface beter te onderscheiden",
+  "dashboard.colorVision.detail": "Kies een palet voor verschillen in rood–groen (protanopie of deuteranopie) of blauw–geel (tritanopie) kleurenzien. Beide versterken contouren en vullen visuele aanwijzingen aan met tekst. Kies wat voor jou het duidelijkst is.",
+  "dashboard.colorVision.scope": "Wijzigingen gelden direct voor de macXenos-interface in het dag- en nachtthema. De kleuren van het spel blijven ongewijzigd.",
+  "dashboard.colorVision.preview": "Voorbeeld",
+  "dashboard.colorVision.selected": "Geselecteerd",
+  "dashboard.colorVision.warning": "Waarschuwing",
+  "dashboard.colorVision.unavailable": "Niet beschikbaar",
+
   // --- Legend and buttons, on every blade ---------------------------------
   "legend.day": "Dag",
   "legend.night": "Nacht",

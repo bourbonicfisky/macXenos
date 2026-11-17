@@ -2,6 +2,8 @@
 // on the mock (src/mock.ts) and drives it with keys, as a keyboard or a pad
 // (gamepad.ts turns buttons into the same keys) would.
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { withBlades } from "./harness.mjs";
 
 const BLADES = ["home", "graphics", "controller", "audio", "profiles", "system", "advanced"];
@@ -23,6 +25,69 @@ async function downTo(page, label, limit = 30) {
 }
 
 const tests = {
+  async "Color vision palettes persist, preserve game settings and support both themes"(page, base) {
+    await page.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+    await page.open(base, "#system/color-vision");
+    const gameSettings = await page.eval("import('/src/native.ts').then(({getNative}) => JSON.stringify(getNative().cvars))");
+    expect((await page.eval("document.documentElement.dataset.colorVision")) === "off", "not off by default");
+    for (const [mode, label] of [["red-green", "Red–green"], ["blue-yellow", "Blue–yellow"]]) {
+      await page.eval(`[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].find(b => !b.closest('[inert]') && b.checkVisibility() && b.textContent === ${JSON.stringify(label)}).click()`);
+      expect((await page.eval("document.documentElement.dataset.colorVision")) === mode, "palette did not apply");
+      expect((await page.eval("localStorage.getItem('macxenos-color-vision')")) === mode, "palette not saved");
+      await page.open(base, "#system/color-vision");
+      expect((await page.eval("document.documentElement.dataset.colorVision")) === mode, "palette lost on reload");
+      for (const theme of ["light", "dark"]) {
+        await page.eval(`import('/src/ui/preferences.ts').then(({setPreference}) => setPreference('theme', '${theme}'))`);
+        // Wait for Vite's stylesheet and the preference update before reading tokens.
+        await page.eval(`new Promise((resolve, reject) => {
+          let tries = 0;
+          const ready = () => {
+            if (getComputedStyle(document.documentElement).getPropertyValue('--cv-hi').trim()) resolve();
+            else if (++tries < 120) requestAnimationFrame(ready);
+            else reject(new Error('color vision stylesheet did not become ready'));
+          };
+          ready();
+        })`);
+        const contrast = await page.eval(`(() => {
+          const s = getComputedStyle(document.querySelector('.blade[data-state=open]'));
+          const lum = hex => {
+            const c = hex.trim().slice(1).match(/../g).map(x => parseInt(x,16)/255).map(x => x <= .04045 ? x/12.92 : ((x+.055)/1.055)**2.4);
+            return c[0]*.2126+c[1]*.7152+c[2]*.0722;
+          };
+          const ratio = (a,b) => (Math.max(a,b)+.05)/(Math.min(a,b)+.05);
+          return ['--cv-hi','--cv-base','--cv-lo','--cv-hover'].flatMap(bg => ['--cv-ink','--cv-soft'].map(fg => ratio(lum(s.getPropertyValue(bg)),lum(s.getPropertyValue(fg))))).concat(ratio(lum(s.getPropertyValue('--cv-accent')),lum(s.getPropertyValue('--cv-selected-ink'))));
+        })()`);
+        const accent = await page.eval("getComputedStyle(document.documentElement).getPropertyValue('--cv-accent').trim()");
+        expect(accent === (mode === "red-green" ? (theme === "light" ? "#005a9c" : "#8ecbff") : (theme === "light" ? "#81345d" : "#ffb0cf")), "wrong palette accent");
+        expect(contrast.every(r => r >= 4.5), `insufficient text contrast ${mode} ${theme}: ${contrast}`);
+        const state = await page.eval(`(() => {
+          const b = [...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio][aria-checked=true]')].find(b => !b.closest('[inert]') && b.checkVisibility());
+          b.focus(); const s = getComputedStyle(b);
+          return [s.outlineStyle, s.outlineWidth, s.boxShadow, s.backgroundColor, s.color];
+        })()`);
+        expect(state[3] !== "rgba(0, 0, 0, 0)" && state[3] !== state[4], "selection needs a contrasting fill and label");
+        expect(state[0] === "dashed" && state[1] === "3px" && state[2].includes("inset"), `focus/selection cues missing: ${state}`);
+        if (process.env.BLADES_COLOR_VISION_SHOTS) {
+          mkdirSync(process.env.BLADES_COLOR_VISION_SHOTS, {recursive:true});
+          writeFileSync(join(process.env.BLADES_COLOR_VISION_SHOTS, `${mode}-${theme}.png`), await page.screenshot());
+        }
+      }
+    }
+    expect((await page.eval("import('/src/native.ts').then(({getNative}) => JSON.stringify(getNative().cvars))")) === gameSettings, "UI preference changed game settings");
+    await page.eval("[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].find(b => !b.closest('[inert]') && b.checkVisibility() && b.textContent === 'Off').click()");
+    expect((await page.eval("document.documentElement.dataset.colorVision")) === "off", "Off did not restore original palette");
+    expect((await page.eval("localStorage.getItem('macxenos-color-vision')")) === null, "Off not reset to default");
+    await page.eval("localStorage.setItem('macxenos-color-vision', 'invalid')");
+    await page.open(base, "#system/color-vision");
+    expect((await page.eval("document.documentElement.dataset.colorVision")) === "off", "invalid saved choice did not fall back");
+    await page.key("a");
+    await page.key("ArrowRight");
+    expect((await page.eval("document.documentElement.dataset.colorVision")) === "red-green", "controller-style navigation did not select a palette");
+    await page.key("b");
+    expect((await page.eval("document.activeElement?.classList.contains('menu-row')")), `B did not return to the setting row: ${await page.eval("document.activeElement?.outerHTML.slice(0,200)")}`);
+    await page.call("Emulation.setFocusEmulationEnabled", { enabled: false });
+  },
+
   async "every blade opens from its deep link"(page, base) {
     for (const id of BLADES) {
       await page.open(base, `#${id}`);
@@ -238,7 +303,7 @@ const tests = {
     };
     for (const code of codes) {
       await page.open(base, "#system/language");
-      const option = `[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].find((b) => b.textContent === ${JSON.stringify(names[code])})`;
+      const option = `[...document.querySelectorAll('.blade[data-state=open] [role=radio]')].find((b) => b.textContent === ${JSON.stringify(names[code])})`;
       expect(await page.eval(`!!${option}`), `no option named ${names[code]} for ${code}`);
       expect((await page.eval(`${option}.querySelector('[lang]')?.lang`)) === code, `${code}'s name is not marked lang=${code}`);
       await page.eval(`${option}.click()`);
@@ -267,7 +332,7 @@ const tests = {
     );
     expect(row === "Dashboard languageEnglish", `row reads ${row}`);
     const options = await page.eval(
-      "[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].map((b) => b.textContent)"
+      "[...document.querySelectorAll('.blade[data-state=open] [role=radio]')].map((b) => b.textContent)"
     );
     expect(options[0] === "Same as my Mac" && options.includes("English"), `options ${options}`);
     expect((await page.eval("document.documentElement.lang")) === "en", "lang is not en");

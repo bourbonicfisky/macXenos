@@ -22,6 +22,7 @@ import { AVAILABLE, LOCALES, PSEUDO, setLanguageChoice, t, type LanguageChoice, 
  *           it (data-background, blade.css and dashboard-field.tsx)
  */
 
+export type ColorVisionPref = "off" | "red-green" | "blue-yellow";
 export type ThemePref = "system" | "light" | "dark";
 export type MotionPref = "fast" | "slow" | "reduced";
 export type BackgroundPref = "shifting" | "still";
@@ -39,6 +40,7 @@ export type NotificationPref =
 export type Preferences = {
   language: LanguageChoice;
   theme: ThemePref;
+  colorVision: ColorVisionPref;
   motion: MotionPref;
   background: BackgroundPref;
   sound: SoundPref;
@@ -50,6 +52,7 @@ export type Preferences = {
 export const PREFERENCE_KEYS: Record<keyof Preferences, string> = {
   language: "macxenos-language",
   theme: "macxenos-theme",
+  colorVision: "macxenos-color-vision",
   motion: "macxenos-motion",
   background: "macxenos-background",
   sound: "macxenos-sound",
@@ -61,6 +64,7 @@ export const PREFERENCE_KEYS: Record<keyof Preferences, string> = {
 const DEFAULTS: Preferences = {
   language: "system",
   theme: "system",
+  colorVision: "off",
   motion: "fast",
   background: "shifting",
   sound: "on",
@@ -72,6 +76,7 @@ const DEFAULTS: Preferences = {
 const ALLOWED: { [K in keyof Preferences]: readonly Preferences[K][] } = {
   language: ["system", ...LOCALES.map((locale) => locale.code), PSEUDO],
   theme: ["system", "light", "dark"],
+  colorVision: ["off", "red-green", "blue-yellow"],
   motion: ["fast", "slow", "reduced"],
   background: ["shifting", "still"],
   sound: ["off", "on"],
@@ -112,6 +117,11 @@ export const PREFERENCE_CHOICES: { [K in ChoicePref]: Choice<K>[] } = {
     { value: "light", label: "legend.day" },
     { value: "dark", label: "legend.night" }
   ],
+  colorVision: [
+    { value: "off", label: "common.off" },
+    { value: "red-green", label: "pref.colorVision.redGreen" },
+    { value: "blue-yellow", label: "pref.colorVision.blueYellow" }
+  ],
   motion: [
     { value: "fast", label: "pref.motion.fast" },
     { value: "slow", label: "pref.motion.slow" },
@@ -144,6 +154,7 @@ export const PREFERENCE_CHOICES: { [K in ChoicePref]: Choice<K>[] } = {
 export const PREFERENCE_NAMES: Record<keyof Preferences, MessageKey> = {
   language: "pref.language",
   theme: "pref.theme",
+  colorVision: "pref.colorVision",
   motion: "pref.motion",
   background: "pref.background",
   sound: "pref.sound",
@@ -192,6 +203,7 @@ function apply(prefs: Preferences) {
   const root = document.documentElement;
   root.dataset.theme =
     prefs.theme === "system" ? (systemDark().matches ? "dark" : "light") : prefs.theme;
+  root.dataset.colorVision = prefs.colorVision;
   root.dataset.motion = prefs.motion;
   root.dataset.motionOverride = prefs.motionOverride;
   // The background drifts only when motion is allowed to.

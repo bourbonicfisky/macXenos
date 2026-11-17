@@ -6,6 +6,18 @@
 import type { Catalog } from "../catalogs";
 
 export default {
+  // Color vision accessibility
+  "pref.colorVision": "Farbsehen",
+  "pref.colorVision.redGreen": "Rot–Grün",
+  "pref.colorVision.blueYellow": "Blau–Gelb",
+  "dashboard.colorVision.heading": "Die Oberfläche leichter unterscheiden",
+  "dashboard.colorVision.detail": "Wähle eine Palette für Rot–Grün-Sehschwäche (Protanopie oder Deuteranopie) oder Blau–Gelb-Sehschwäche (Tritanopie). Beide verstärken Konturen und ergänzen visuelle Hinweise durch Beschriftungen. Wähle die für dich deutlichste Variante.",
+  "dashboard.colorVision.scope": "Änderungen gelten sofort für die macXenos-Oberfläche im Tag- und Nachtmodus. Die Spielfarben bleiben unverändert.",
+  "dashboard.colorVision.preview": "Vorschau",
+  "dashboard.colorVision.selected": "Ausgewählt",
+  "dashboard.colorVision.warning": "Warnung",
+  "dashboard.colorVision.unavailable": "Nicht verfügbar",
+
   // --- Legend and buttons, on every blade ---------------------------------
   "legend.day": "Tag",
   "legend.night": "Nacht",

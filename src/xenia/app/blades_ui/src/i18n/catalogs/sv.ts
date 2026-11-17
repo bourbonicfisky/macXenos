@@ -6,6 +6,18 @@
 import type { Catalog } from "../catalogs";
 
 export default {
+  // Color vision accessibility
+  "pref.colorVision": "Färgseende",
+  "pref.colorVision.redGreen": "Röd–grön",
+  "pref.colorVision.blueYellow": "Blå–gul",
+  "dashboard.colorVision.heading": "Gör gränssnittet lättare att urskilja",
+  "dashboard.colorVision.detail": "Välj en palett för skillnader i röd–grönt (protanopi eller deuteranopi) eller blå–gult (tritanopi) färgseende. Båda förstärker konturer och kompletterar visuella signaler med text. Välj det som är tydligast för dig.",
+  "dashboard.colorVision.scope": "Ändringarna gäller direkt för macXenos-gränssnittet i både dag- och nattemat. Spelets färger ändras inte.",
+  "dashboard.colorVision.preview": "Förhandsvisning",
+  "dashboard.colorVision.selected": "Valt",
+  "dashboard.colorVision.warning": "Varning",
+  "dashboard.colorVision.unavailable": "Inte tillgängligt",
+
   // --- Legend and buttons, on every blade ---------------------------------
   "legend.day": "Dag",
   "legend.night": "Natt",

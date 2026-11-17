@@ -29,6 +29,16 @@ export const en = {
   "toast.preferenceValue": "{name}: {value}",
 
   // --- Dashboard preferences (System > Dashboard) ----------------------------
+  "pref.colorVision": "Color vision",
+  "pref.colorVision.redGreen": "Red–green",
+  "pref.colorVision.blueYellow": "Blue–yellow",
+  "dashboard.colorVision.heading": "Make the interface easier to distinguish",
+  "dashboard.colorVision.detail": "Choose a palette for red–green (protanopia or deuteranopia) or blue–yellow (tritanopia) color vision differences. Both strengthen outlines and keep labels alongside visual cues. Choose whichever is clearest for you.",
+  "dashboard.colorVision.scope": "Changes apply immediately to the macXenos interface in both day and night themes. Game colors are unchanged.",
+  "dashboard.colorVision.preview": "Preview",
+  "dashboard.colorVision.selected": "Selected",
+  "dashboard.colorVision.warning": "Warning",
+  "dashboard.colorVision.unavailable": "Unavailable",
   "pref.theme": "Theme",
   "pref.theme.system": "Match my system",
   "pref.theme.system.short": "System",

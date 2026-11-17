@@ -5,6 +5,7 @@
 @import "./styles/content.css";
 @import "./styles/sound-offer.css";
 @import "./styles/sub-blade.css";
+@import "./styles/color-vision.css";
 
 /* In the app the deck carries seven blades in a game window, not five on a
    whole screen: slimmer margins around the deck and inside the blade keep the

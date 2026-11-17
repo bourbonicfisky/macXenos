@@ -6,6 +6,18 @@
 import type { Catalog } from "../catalogs";
 
 export default {
+  // Color vision accessibility
+  "pref.colorVision": "Widzenie barw",
+  "pref.colorVision.redGreen": "Czerwony–zielony",
+  "pref.colorVision.blueYellow": "Niebieski–żółty",
+  "dashboard.colorVision.heading": "Łatwiej rozróżniaj elementy interfejsu",
+  "dashboard.colorVision.detail": "Wybierz paletę dla zaburzeń widzenia czerwieni i zieleni (protanopia lub deuteranopia) albo niebieskiego i żółtego (tritanopia). Obie wzmacniają kontury i uzupełniają wskazówki wizualne etykietami. Wybierz najczytelniejszą dla siebie.",
+  "dashboard.colorVision.scope": "Zmiany są stosowane natychmiast w interfejsie macXenos, w motywie dziennym i nocnym. Kolory gry pozostają bez zmian.",
+  "dashboard.colorVision.preview": "Podgląd",
+  "dashboard.colorVision.selected": "Wybrano",
+  "dashboard.colorVision.warning": "Ostrzeżenie",
+  "dashboard.colorVision.unavailable": "Niedostępne",
+
   // --- Legend and buttons, on every blade ---------------------------------
   "legend.day": "Dzień",
   "legend.night": "Noc",

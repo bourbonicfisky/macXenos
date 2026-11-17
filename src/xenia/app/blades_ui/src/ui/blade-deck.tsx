@@ -88,7 +88,8 @@ export function BladeDeck({ blades }: { blades: BladeDef[] }) {
         send({ op: "close" });
         return;
       }
-      if (!isDashboardKey(event)) return;
+      // A pane may already have handled Back and closed its sub-menu.
+      if (event.defaultPrevented || !isDashboardKey(event)) return;
       // An open sub-menu has ← and → for choosing (blade-menu.tsx).
       const inSubmenu = document.documentElement.dataset.submenu === "on";
       if (inSubmenu && (event.key === "ArrowLeft" || event.key === "ArrowRight")) return;

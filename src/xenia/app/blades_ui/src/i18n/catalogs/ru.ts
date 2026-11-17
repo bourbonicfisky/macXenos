@@ -1,6 +1,18 @@
 import type { Catalog } from "../catalogs";
 
 export default {
+  // Color vision accessibility
+  "pref.colorVision": "Цветовое зрение",
+  "pref.colorVision.redGreen": "Красный–зелёный",
+  "pref.colorVision.blueYellow": "Синий–жёлтый",
+  "dashboard.colorVision.heading": "Сделайте элементы интерфейса различимее",
+  "dashboard.colorVision.detail": "Выберите палитру для особенностей восприятия красного и зелёного (протанопия или дейтеранопия) либо синего и жёлтого (тританопия). Обе усиливают контуры и дополняют визуальные подсказки подписями. Выберите наиболее понятную вам.",
+  "dashboard.colorVision.scope": "Изменения сразу применяются к интерфейсу macXenos в дневной и ночной темах. Цвета игры не меняются.",
+  "dashboard.colorVision.preview": "Предпросмотр",
+  "dashboard.colorVision.selected": "Выбрано",
+  "dashboard.colorVision.warning": "Предупреждение",
+  "dashboard.colorVision.unavailable": "Недоступно",
+
   "legend.day": "День",
   "legend.night": "Ночь",
   "legend.changeBlade": "Сменить раздел",

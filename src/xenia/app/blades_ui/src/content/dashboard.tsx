@@ -194,6 +194,25 @@ export function dashboard(state: NativeState): BladeDef {
         )
       },
       {
+        id: "color-vision",
+        label: t("pref.colorVision"),
+        glyph: "theme",
+        value: <PreferenceValue pref="colorVision" />,
+        heading: t("dashboard.colorVision.heading"),
+        detail: (
+          <>
+            <p>{t("dashboard.colorVision.detail")}</p>
+            <PreferenceOptions pref="colorVision" />
+            <ul className="color-vision-preview" aria-label={t("dashboard.colorVision.preview")}>
+              <li className="color-vision-preview-selected"><span aria-hidden="true">✓</span>{t("dashboard.colorVision.selected")}</li>
+              <li className="pane-warning"><span className="pane-warning-mark" aria-hidden="true">!</span>{t("dashboard.colorVision.warning")}</li>
+              <li><span aria-hidden="true">—</span>{t("dashboard.colorVision.unavailable")}</li>
+            </ul>
+            <Aside>{t("dashboard.colorVision.scope")}</Aside>
+          </>
+        )
+      },
+      {
         id: "language",
         label: t("pref.language"),
         glyph: "globe",
