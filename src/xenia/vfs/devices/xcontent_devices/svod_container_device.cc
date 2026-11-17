@@ -8,6 +8,9 @@
  */
 
 #include "xenia/vfs/devices/xcontent_devices/svod_container_device.h"
+
+#include <algorithm>
+
 #include "xenia/base/logging.h"
 #include "xenia/vfs/devices/xcontent_devices/svod_container_entry.h"
 
@@ -41,6 +44,17 @@ SvodContainerDevice::Result SvodContainerDevice::LoadHostFiles() {
 
   // Ensure data fragment files are sorted
   auto fragment_files = filesystem::ListFiles(data_fragment_path);
+  // Hidden files are not fragments: on volumes without extended attributes
+  // (exFAT, FAT32, SMB) macOS keeps each file's metadata in an AppleDouble
+  // "._<name>" sidecar, and Finder adds .DS_Store. Counting them doubled the
+  // fragment count and the package failed to mount.
+  fragment_files.erase(
+      std::remove_if(fragment_files.begin(), fragment_files.end(),
+                     [](const filesystem::FileInfo& info) {
+                       const auto name = info.name.filename().string();
+                       return !name.empty() && name[0] == '.';
+                     }),
+      fragment_files.end());
   std::sort(fragment_files.begin(), fragment_files.end(),
             [](filesystem::FileInfo& left, filesystem::FileInfo& right) {
               return left.name < right.name;
