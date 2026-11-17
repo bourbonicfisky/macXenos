@@ -200,19 +200,19 @@ export function ControllerMap() {
         {capturing ? t("controller.map.press", { button: outputLabel(capturing.output, capturing.label) }) : t("controller.map.hint")}
       </p>
       {/* Every button, as a list: choosing one listens, as on the drawing. */}
-      <ul className="pad-bindings m-0 grid list-none grid-cols-1 gap-[0.2em] p-0 text-[0.8em] @min-[520px]:grid-cols-2">
+      <ul className="pad-bindings m-0 grid list-none grid-cols-[repeat(auto-fit,minmax(min(100%,20rem),1fr))] gap-[0.2em] p-0 text-[0.8em]">
         {rebind.outputs.map((output) => {
           const listening = output.output === rebind.capturing;
           return (
             <li key={output.output}>
               <button
                 type="button"
-                className="pad-binding rounded-row grid w-full cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-[0.6em] px-[0.5em] py-[0.25em] text-left"
+                className="pad-binding rounded-row grid w-full cursor-pointer grid-cols-[minmax(0,3fr)_minmax(0,2fr)] items-center gap-x-[0.6em] px-[0.5em] py-[0.25em] text-left"
                 data-capturing={listening || undefined}
                 onClick={() => send(listening ? { op: "rebindCancel" } : { op: "rebind", output: output.output })}
               >
-                <span className="truncate font-semibold">{outputLabel(output.output, output.label)}</span>
-                <span className="pad-status">{listening ? t("controller.map.waiting") : bindingText(output.binding)}</span>
+                <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">{outputLabel(output.output, output.label)}</span>
+                <span className="pad-status min-w-0 text-right [overflow-wrap:anywhere]">{listening ? t("controller.map.waiting") : bindingText(output.binding)}</span>
               </button>
             </li>
           );

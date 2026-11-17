@@ -25,6 +25,31 @@ async function downTo(page, label, limit = 30) {
 }
 
 const tests = {
+  async "Translated controller bindings stay readable while capturing"(page, base) {
+    await page.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+    await page.open(base, "#controller");
+    await page.eval('localStorage.setItem("macxenos-language", "de")');
+    await page.open(base, "#controller");
+    await page.eval("document.querySelectorAll('.blade[data-state=open] .menu-row')[1].focus()");
+    await page.eval("new Promise(r => setTimeout(r, 100))");
+    expect(await page.eval("document.querySelectorAll('.pad-binding').length > 10"), "mapping pane is populated");
+    await page.eval("document.querySelector('.pad-binding').click()");
+    await page.eval("new Promise(r => setTimeout(r, 100))");
+    expect(await page.eval("!!document.querySelector('.pad-binding[data-capturing=true]')"), "binding capture is active");
+    const overflow = await page.eval(`(() => {
+      const bad = [];
+      for (const span of document.querySelectorAll('.pad-binding > span')) {
+        const row = span.parentElement.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(span);
+        const bounds = range.getBoundingClientRect();
+        if (span.scrollWidth > span.clientWidth + 1 || bounds.left < row.left - 1 || bounds.right > row.right + 1)
+          bad.push(span.textContent);
+      }
+      return bad;
+    })()`);
+    expect(!overflow.length, `clipped binding labels: ${overflow.join(", ")}`);
+  },
   async "Color vision palettes persist, preserve game settings and support both themes"(page, base) {
     await page.call("Emulation.setFocusEmulationEnabled", { enabled: true });
     await page.open(base, "#system/color-vision");
@@ -254,7 +279,7 @@ const tests = {
   async "Russian switches every blade and live options, without changing the console language"(page, base) {
     await page.open(base, "#system/language");
     const consoleLanguage = await page.eval("import('/src/native.ts').then(({ getNative }) => getNative().console.fields.find((f) => f.id === 'language')?.value)");
-    await page.eval("[...document.querySelectorAll('.blade[data-state=open] [role=radio]')].find((b) => b.textContent === 'Русский').click()");
+    await page.eval("[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].find((b) => b.textContent === 'Русский').click()");
     expect((await page.eval("document.documentElement.lang")) === "ru", "Russian did not activate");
     expect((await page.eval("document.title")) === "Настройки", "page title stayed English");
     expect((await page.eval("localStorage.getItem('macxenos-language')")) === "ru", "Russian was not saved");
@@ -282,10 +307,10 @@ const tests = {
     const consoleText = await page.eval(`${pane}.textContent`);
     expect(consoleText.includes("русский") && consoleText.includes("Россия"), `console choices were not localized: ${consoleText}`);
     await page.open(base, "#system/language");
-    await page.eval("[...document.querySelectorAll('.blade[data-state=open] [role=radio]')].find((b) => b.textContent === 'Как на моём Mac').click()");
+    await page.eval("[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].find((b) => b.textContent === 'Как на моём Mac').click()");
     await page.eval("import('/src/i18n/index.ts').then((i18n) => i18n.setSystemLanguages(['ru-RU', 'en-US']))");
     expect((await page.eval("document.documentElement.lang")) === "ru", "Russian Mac language was not matched");
-    await page.eval("[...document.querySelectorAll('.blade[data-state=open] [role=radio]')].find((b) => b.textContent === 'English').click()");
+    await page.eval("[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].find((b) => b.textContent === 'English').click()");
     await page.open(base, "#graphics/upscaling");
     expect((await page.eval(`${pane}.textContent`)).includes("Bilinear"), "static renderer options stayed Russian");
     expect((await page.eval("document.title")) === "Preferences", "page title stayed Russian");
@@ -303,7 +328,7 @@ const tests = {
     };
     for (const code of codes) {
       await page.open(base, "#system/language");
-      const option = `[...document.querySelectorAll('.blade[data-state=open] [role=radio]')].find((b) => b.textContent === ${JSON.stringify(names[code])})`;
+      const option = `[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].find((b) => b.textContent === ${JSON.stringify(names[code])})`;
       expect(await page.eval(`!!${option}`), `no option named ${names[code]} for ${code}`);
       expect((await page.eval(`${option}.querySelector('[lang]')?.lang`)) === code, `${code}'s name is not marked lang=${code}`);
       await page.eval(`${option}.click()`);
@@ -332,7 +357,7 @@ const tests = {
     );
     expect(row === "Dashboard languageEnglish", `row reads ${row}`);
     const options = await page.eval(
-      "[...document.querySelectorAll('.blade[data-state=open] [role=radio]')].map((b) => b.textContent)"
+      "[...document.querySelectorAll('.blade[data-state=open] .menu-detail:not([hidden]) [role=radio]')].map((b) => b.textContent)"
     );
     expect(options[0] === "Same as my Mac" && options.includes("English"), `options ${options}`);
     expect((await page.eval("document.documentElement.lang")) === "en", "lang is not en");

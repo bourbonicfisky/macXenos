@@ -10,8 +10,8 @@ export default {
   "pref.colorVision": "Kleurenzien",
   "pref.colorVision.redGreen": "Rood–groen",
   "pref.colorVision.blueYellow": "Blauw–geel",
-  "dashboard.colorVision.heading": "Maak de interface beter te onderscheiden",
-  "dashboard.colorVision.detail": "Kies een palet voor verschillen in rood–groen (protanopie of deuteranopie) of blauw–geel (tritanopie) kleurenzien. Beide versterken contouren en vullen visuele aanwijzingen aan met tekst. Kies wat voor jou het duidelijkst is.",
+  "dashboard.colorVision.heading": "Maak onderdelen van de interface beter herkenbaar",
+  "dashboard.colorVision.detail": "Kies een palet als je rood en groen (protanopie of deuteranopie) of blauw en geel (tritanopie) moeilijk kunt onderscheiden. Beide paletten versterken contouren en vullen visuele aanwijzingen aan met tekst. Kies wat voor jou het duidelijkst is.",
   "dashboard.colorVision.scope": "Wijzigingen gelden direct voor de macXenos-interface in het dag- en nachtthema. De kleuren van het spel blijven ongewijzigd.",
   "dashboard.colorVision.preview": "Voorbeeld",
   "dashboard.colorVision.selected": "Geselecteerd",
@@ -144,7 +144,7 @@ export default {
   "profiles.pictures.installing": "Afbeeldingen installeren",
   "profiles.pictures.started": "Downloaden op de achtergrond",
   "profiles.pictures.toast.ready": "Geïnstalleerd",
-  "profiles.pictures.toast.failed": "Spelerafbeeldingen mislukt",
+  "profiles.pictures.toast.failed": "Spelerafbeeldingen konden niet worden geladen",
 
   // --- Settings controls -----------------------------------------------------------
   "settings.resetDefaults": "Herstel standaardwaarden",
@@ -515,7 +515,7 @@ export default {
   "graphics.gameSize": "Gamegrootte",
   "graphics.exactPixels": "Exacte pixels",
   "graphics.exact": "Exact",
-  "graphics.keepMySize": "Behoud mijn grootte",
+  "graphics.keepMySize": "Huidige grootte behouden",
   "graphics.keep": "Behoud",
   "graphics.renderer": "Renderer",
   "graphics.refreshRate": "Verversingsfrequentie",

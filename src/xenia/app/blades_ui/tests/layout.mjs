@@ -99,6 +99,7 @@ const languages = ["en", ...codes.filter((c) => c !== "en")];
 const report = {};
 
 await withBlades(async (page, base) => {
+  await page.call("Emulation.setFocusEmulationEnabled", { enabled: true });
   for (const code of languages) {
     const issues = new Map();
     const note = (state, list) => {
@@ -109,8 +110,10 @@ await withBlades(async (page, base) => {
     };
     const setLanguage = async (hash) => {
       await page.open(base, hash);
-      await page.eval(`localStorage.setItem("macxenos-language", ${JSON.stringify(code)})`);
-      await page.open(base, hash);
+      if ((await page.eval("document.documentElement.lang")) !== code) {
+        await page.eval(`localStorage.setItem("macxenos-language", ${JSON.stringify(code)})`);
+        await page.open(base, hash);
+      }
     };
     for (const blade of BLADES) {
       await setLanguage(`#${blade}`);
@@ -120,7 +123,7 @@ await withBlades(async (page, base) => {
         writeFileSync(join(outDir, code, `${blade}.png`), await page.screenshot());
       }
       for (let i = 0; i < rows; i++) {
-        await page.eval(`document.querySelectorAll('.blade[data-state=open] .menu-row')[${i}]?.click()`);
+        await page.eval(`document.querySelectorAll('.blade[data-state=open] .menu-row')[${i}]?.focus()`);
         await page.eval("new Promise((r) => setTimeout(r, 60))");
         const row = await page.eval(`document.querySelectorAll('.blade[data-state=open] .menu-row')[${i}]?.textContent`);
         note(`#${blade} / ${row}`, await page.eval(SCAN));
@@ -133,6 +136,8 @@ await withBlades(async (page, base) => {
       if (outDir) writeFileSync(join(outDir, code, `${sub}.png`), await page.screenshot());
     }
     report[code] = [...issues.values()];
+    // Keep completed languages even if a later browser navigation fails.
+    if (outDir) writeFileSync(join(outDir, "layout.json"), JSON.stringify(report, null, 2));
     console.log(`${code}: ${report[code].length} pieces of text that don't fit`);
   }
 });

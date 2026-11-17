@@ -180,3 +180,25 @@ test("the hard-coded text scanner sees text but not code", () => {
   `);
   assert.deepEqual(found.sort(), ["Hello there", "Menu label", "Plain words here", "Saved"].sort());
 });
+
+// Exercise the actual catalogs, including plural branches missed by a single
+// count=2 sample and reordered placeholders in CJK translations.
+test("all translated messages retain parameters across plural boundaries", () => {
+  for (const [code, catalog] of [["en", en], ...catalogs]) {
+    for (const [key, message] of Object.entries(catalog)) {
+      const names = placeholders(message);
+      const pluralNames = new Set([...message.matchAll(/\{(\w+),\s*plural,/g)].map(m => m[1]));
+      for (const count of pluralNames.size ? [0, 1, 2, 3, 5, 11, 21, 22, 101, 1.5, 1000000] : [1]) {
+        const params = Object.fromEntries(names.map(name => [name, pluralNames.has(name) ? count : `⟦${name}⟧`]));
+        const result = format(message, params, code);
+        const context = `${code} ${key} (${count})`;
+        assert.ok(result.trim(), context);
+        assert.doesNotMatch(result, /[{}]/, context);
+        for (const name of names) {
+          if (!pluralNames.has(name)) assert.ok(result.includes(params[name]), `${context}: lost ${name}`);
+        }
+        if (pluralNames.size) assert.ok(result.includes(new Intl.NumberFormat(code).format(count)), `${context}: lost count`);
+      }
+    }
+  }
+});
