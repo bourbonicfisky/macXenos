@@ -917,6 +917,10 @@ static uint64_t MakeTextureKey(const xenos::xe_gpu_texture_fetch_t& fetch,
 }
 
 
+namespace {
+bool SnapshotFitEnabled();
+}  // namespace
+
 // Shared service-classification input builder: the ONE place the
 // exact-cover and bridge inputs are computed. GetTextureSlot's serve chain
 // (and any future consumer deciding how a resolve-backed fetch is served)
@@ -1067,6 +1071,21 @@ bool MetalTextureCache::BuildResolvedServiceInputs(
       scaled.wb_endian = assembly.wb_endian;
       scaled.from_assembly = true;
     }
+    // Quarter-resolution post-process chains (the depth-of-field blur of
+    // Ultra Street Fighter IV's fighter intros and Madden NFL 25's
+    // presentation shots, 320x180/160x90) resolve 8-row-aligned rectangles
+    // (320x184) and fetch the unaligned size. Requiring equal
+    // heights served those from 1x RAM, so at a draw resolution scale the
+    // blurred layer was the 1x image stretched (bilinear kinks every
+    // 4*scale host pixels). Serve them from a fetch-sized fitted copy of the
+    // snapshot's top rows instead. XE_METAL_SCALED_COVER_FIT=0 restores the
+    // RAM path.
+    static const bool s_scaled_cover_fit = ParseMetalEnvironmentFlag(
+        std::getenv("XE_METAL_SCALED_COVER_FIT"), true);
+    scaled.allow_taller_snapshot = s_scaled_cover_fit &&
+                                   !scaled.from_assembly &&
+                                   SnapshotFitEnabled() &&
+                                   bool(snapshot_fit_blit_);
   }
   out->has_resolved_target = true;
   return true;
@@ -1439,7 +1458,13 @@ void MetalTextureCache::PrepareSnapshotFit(
   }
   ResolvedFetchServiceInputs in;
   BuildResolvedServiceInputs(fetch, is_signed, &in);
-  if (ClassifyResolvedFetch(in) != ResolvedFetchService::kBridgeSnapshot) {
+  const ResolvedFetchService service = ClassifyResolvedFetch(in);
+  // A scaled-cover fetch of the top rows of a taller snapshot is served from
+  // the fitted view too (see allow_taller_snapshot).
+  const bool scaled_cover_fit =
+      service == ResolvedFetchService::kScaledCoverSnapshot &&
+      !in.scaled.from_assembly && ScaledCoverNeedsFit(in.scaled);
+  if (service != ResolvedFetchService::kBridgeSnapshot && !scaled_cover_fit) {
     return;
   }
   if (!SnapshotFitApplies(rit->second, fetch_w, fetch_h, in.covered_r32f)) {
@@ -1703,6 +1728,27 @@ uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
             }
             ClearBindingAllocationFailure();
           }
+        } else if (service == ResolvedFetchService::kScaledCoverSnapshot &&
+                   ScaledCoverNeedsFit(service_in.scaled)) {
+          // The fetch reads the top rows of a taller snapshot: only the
+          // fitted copy PrepareSnapshotFit made before this draw maps the
+          // fetch's normalized coordinates onto those rows. Without it, the
+          // RAM path below holds the same rows at 1x.
+          uint32_t fit_slot = ServeFittedSnapshot(
+              rit->second, fetch_w, fetch_h, guest_swizzle,
+              !rt.requires_fetch_swizzle ||
+                  GuestSwizzleIsIdentity(guest_swizzle));
+          if (fit_slot) {
+            return fit_slot;
+          }
+          static uint32_t s_fit_misses = 0;
+          if (s_fit_misses < 8) {
+            ++s_fit_misses;
+            XELOGW("MetalTex: scaled-cover fit view missing for base {:08X} "
+                   "{}x{}; serving 1x RAM",
+                   fetch.base_address << 12, fetch_w, fetch_h);
+          }
+          ClearBindingAllocationFailure();
         } else {
           if (!rt.requires_fetch_swizzle ||
               GuestSwizzleIsIdentity(guest_swizzle)) {
