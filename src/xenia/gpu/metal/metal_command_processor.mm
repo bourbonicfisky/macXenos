@@ -12365,15 +12365,28 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // would have swapped. Only the endian shapes SwapIndicesInto treats
   // identically to the shader are taken; 4-byte alignment is Metal's
   // index-buffer offset rule.
-  // Default on; XE_METAL_GPU_INDEX_SWAP=0 restores the CPU swap.
+  // Discrete GPUs only (where it was measured first, 5c9140009). On Apple
+  // GPUs, triangle lists drawn from the raw big-endian indices put one-frame
+  // wrong triangles into Grand Theft Auto IV's shadow cascades (2026-11-21,
+  // M1 Max: ~15 transients per 1000 frames in the 1280x1280 cascade atlas,
+  // seen as ground patches going dark for a frame; 0.1 per 1000 with the CPU
+  // swap). The bytes are not the cause: a copy of the raw indices taken at
+  // encode time flickers the same, and the bound bytes match guest RAM.
+  // XE_METAL_GPU_INDEX_SWAP=1 takes the route on every GPU (the
+  // behaviour since 1.0 beta5), 0 on none.
   bool direct_index = false;
   xenos::Endian direct_index_endian = xenos::Endian::kNone;
   uint32_t direct_index_offset = 0;
-  static const bool s_gpu_index_swap = [] {
+  static const int s_gpu_index_swap = [] {
     const char* v = std::getenv("XE_METAL_GPU_INDEX_SWAP");
-    return !v || std::strcmp(v, "0") != 0;
+    if (!v) {
+      return -1;  // discrete GPUs only
+    }
+    return std::strcmp(v, "0") != 0 ? 1 : 0;
   }();
-  if (s_gpu_index_swap && pp_routed && !use_tessellation_emulation &&
+  const bool gpu_index_swap =
+      s_gpu_index_swap > 0 || (s_gpu_index_swap < 0 && discrete_mirror_);
+  if (gpu_index_swap && pp_routed && !use_tessellation_emulation &&
       !trace_writer_.is_open() &&
       pp_result.index_buffer_type ==
           PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
