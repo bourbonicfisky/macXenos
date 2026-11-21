@@ -9,9 +9,12 @@
 
 #include "xenia/vfs/devices/host_path_device.h"
 
+#include <algorithm>
+
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/utf8.h"
 #include "xenia/kernel/xfile.h"
 #include "xenia/vfs/devices/host_path_entry.h"
 
@@ -90,6 +93,15 @@ void HostPathDevice::PopulateEntry(
 
   auto child_infos = xe::filesystem::ListFiles(parent_entry->host_path());
   for (auto& child_info : child_infos) {
+    if (parent_entry == root_entry_.get() && !hidden_root_names_.empty()) {
+      const std::string child_name = xe::path_to_utf8(child_info.name);
+      if (std::any_of(hidden_root_names_.cbegin(), hidden_root_names_.cend(),
+                      [&](const std::string& hidden) {
+                        return xe::utf8::equal_case(child_name, hidden);
+                      })) {
+        continue;
+      }
+    }
     auto child = HostPathEntry::Create(
         this, parent_entry, parent_entry->host_path() / child_info.name,
         child_info);

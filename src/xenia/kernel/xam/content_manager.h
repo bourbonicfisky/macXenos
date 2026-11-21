@@ -297,6 +297,10 @@ class ContentManager {
   std::filesystem::path ResolvePackageHeaderPath(
       const std::string_view file_name, uint64_t xuid, uint32_t title_id,
       const XContentType content_type) const;
+  // Headers/<content_type>/<file_name>.thumbnail.png: outside the package
+  // folder, so a title listing its package never sees it.
+  std::filesystem::path ResolvePackageThumbnailPath(
+      const uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) const;
 
   std::unordered_set<uint32_t> FindPublisherTitleIds(
       const uint64_t xuid,
