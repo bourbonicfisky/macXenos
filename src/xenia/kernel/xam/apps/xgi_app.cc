@@ -278,6 +278,20 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
              user_count, unk_0, user_index_array, private_slots_array);
       return X_E_SUCCESS;
     }
+    case 0x000B0013: {
+      // XSessionLeaveLocal: the same 0x14-byte layout as join local. Call of
+      // Duty: Black Ops II leaves its local session on the way into Zombies
+      // > Local and split screen; the X_E_FAIL an unhandled message returns
+      // stopped it with "Error leaving session gameSession 0xcafedead
+      // 0x80004005" (GitHub issue 14).
+      uint32_t session_ptr =
+          buffer_length >= 0x4 ? xe::load_and_swap<uint32_t>(buffer + 0x0) : 0;
+      uint32_t user_count =
+          buffer_length >= 0x8 ? xe::load_and_swap<uint32_t>(buffer + 0x4) : 0;
+      XELOGD("XGISessionLeaveLocal({:08X}, {}), length {:X}", session_ptr,
+             user_count, buffer_length);
+      return X_E_SUCCESS;
+    }
     case 0x000B0014: {
       // Gets 584107FB in game.
       // get high score table?
