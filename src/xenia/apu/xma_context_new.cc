@@ -10,6 +10,7 @@
 #include "xenia/apu/xma_context_new.h"
 #include "xenia/apu/xma_helpers.h"
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
@@ -27,6 +28,15 @@ extern "C" {
 #endif
 }  // extern "C"
 
+DEFINE_bool(
+    xma_decode_subframe, true,
+    "Start an XMA context's first frame at the subframe in context DWORD1 "
+    "bits 24-26, as the console does for a sample-accurate start. False reads "
+    "those bits as output headroom, the old behavior: the first frame then "
+    "decodes in full and the context hands out up to 7 subframes more than "
+    "the sound has (GTA V froze in its prologue, GitHub issue 16).",
+    "APU");
+
 // Credits for most of this code goes to:
 // https://github.com/koolkdev/libertyv/blob/master/libav_wrapper/xma2dec.c
 
@@ -34,6 +44,10 @@ namespace xe {
 namespace apu {
 
 XmaContextNew::XmaContextNew() = default;
+
+uint32_t XmaContextNew::OutputHeadroom(const XMA_CONTEXT_DATA& data) {
+  return cvars::xma_decode_subframe ? 0 : data.decode_subframe;
+}
 
 XmaContextNew::~XmaContextNew() {
   if (av_context_) {
@@ -150,7 +164,7 @@ bool XmaContextNew::Work() {
   const uint32_t effective_sdc =
       std::max(static_cast<uint32_t>(1), data.subframe_decode_count);
   const int32_t minimum_subframe_decode_count =
-      static_cast<int32_t>(effective_sdc) + data.output_buffer_padding;
+      static_cast<int32_t>(effective_sdc) + OutputHeadroom(data);
 
   // We don't have enough space to even make one pass
   // Waiting for decoder to return more space.
@@ -172,7 +186,7 @@ bool XmaContextNew::Work() {
         remaining_subframe_blocks_in_output_buffer_,
         data.input_buffer_0_valid + (data.input_buffer_1_valid << 1),
         data.output_buffer_valid, data.subframe_decode_count,
-        data.output_buffer_padding);
+        data.decode_subframe);
 
     const uint32_t pre_decode_offset = data.input_buffer_read_offset;
     const uint8_t pre_remaining_subframes = current_frame_remaining_subframes_;
@@ -315,7 +329,7 @@ void XmaContextNew::Consume(RingBuffer* XE_RESTRICT output_rb,
           "subframes (limit {})",
           id(), current_frame_remaining_subframes_, loop_frame_output_limit_);
       remaining_subframe_blocks_in_output_buffer_ -=
-          data->output_buffer_padding;
+          OutputHeadroom(*data);
       current_frame_remaining_subframes_ = 0;
       loop_frame_output_limit_ = 0;
       return;
@@ -354,7 +368,7 @@ void XmaContextNew::Consume(RingBuffer* XE_RESTRICT output_rb,
   // Only apply when the frame is fully consumed to avoid double-counting.
   const int8_t headroom =
       (current_frame_remaining_subframes_ - subframes_to_write == 0)
-          ? data->output_buffer_padding
+          ? OutputHeadroom(*data)
           : 0;
 
   remaining_subframe_blocks_in_output_buffer_ -= subframes_to_write + headroom;
@@ -608,6 +622,20 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
         current_frame_remaining_subframes_ -= skip;
       }
       loop_start_skip_pending_ = false;
+    }
+
+    // DWORD1 bits 24-26 name the subframe of this frame to start from: the
+    // console writes nothing before it. A title that counts a sound's samples
+    // exactly reads that many too many otherwise (GTA V's streamed speech
+    // starts its chunks 3 subframes in, read the surplus from the next queued
+    // sound before locking it, and spun forever on its empty copy).
+    if (cvars::xma_decode_subframe && data->decode_subframe) {
+      const uint8_t skip = data->decode_subframe << data->is_stereo;
+      XELOGAPU("XmaContext {}: Starting {} subframes into the frame", id(),
+               data->decode_subframe);
+      current_frame_remaining_subframes_ -=
+          std::min(skip, current_frame_remaining_subframes_);
+      data->decode_subframe = 0;
     }
   }
 
@@ -999,9 +1027,13 @@ void XmaContextNew::StoreContextMerged(const XMA_CONTEXT_DATA& data,
     fresh.input_buffer_1_valid = 0;
   }
 
-  // DWORD 1: decoder conditionally clears output_buffer_valid
+  // DWORD 1: decoder conditionally clears output_buffer_valid, and
+  // decode_subframe once it has started there.
   if (initial_data.output_buffer_valid && !data.output_buffer_valid) {
     fresh.output_buffer_valid = 0;
+  }
+  if (initial_data.decode_subframe && !data.decode_subframe) {
+    fresh.decode_subframe = 0;
   }
 
   // DWORD 2: decoder owns input_buffer_read_offset, error_status

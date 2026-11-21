@@ -68,11 +68,12 @@ struct XMA_CONTEXT_DATA {
   uint32_t loop_subframe_skip : 3;            // +17bit, XMASetLoopData might be
                                               // subframe_decode_count
   uint32_t subframe_decode_count : 4;         // +20bit
-  uint32_t output_buffer_padding : 3;  // +24bit, extra output buffer blocks
-                                       // reserved per decoded frame
-                                       // NOTE(has207): this is pure guess
-                                       // but that's how we're using it
-                                       // currently
+  uint32_t decode_subframe : 3;        // +24bit, subframe of the frame at
+                                       // input_buffer_read_offset to start
+                                       // decoding from (a sample-accurate
+                                       // start or seek). Was read as output
+                                       // headroom before; see
+                                       // --xma_decode_subframe.
   uint32_t sample_rate : 2;            // +27bit enum of sample rates
   uint32_t is_stereo : 1;              // +29bit
   uint32_t unk_dword_1_c : 1;          // +30bit
