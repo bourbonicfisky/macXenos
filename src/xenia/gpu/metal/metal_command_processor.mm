@@ -14622,6 +14622,21 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                s_depth_always_ps);
       }
     }
+    // Only polygonal primitives have back faces: rectangle lists, points and
+    // lines are always front-facing on the guest (draw_util's polygonal
+    // table), so they take the FRONT stencil ops and masks, as on D3D12 and
+    // Vulkan. The expanded rectangle triangles have arbitrary host winding;
+    // with raw back-face state they ran the back-face function on half of
+    // the screen (Forza Motorsport 4's cockpit depth stamp, a rectangle
+    // list with front NOTEQUAL 0 / back ALWAYS, wrote near depth over the
+    // windows and hid the world). XE_METAL_RAW_BACKFACE_STENCIL=1 restores
+    // the old raw state (rollback).
+    static const bool s_raw_backface_stencil =
+        std::getenv("XE_METAL_RAW_BACKFACE_STENCIL") != nullptr;
+    if (!s_raw_backface_stencil && host_depth_control.backface_enable &&
+        !draw_util::IsPrimitivePolygonal(regs)) {
+      host_depth_control.backface_enable = 0;
+    }
     void* depth_state = GetOrCreateDepthStencilState(
         host_depth_control.value, stencil_ref_mask.value,
         stencil_ref_mask_back.value);
