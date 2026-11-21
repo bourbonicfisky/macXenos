@@ -166,13 +166,29 @@ class MetalTextureCache {
   // tip views, coverage, RAM-backed marking, retirement, invalidation). The
   // per-draw texture-dependency memo keys on it.
   uint64_t registry_epoch() const { return registry_epoch_; }
+  // Draw-scoped invalidation latch (XE_METAL_TEX_INVAL_LATCH=0 rolls back).
+  // The command processor drains the CPU-watch queue once, before a draw's
+  // texture dependency decision, and texture lookups made while the draw is
+  // latched do not drain ranges queued by other threads. The dependency
+  // decision (snapshot served vs RAM converged), the shared-route prepass and
+  // the serve then all see one resolved-target registry: before, a guest
+  // thread's write watch queued between them retired a resolve registration
+  // inside the serve's own GetTextureSlot, which then untiled guest RAM the
+  // decision never converged (Burnout Revenge's videos flickering black at
+  // 2x). Ranges queued by the draw's own thread (its dependency drain's
+  // publications) still drain at the serve. Must be called on the command
+  // processor thread; End is idempotent.
+  static bool DrawInvalidationLatchEnabled();
+  void BeginDrawInvalidationLatch();
+  void EndDrawInvalidationLatch();
   // Bumped whenever a fetch could resolve to a different slot or texture:
   // a descriptor written, a slot retired, a cache entry erased. With
   // registry_epoch() and no pending invalidations, the same fetch constant
   // resolves to the same slot (the command processor's binding memo).
   uint64_t binding_generation() const { return binding_generation_; }
   bool HasPendingInvalidations() const {
-    return pending_invalidations_nonempty_.load(std::memory_order_acquire);
+    return pending_invalidations_nonempty_.load(std::memory_order_acquire) ||
+           !latched_self_invalidations_.empty();
   }
   void ResetActive() {
     active_textures_.clear();
@@ -485,6 +501,13 @@ class MetalTextureCache {
   std::atomic<bool> pending_invalidations_nonempty_{false};
   // The drain swaps the queue with this (capacity kept on both sides).
   std::vector<std::pair<uint32_t, uint32_t>> draining_invalidations_;
+  // Draw invalidation latch: set by the command processor thread between
+  // BeginDrawInvalidationLatch and EndDrawInvalidationLatch. Ranges that
+  // thread queues meanwhile go to latched_self_invalidations_ (only that
+  // thread touches it); other threads' ranges wait for the next drain.
+  std::atomic<bool> draw_invalidation_latch_{false};
+  std::vector<std::pair<uint32_t, uint32_t>> latched_self_invalidations_;
+  void DrainLatchedSelfInvalidations();
   bool trace_playback_ = false;
   void* view_heap_;  // id<MTLBuffer>, not owned.
   void* view_heap_contents_;  // IRDescriptorTableEntry* (CPU pointer).

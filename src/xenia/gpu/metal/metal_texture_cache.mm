@@ -19,6 +19,7 @@
 #import <Metal/Metal.h>
 
 #include <dlfcn.h>
+#include <pthread.h>
 
 #include <algorithm>
 #include <string>
@@ -756,9 +757,77 @@ void MetalTextureCache::SharedMemoryGlobalWatchCallback(
                                                                address_last);
 }
 
+namespace {
+// True on the thread that holds the current draw invalidation latch (the
+// command processor thread, between Begin and End).
+thread_local bool t_draw_invalidation_latch_owner = false;
+}  // namespace
+
+bool MetalTextureCache::DrawInvalidationLatchEnabled() {
+  static const bool s_enabled = [] {
+    const char* v = std::getenv("XE_METAL_TEX_INVAL_LATCH");
+    return !(v && v[0] == '0' && !v[1]);
+  }();
+  return s_enabled;
+}
+
+void MetalTextureCache::BeginDrawInvalidationLatch() {
+  if (trace_playback_ || !DrawInvalidationLatchEnabled()) {
+    return;
+  }
+  DrainLatchedSelfInvalidations();
+  DrainPendingInvalidations();
+  t_draw_invalidation_latch_owner = true;
+  draw_invalidation_latch_.store(true, std::memory_order_release);
+}
+
+void MetalTextureCache::EndDrawInvalidationLatch() {
+  if (!t_draw_invalidation_latch_owner) {
+    return;
+  }
+  draw_invalidation_latch_.store(false, std::memory_order_release);
+  t_draw_invalidation_latch_owner = false;
+  DrainLatchedSelfInvalidations();
+}
+
+void MetalTextureCache::DrainLatchedSelfInvalidations() {
+  if (latched_self_invalidations_.empty()) {
+    return;
+  }
+  std::vector<std::pair<uint32_t, uint32_t>> ranges;
+  ranges.swap(latched_self_invalidations_);
+  for (const auto& range : ranges) {
+    InvalidateRange(range.first, range.second,
+                    InvalidationScope::kAllRepresentations, "cpu-watch-self");
+  }
+}
+
 void MetalTextureCache::QueueInvalidation(uint32_t address_first,
                                           uint32_t address_last) {
   if (address_last < address_first) {
+    return;
+  }
+  // XE_METAL_LINEAGE=<base>: who queues invalidations over the watched base
+  // (the thread, and whether a draw latch deferred it).
+  static const uint32_t s_lineage_queue = [] {
+    const char* v = std::getenv("XE_METAL_LINEAGE");
+    return v ? uint32_t(strtoul(v, nullptr, 16)) : 0u;
+  }();
+  if (s_lineage_queue && s_lineage_queue >= address_first &&
+      s_lineage_queue <= address_last) {
+    char thread_name[64] = {};
+    pthread_getname_np(pthread_self(), thread_name, sizeof(thread_name));
+    XELOGW(
+        "MetalLineage QUEUE-INVAL base={:08X} range={:08X}-{:08X} thread='{}' "
+        "latched={} self={}",
+        s_lineage_queue, address_first, address_last, thread_name,
+        draw_invalidation_latch_.load(std::memory_order_acquire) ? 1 : 0,
+        t_draw_invalidation_latch_owner ? 1 : 0);
+  }
+  if (t_draw_invalidation_latch_owner &&
+      draw_invalidation_latch_.load(std::memory_order_relaxed)) {
+    latched_self_invalidations_.emplace_back(
+        address_first, address_last - address_first + 1);
     return;
   }
   std::lock_guard<std::mutex> lock(pending_invalidations_mutex_);
@@ -1519,7 +1588,14 @@ uint32_t MetalTextureCache::GetTextureSlot(
 uint32_t MetalTextureCache::GetTextureSlotUnswizzledNull(
     const xenos::xe_gpu_texture_fetch_t& fetch, bool is_signed) {
   if (!trace_playback_) {
-    DrainPendingInvalidations();
+    if (draw_invalidation_latch_.load(std::memory_order_relaxed) &&
+        t_draw_invalidation_latch_owner) {
+      // Latched draw: only this thread's own publications drain here; other
+      // threads' ranges wait for the next draw's latch (see the header).
+      DrainLatchedSelfInvalidations();
+    } else {
+      DrainPendingInvalidations();
+    }
   }
   EnforceSlotHeadroom();
   // Diagnostic: log why a fetch resolves to the null (gray) texture. The
@@ -3811,6 +3887,11 @@ uint32_t MetalTextureCache::InvalidateRange(uint32_t base, uint32_t length,
           it->second.scaled_extent_start, it->second.scaled_extent_length);
       if ((guest_extent && invalidation->Overlaps(*guest_extent)) ||
           (scaled_extent && invalidation->Overlaps(*scaled_extent))) {
+        if (xe_lineage_base() && it->first == xe_lineage_base()) {
+          XELOGW(
+              "MetalLineage RETIRE base={:08X} draw={} by {:08X}+{:X} site={}",
+              it->first, lineage_draw_, base, length, site ? site : "other");
+        }
         RetireResolvedTarget(it->second);
         ++registry_epoch_;
         it = resolved_targets_.erase(it);
