@@ -2104,9 +2104,18 @@ void EmulatorWindow::FreezeGame(bool freeze) {
   }
 }
 
+bool EmulatorWindow::CanDismissPreferences() const {
+  // With no game the dashboard is the whole window: hiding it leaves an
+  // empty black window that only F6 or Guide brings back (GitHub issue 17).
+  // Launching a game hides it through kCloseThen, not through here.
+  return emulator_->is_title_open();
+}
+
 void EmulatorWindow::TogglePreferences(const std::string& blade) {
   if (IsPreferencesVisible()) {
-    HidePreferences();
+    if (CanDismissPreferences()) {
+      HidePreferences();
+    }
   } else {
     ShowPreferences(blade);
   }
@@ -2125,7 +2134,10 @@ void EmulatorWindow::HandlePreferencesMessage(const std::string& json) {
       blades_overlay_->PushState(blades_model_->BuildStateJson());
       break;
     case BladesModel::Result::kClose:
-      HidePreferences();
+      // Escape, Guide and the close button.
+      if (CanDismissPreferences()) {
+        HidePreferences();
+      }
       break;
     case BladesModel::Result::kCloseThen: {
       std::function<void()> then = blades_model_->TakeDeferred();
