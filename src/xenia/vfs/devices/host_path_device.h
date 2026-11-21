@@ -33,6 +33,13 @@ class HostPathDevice : public Device {
 
   bool is_read_only() const override { return read_only_; }
 
+  // A name directly under the root that the guest never sees: host-side
+  // metadata kept inside a package folder (a content package's legacy
+  // __thumbnail.png). Call before Initialize().
+  void HideRootName(std::string name) {
+    hidden_root_names_.push_back(std::move(name));
+  }
+
   const std::string& name() const override { return name_; }
   uint32_t attributes() const override { return 0; }
   uint32_t component_name_max_length() const override { return 255; }
@@ -57,6 +64,7 @@ class HostPathDevice : public Device {
   std::filesystem::path host_path_;
   std::unique_ptr<Entry> root_entry_;
   bool read_only_;
+  std::vector<std::string> hidden_root_names_;
 };
 
 }  // namespace vfs

@@ -32,6 +32,15 @@ DEFINE_bool(serve_disc_content, true,
             "it) when the content root has no copy.",
             "Content");
 
+DEFINE_bool(content_thumbnail_beside_header, true,
+            "Keep a content package's thumbnail beside its header "
+            "(Headers/<type>/<name>.thumbnail.png), not as __thumbnail.png "
+            "inside the package, and hide a __thumbnail.png that earlier "
+            "builds left in a package from the title. Titles that list their "
+            "save folder took that file for their save (Ridge Racer 6: "
+            "\"Game Data is corrupted\"). Off restores the old layout.",
+            "Content");
+
 namespace xe {
 namespace kernel {
 namespace xam {
@@ -55,6 +64,9 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
   auto fs = kernel_state_->file_system();
   auto device =
       std::make_unique<vfs::HostPathDevice>(device_path_, package_path, false);
+  if (cvars::content_thumbnail_beside_header) {
+    device->HideRootName(kThumbnailFileName);
+  }
   device->Initialize();
   fs->RegisterDevice(std::move(device));
   fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
@@ -203,6 +215,17 @@ std::filesystem::path ContentManager::ResolvePackageHeaderPath(
   // content_root/xuid/title_id/Headers/content_type/
   return RootPathFor(content_type) / xuid_str / title_id_str /
          kGameContentHeaderDirName / content_type_str / final_name;
+}
+
+std::filesystem::path ContentManager::ResolvePackageThumbnailPath(
+    const uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data) const {
+  // Same owner and title as WriteContentHeaderFile.
+  const uint64_t used_xuid =
+      (data.xuid != -1 && data.xuid != 0) ? data.xuid.get() : xuid;
+  auto path = ResolvePackageHeaderPath(data.file_name(), used_xuid,
+                                       data.title_id, data.content_type);
+  path.replace_extension(".thumbnail.png");
+  return path;
 }
 
 std::unordered_set<uint32_t> ContentManager::FindPublisherTitleIds(
@@ -618,6 +641,14 @@ X_RESULT ContentManager::GetContentThumbnail(
 
   auto package_path = ResolvePackagePath(xuid, data);
   auto thumb_path = package_path / kThumbnailFileName;
+  if (cvars::content_thumbnail_beside_header) {
+    // Thumbnails set by this build; packages from earlier builds keep theirs
+    // inside the package.
+    auto side_path = ResolvePackageThumbnailPath(xuid, data);
+    if (std::filesystem::exists(side_path)) {
+      thumb_path = side_path;
+    }
+  }
   if (std::filesystem::exists(thumb_path)) {
     auto file = xe::filesystem::OpenFile(thumb_path, "rb");
     size_t file_len = std::filesystem::file_size(thumb_path);
@@ -638,7 +669,14 @@ X_RESULT ContentManager::SetContentThumbnail(
   std::filesystem::create_directories(package_path);
   if (std::filesystem::exists(package_path)) {
     auto thumb_path = package_path / kThumbnailFileName;
+    if (cvars::content_thumbnail_beside_header) {
+      thumb_path = ResolvePackageThumbnailPath(xuid, data);
+      std::filesystem::create_directories(thumb_path.parent_path());
+    }
     auto file = xe::filesystem::OpenFile(thumb_path, "wb");
+    if (!file) {
+      return X_ERROR_ACCESS_DENIED;
+    }
     fwrite(buffer.data(), 1, buffer.size(), file);
     fclose(file);
     return X_ERROR_SUCCESS;
@@ -657,6 +695,10 @@ X_RESULT ContentManager::DeleteContent(const uint64_t xuid,
   }
 
   auto package_path = ResolvePackagePath(xuid, data);
+  if (cvars::content_thumbnail_beside_header) {
+    std::error_code ec;
+    std::filesystem::remove(ResolvePackageThumbnailPath(xuid, data), ec);
+  }
   if (std::filesystem::remove_all(package_path) > 0) {
     return X_ERROR_SUCCESS;
   } else {
