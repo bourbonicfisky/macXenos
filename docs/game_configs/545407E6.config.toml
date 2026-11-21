@@ -11,7 +11,7 @@
 [GPU]
 occlusion_query = "strict"
 # Uncapped by choice (2026-11-03): the title's own limiter waits on the display
-# scanline counter; with the hardware-timed counter (9c88a1281) it holds 30
+# scanline counter; with the hardware-timed counter (4f641a60c) it holds 30
 # fps, with the old per-frame-step counter it runs uncapped (113.9 vs 30.0 fps
 # on the M1 Max, routes-20261103/occl-m1 m2-accum / m2-default).
 # limit_uncapped_games still holds it to 60 when that is on.

@@ -8,7 +8,7 @@
 # changes nothing else that was measured in this title.
 #
 # Whole-frame flashes in gameplay: two races in the Metal backend's lazy
-# publication. 5d78b0a14 (the straddler re-assert keeps lazily published
+# publication. a9d675623 (the straddler re-assert keeps lazily published
 # pages RAM-authoritative) removed the rings, white-outs and white veils.
 # Single false-colour frames remain: about 20 per 480 s on an M4 Pro, about
 # one a minute on an M5 Max, none seen on an M1 Max (2026-11-15).
