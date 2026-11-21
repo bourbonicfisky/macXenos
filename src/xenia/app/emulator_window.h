@@ -334,6 +334,8 @@ class EmulatorWindow {
   void HidePreferences();
   void TogglePreferences(const std::string& blade);
   bool IsPreferencesVisible() const;
+  // False while no game is open: the dashboard then stays up.
+  bool CanDismissPreferences() const;
   void HandlePreferencesMessage(const std::string& json);
   void PumpPreferencesController();
   // Suspends the running game's threads and audio while the dashboard is
