@@ -64,7 +64,19 @@ struct ScaledCoverInputs {
   // Not a condition: which snapshot the inputs describe, the base's own
   // registration or the column assembly at the base (serve routing only).
   bool from_assembly = false;
+  // The fetch may read only the top rows of a taller snapshot (served through
+  // a fetch-sized fitted copy). Resolve rectangles are 8-pixel aligned, so a
+  // 320x180 texture is resolved as 320x184: its RAM rows are the snapshot's
+  // top 180 rows at the same pitch. Set by the caller only when a fitted view
+  // can be served (not for column assemblies).
+  bool allow_taller_snapshot = false;
 };
+
+// The fetch reads a strict top part of the snapshot and must be served from a
+// fetch-sized fitted view rather than the raw snapshot.
+inline bool ScaledCoverNeedsFit(const ScaledCoverInputs& in) {
+  return in.fetch_height != in.snapshot_height;
+}
 
 inline bool ScaledCoverSnapshotEligible(const ScaledCoverInputs& in) {
   return in.scaled_session && !in.rt_is_depth && in.ram_backed &&
@@ -73,7 +85,9 @@ inline bool ScaledCoverSnapshotEligible(const ScaledCoverInputs& in) {
          !in.fetch_stacked && in.fetch_mip_min_level == 0 &&
          in.fetch_mip_max_level == 0 &&
          in.fetch_width == in.snapshot_width &&
-         in.fetch_height == in.snapshot_height &&
+         (in.fetch_height == in.snapshot_height ||
+          (in.allow_taller_snapshot && in.fetch_height &&
+           in.fetch_height < in.snapshot_height)) &&
          in.fetch_pitch_texels == in.snapshot_width &&
          in.rows_written >= in.fetch_height &&
          in.fetch_endianness == in.wb_endian;

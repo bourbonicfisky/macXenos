@@ -97,6 +97,40 @@ TEST_CASE("Scaled cover: each condition disqualifies on its own",
   check_off([](ScaledCoverInputs& in) { in.fetch_endianness = 0; });
 }
 
+TEST_CASE("Scaled cover: top rows of an 8-row-aligned taller snapshot",
+          "[metal][draw_resolution_scale]") {
+  // Ultra Street Fighter IV's quarter-resolution blur: a 320x180 fetch of a
+  // resolve rounded up to 320x184, same pitch.
+  ScaledCoverInputs in = EligibleScaledCover();
+  in.fetch_width = 320;
+  in.fetch_height = 180;
+  in.fetch_pitch_texels = 320;
+  in.snapshot_width = 320;
+  in.snapshot_height = 184;
+  in.rows_written = 184;
+  // Refused unless a fitted view can serve it (rollback, column assembly).
+  CHECK_FALSE(ScaledCoverSnapshotEligible(in));
+  in.allow_taller_snapshot = true;
+  CHECK(ScaledCoverSnapshotEligible(in));
+  CHECK(metal::ScaledCoverNeedsFit(in));
+  // The rows the fetch reads must all have been written.
+  ScaledCoverInputs short_rows = in;
+  short_rows.rows_written = 176;
+  CHECK_FALSE(ScaledCoverSnapshotEligible(short_rows));
+  // Never a taller fetch, a different width or a different pitch.
+  ScaledCoverInputs taller = in;
+  taller.fetch_height = 192;
+  CHECK_FALSE(ScaledCoverSnapshotEligible(taller));
+  ScaledCoverInputs narrower = in;
+  narrower.fetch_width = 300;
+  CHECK_FALSE(ScaledCoverSnapshotEligible(narrower));
+  ScaledCoverInputs pitch = in;
+  pitch.fetch_pitch_texels = 352;
+  CHECK_FALSE(ScaledCoverSnapshotEligible(pitch));
+  // Equal heights need no fit.
+  CHECK_FALSE(metal::ScaledCoverNeedsFit(EligibleScaledCover()));
+}
+
 TEST_CASE("Scaled cover: classified only where RAM would otherwise serve",
           "[metal][draw_resolution_scale]") {
   // A RAM-content fetch becomes scaled cover in a scaled session.
