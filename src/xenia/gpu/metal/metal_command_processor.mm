@@ -11283,6 +11283,30 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // encoder opens (a flush here would kill an open encoder — the
   // setViewport-on-ended-encoder crash class). Cross-frame consumers cost
   // nothing: their writebacks drained at a prior swap.
+  //
+  // CPU-watch invalidations queued by guest threads are applied here, once,
+  // and not again until the draw is issued: the dependency decision below,
+  // the shared-route prepass and the descriptor serve must agree on which
+  // fetches a resolve snapshot serves. A registration retired between them
+  // sent a snapshot-served fetch to a CPU untile of guest RAM that nothing
+  // converged (Burnout Revenge's videos at 2x: every frame the game's main
+  // thread writes its own data in guest pages that share 16 KB host pages
+  // with its two 1280x720 movie resolves, and the write watch retired the
+  // registration inside the serve). XE_METAL_TEX_INVAL_LATCH=0 restores
+  // draining on every texture lookup.
+  struct DrawInvalidationLatchScope {
+    metal::MetalTextureCache* cache = nullptr;
+    ~DrawInvalidationLatchScope() {
+      if (cache) {
+        cache->EndDrawInvalidationLatch();
+      }
+    }
+  } draw_invalidation_latch;
+  if (texture_cache_ &&
+      metal::MetalTextureCache::DrawInvalidationLatchEnabled()) {
+    texture_cache_->BeginDrawInvalidationLatch();
+    draw_invalidation_latch.cache = texture_cache_.get();
+  }
   draw_gpu_ordering_active_ = false;
   // XE_METAL_TEX_DEP_MEMO: 1 on (default), 0 off, 2 verify (run the full
   // block anyway and count memo hits whose real decision was not empty; 0 of
