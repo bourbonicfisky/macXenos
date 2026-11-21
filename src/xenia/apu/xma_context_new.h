@@ -128,6 +128,10 @@ class XmaContextNew : public XmaContext {
   std::array<uint8_t, 1 + 4096> xma_frame_;
   std::array<uint8_t, kBytesPerFrameChannel * 2> raw_frame_;
 
+  // Output blocks held back per decoded frame. Only the old reading of DWORD1
+  // bits 24-26 (--xma_decode_subframe=false) reserves any.
+  static uint32_t OutputHeadroom(const XMA_CONTEXT_DATA& data);
+
   int32_t remaining_subframe_blocks_in_output_buffer_ = 0;
   uint8_t current_frame_remaining_subframes_ = 0;
 
