@@ -19,6 +19,24 @@ TEST_CASE("the disc number is read from a dump's name", "[disc_set]") {
   REQUIRE(DiscNumberInName("Sonic Generations (World).iso") == 0);
   REQUIRE(DiscNumberInName("Game (Disc A).iso") == 0);
   REQUIRE(DiscNumberInName("Game (Disc 2.iso") == 0);
+  // A disc's role stands in for a missing number; a number wins.
+  REQUIRE(DiscNumberInName("Game (USA) (Game Disc).iso") == 1);
+  REQUIRE(DiscNumberInName("Game (USA) (Install Disc).iso") == 2);
+  REQUIRE(DiscNumberInName("Game (Disc 3) (Install Disc).iso") == 3);
+}
+
+TEST_CASE("unnumbered game and install discs are a set", "[disc_set]") {
+  // Call of Duty: Advanced Warfare as Redump names it (GitHub #24).
+  const char* game =
+      "Call of Duty - Advanced Warfare (USA, Europe) (En,Fr,De,Es,It,Pl,Ru) "
+      "(Game Disc).iso";
+  const char* install =
+      "Call of Duty - Advanced Warfare (USA, Europe) (En,Fr,De,Es,It,Pl,Ru) "
+      "(Install Disc).iso";
+  REQUIRE(IsOtherDiscOfSet(game, install));
+  REQUIRE(IsOtherDiscOfSet(install, game));
+  REQUIRE_FALSE(IsOtherDiscOfSet(
+      game, "Call of Duty - Ghosts (USA, Europe) (Disc 2) (Install Disc).iso"));
 }
 
 TEST_CASE("discs of a set match when their tags differ", "[disc_set]") {

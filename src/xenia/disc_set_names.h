@@ -25,10 +25,21 @@ namespace xe {
 // Ru) (Disc 2) (Install Disc)". So the discs are matched on the title, the
 // text before the first " (".
 
-// The N of "(Disc N)" in a file name, or 0 when it has none.
+// Some two-disc sets carry no number at all, only the disc's role: Call of
+// Duty: Advanced Warfare is "... (Game Disc).iso" beside "... (Install
+// Disc).iso". Those count as discs 1 and 2.
+
+// The N of "(Disc N)" in a file name (or 1 for "(Game Disc)" and 2 for
+// "(Install Disc)" when there is no number), or 0 when it has none.
 inline uint32_t DiscNumberInName(std::string_view name) {
   const size_t at = name.find("(Disc ");
   if (at == std::string_view::npos) {
+    if (name.find("(Game Disc)") != std::string_view::npos) {
+      return 1;
+    }
+    if (name.find("(Install Disc)") != std::string_view::npos) {
+      return 2;
+    }
     return 0;
   }
   const std::string digits(name.substr(at + 6, 4));
