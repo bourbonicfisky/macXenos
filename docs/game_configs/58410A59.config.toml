@@ -1,0 +1,11 @@
+# macXenos built-in per-title config: Lara Croft and the Guardian of Light
+# (58410A59, Xbox Live Arcade). The scene is drawn as a depth pre-pass and then
+# an EQUAL-depth colour pass with different vertex shaders; their depths agree
+# only once rounded to the 24-bit float depth buffer (D24FS8). With host
+# float32 depth the EQUAL test passed only in thin bands, so floors and walls
+# showed zigzag stripes and characters a woven mosaic over a dark blue scene
+# (GitHub issue 18). Converting depth to float24 in the pixel shader, depth-only
+# draws included, makes the two passes match.
+# (xenia-mac-evidence lara18-20261121)
+[GPU]
+depth_float24_convert_in_pixel_shader = true

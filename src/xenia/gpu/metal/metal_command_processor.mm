@@ -8804,9 +8804,47 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
   // vertex shader in its place: the MSAA clear fold matches the clear's
   // shader pair, and without the pixel shader no clear folded on the 580X
   // (Gears 3 19.4 fps there vs 30 on the RX 6900 XT, 2026-11-03).
+  // Float24 depth in the pixel shader (depth_float24_convert_in_pixel_shader
+  // or XE_METAL_F24_PS) converts the depth the colour passes write and test.
+  // A depth-only draw without a fragment function writes the unconverted
+  // host float32 instead, so a depth pre-pass and the EQUAL colour pass after
+  // it never match when their vertex shaders differ in the last bits (Lara
+  // Croft and the Guardian of Light, GitHub issue 18: pre-pass in
+  // kDepthOnly, colour pass in kColorDepth, equal only once rounded to
+  // 20e4). Such draws keep their pixel shader so the conversion covers them
+  // too; D3D12 binds a depth-only pixel shader for the same reason. The kept
+  // shader has no coverage effects (alpha test and alpha to mask follow
+  // IsPixelShaderNeededWithRasterization below) and writes no colour (the
+  // normalized colour mask is 0). In kDepthOnly the guest pixel shader does
+  // not run on the console, so a shader that kills, writes depth or exports
+  // is still dropped there. Titles without the conversion are unchanged.
+  static const bool s_f24_ps_for_depth_only = MetalF24PsEngaged(
+      EffectiveMetalF24PsMode(std::getenv("XE_METAL_F24_PS"),
+                              cvars::depth_float24_convert_in_pixel_shader));
+  const auto f24_depth_only_needs_ps = [&]() {
+    if (!s_f24_ps_for_depth_only ||
+        regs.Get<reg::RB_DEPTH_INFO>().depth_format !=
+            xenos::DepthRenderTargetFormat::kD24FS8) {
+      return false;
+    }
+    const xenos::EdramMode edram_mode =
+        regs.Get<reg::RB_MODECONTROL>().edram_mode;
+    if (edram_mode == xenos::EdramMode::kDepthOnly) {
+      if (pixel_shader->kills_pixels() || pixel_shader->writes_depth() ||
+          pixel_shader->memexport_eM_written()) {
+        return false;
+      }
+    } else if (edram_mode != xenos::EdramMode::kColorDepth) {
+      return false;
+    }
+    reg::RB_DEPTHCONTROL depth_control =
+        draw_util::GetNormalizedDepthControl(regs);
+    return depth_control.z_enable && depth_control.z_write_enable;
+  };
   if (s_ps_drop && pixel_shader && !use_geometry_emulation &&
       !rect_strip_route &&
-      !draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs)) {
+      !draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader, regs) &&
+      !f24_depth_only_needs_ps()) {
     pixel_shader = nullptr;
   }
   // Attribution bound (XE_METAL_DIAG_PS_NULL=1, never for play): drop EVERY
