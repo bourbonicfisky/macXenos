@@ -14,7 +14,7 @@ macOS may say it can't check macXenos for malicious software. Open
 - **Check the dump.** A damaged or incomplete disc image is the most common
   reason a game won't boot. If you can, make a fresh dump.
 - **Install and content discs don't run by themselves.** Some games ship
-  a disc that only holds data to install (for example GTA V's second disc or
+  a disc that only holds data to install (for example GTA V's first disc or
   Forza 4's content disc). Start the game from its play disc.
 - **Multi-disc games.** When a game asks for the next disc, macXenos opens a
   file picker. Choose the image for that disc.

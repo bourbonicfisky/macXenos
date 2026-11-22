@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 292 of them. Each one
+These are the games macXenos is tested with regularly: 294 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -56,6 +56,7 @@ smoother.
 | Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 30 | 30 | 30 | Occasionally freezes at the boot logo or after the menu loads |
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 | 30 | 30 | 30 |  |
 | Batman: Arkham Origins | Blackgate rooftop | – | 30 | 30 | 30 |  |
+| Battlefield 3 | Semper Fidelis, the pause menu over the train fight | – | 30 | – | – | Tested on Easy, ending on the pause menu because the idle player dies quickly. Textures are corrupted in many frames |
 | Battlefield: Bad Company | First level | – | – | 30 | – |  |
 | Bayonetta | Prologue, the clock tower fight | – | – | 60 | 60 |  |
 | Beautiful Katamari | Rolling practice | – | 60 | – | 60 |  |
@@ -185,6 +186,7 @@ smoother.
 | The Godfather II | Havana rooftop party | – | 30 | – | 30 |  |
 | GoldenEye 007: Reloaded | First mission | – | 60 | – | 60 |  |
 | Grand Theft Auto IV | Opening drive | – | 60 | 60 | 60 | Now holds the console's 60 refresh rate (54-55 in October) |
+| Grand Theft Auto V | Prologue, first control in the bank | – | 30 | – | – | Runs from Disc 2; Disc 1 is read from the image beside it |
 | Guitar Hero II | Practice, a full song | – | – | 60 | 60 |  |
 | Half-Life 2 (The Orange Box) | Main menu over its live map | 30 | 30 | 30 | 30 | Starting the first chapter can stop at the loading screen |
 | Halo 3 | Campaign, Arrival | 30 | 30 | 30 | 30 |  |
