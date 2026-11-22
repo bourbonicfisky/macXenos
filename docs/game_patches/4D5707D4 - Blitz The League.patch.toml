@@ -1,0 +1,55 @@
+# macXenos built-in game patch: Blitz: The League (4D5707D4).
+# The title's recursive mutex (an RTL critical section at +0x00, owner thread
+# id at +0x1C, recursion count at +0x20; lock 8262C228, unlock 8262C290)
+# clears its owner field AFTER RtlLeaveCriticalSection:
+#   8262C2B8 bl RtlLeaveCriticalSection
+#   8262C2BC lwz r11,0x20(r31) / cmpwi / bne / li r11,-1 / stw r11,0x1C(r31)
+# A thread that takes the lock in that window (the main thread polls the
+# loader's queue in a tight lock/unlock loop) writes owner = itself, then the
+# old owner overwrites it with -1. The new owner's unlock then sees owner !=
+# self and skips RtlLeaveCriticalSection, so the critical section stays held
+# for good: the main thread keeps re-entering it (RTL recursion) and spins at
+# ~100% CPU, every other thread that needs the lock blocks, and no frame is
+# ever presented. Guest memory of a hung boot shows exactly that state at the
+# mutex 82D34F48: lock_count 1, recursion 1, owning KTHREAD 30028018, game
+# owner field FFFFFFFF. It is a race in the game itself; the emulator's
+# kernel-call return path is far longer than the console's, which widens the
+# window. 8262C2B8 is the only owner = -1 after RtlLeaveCriticalSection in the
+# executable. The patch clears the owner first, under the lock:
+#   lwz r11,0x20(r31) / cmpwi cr6,r11,0 / li r11,-1 / bne cr6,+8 /
+#   stw r11,0x1C(r31) / mr r3,r31 / bl RtlLeaveCriticalSection
+# Before: no frame in 2 of 2 route-batch boots (M1 Max, 11-22) and 1 of 2
+# Mac Studio boots here. Evidence: xenia-mac-evidence/defects-20261122/boot/
+# (blitz-*). A file with this name in the storage root's patches/ folder
+# replaces this one (set is_enabled = false there to turn it off).
+title_name = "Blitz: The League"
+title_id = "4D5707D4"
+hash = "1AE787D8B84D236E"
+
+[[patch]]
+    name = "Fix mutex owner race (boot hang before the first frame)"
+    desc = "The mutex unlock (8262C290) clears its owner field after RtlLeaveCriticalSection; a thread taking the lock in between has its ownership erased and never leaves the critical section. Clear the owner before leaving instead."
+    author = "macXenos"
+    is_enabled = true
+
+    [[patch.be32]]
+        address = 0x8262C2B4
+        value = 0x817F0020
+    [[patch.be32]]
+        address = 0x8262C2B8
+        value = 0x2F0B0000
+    [[patch.be32]]
+        address = 0x8262C2BC
+        value = 0x3960FFFF
+    [[patch.be32]]
+        address = 0x8262C2C0
+        value = 0x409A0008
+    [[patch.be32]]
+        address = 0x8262C2C4
+        value = 0x917F001C
+    [[patch.be32]]
+        address = 0x8262C2C8
+        value = 0x7FE3FB78
+    [[patch.be32]]
+        address = 0x8262C2CC
+        value = 0x4817CF21
