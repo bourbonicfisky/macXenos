@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 287 of them. Each one
+These are the games macXenos is tested with regularly: 290 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -44,6 +44,8 @@ smoother.
 | 50 Cent: Blood on the Sand | Mission 1, the opening street | – | – | 118 | 128 | Doesn't cap its own frame rate (see below) |
 | Ace Combat 6: Fires of Liberation | Mission 1, the take-off sequence | – | – | 30 | 30 |  |
 | Ace Combat: Assault Horizon | Mission 1, over Miami | – | – | 30 | 30 |  |
+| Adventure Time: Explore the Dungeon Because I Don't Know! | New game, the Candy Kingdom hub | – | 60 | – | – |  |
+| Adventure Time: Finn & Jake Investigations | The tutorial prompt in the treehouse | – | 30 | – | – |  |
 | AFL Live | Single match, CPU vs CPU at the MCG | – | 124 | – | – | Doesn't cap its own frame rate (see below) |
 | AFL Live 2 | Single match, CPU vs CPU (random teams and venue) | – | 30 | – | – |  |
 | Afro Samurai | Village tutorial fight | – | – | 30 | 30 |  |
@@ -169,6 +171,7 @@ smoother.
 | Forza Horizon | Opening drive | – | 30 | 30 | 30 |  |
 | Forza Horizon 2 | Drive to the Festival | 30 | 30 | 30 | 30 |  |
 | Forza Motorsport 2 | Exhibition race, on the grid | 60 | 60 | 60 | 60 | Some menu text is missing letters |
+| Forza Motorsport 3 | The opening race, the Audi R8 on the start straight | 60 | – | – | – |  |
 | Forza Motorsport 4 | First race, cockpit view | 60 | 60 | 60 | 60 | In cockpit view the windshield and side windows are flat grey |
 | Frontlines: Fuel of War | First mission, defending the crash site | – | 47 | – | 49 | The game paces itself at about 46-50, in menus and videos too |
 | Fuel | Career, The Leap of Faith | – | – | 30 | 30 |  |
