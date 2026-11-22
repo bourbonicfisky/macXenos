@@ -457,6 +457,10 @@ class MetalCommandProcessor : public CommandProcessor {
   // The session's draw resolution scale (metal_draw_resolution_scale.h).
   uint32_t draw_resolution_scale_x_ = 1;
   uint32_t draw_resolution_scale_y_ = 1;
+  // The direction the last draw's ordered depth test passes in (1: larger,
+  // GREATER/GEQUAL; 2: smaller, LESS/LEQUAL; 0: none yet), for the scaled
+  // depth snapshots of multisampled surfaces (xe_resolve_snapshot_depth).
+  uint32_t last_depth_pass_direction_ = 0;
   // Draw resolution scaling: column assemblies by x = 0 base -> dest pitch.
   std::unordered_map<uint32_t, uint32_t> scaled_assembly_pitches_;
   // Depth column strips: x = 0 base -> dest pitch of a depth destination the

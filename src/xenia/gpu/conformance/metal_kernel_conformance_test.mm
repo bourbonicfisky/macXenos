@@ -372,8 +372,10 @@ struct CanonicalResolveParamsHost {
   // pack every case below expects unless it sets dest_number itself.
   uint32_t dest_number;
   uint32_t dest_int_bits;
+  // Scaled multisampled depth snapshots only; 0 = unknown test direction.
+  uint32_t depth_pass_direction;
 };
-static_assert(sizeof(CanonicalResolveParamsHost) == 28u * sizeof(uint32_t));
+static_assert(sizeof(CanonicalResolveParamsHost) == 29u * sizeof(uint32_t));
 
 // Host mirror of the shared MSL CanonicalClearParams (metal_edram_msl.h). The
 // clear scatter writes one clear word (two for 64bpp) at each declared

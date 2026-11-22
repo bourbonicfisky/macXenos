@@ -270,7 +270,8 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       void* dest_snapshot,
       uint64_t dest_pixel_format, uint32_t width, uint32_t height,
       uint32_t dest_y_offset, float exp_bias_scale,
-      uint32_t dest_x_offset = 0, uint32_t dest_int_bits = 0);
+      uint32_t dest_x_offset = 0, uint32_t dest_int_bits = 0,
+      uint32_t depth_pass_direction = 0);
   struct CanonicalScatterDest;
   // Direct colour resolve (reduce-edram-pass-traffic Lever 4, default on;
   // XE_METAL_DIRECT_COLOR_RESOLVE=0 rolls back): between Begin

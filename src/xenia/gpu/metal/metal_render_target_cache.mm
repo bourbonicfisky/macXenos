@@ -202,12 +202,18 @@ MTLCompileOptions* EdramMslCompileOptions(uint32_t tile_width_samples,
     const char* v = std::getenv("XE_METAL_RESOLVE_AVERAGE_FLOAT");
     return v && v[0] == '1' && !v[1];
   }();
+  // XE_METAL_SCALED_MSAA_DEPTH=0: a scaled depth snapshot of a multisampled
+  // surface keeps the selected sample's depth instead of the depth at the
+  // guest-scaled sample offset (exact rollback; see xe_resolve_snapshot_depth).
+  static const bool scaled_msaa_depth = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_SCALED_MSAA_DEPTH"), true);
   options.preprocessorMacros = @{
     @"XE_EDRAM_TILE_WIDTH_SAMPLES" :
         [NSString stringWithFormat:@"%uu", tile_width_samples],
     @"XE_EDRAM_TILE_HEIGHT_SAMPLES" :
         [NSString stringWithFormat:@"%uu", tile_height_samples],
     @"XE_RESOLVE_AVERAGE_FLOAT" : average_float ? @"1" : @"0",
+    @"XE_SCALED_MSAA_DEPTH" : scaled_msaa_depth ? @"1" : @"0",
   };
   return options;
 }
@@ -5890,7 +5896,8 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
     void* dest_snapshot,
     uint64_t dest_pixel_format, uint32_t width, uint32_t height,
     uint32_t dest_y_offset, float exp_bias_scale,
-    uint32_t dest_x_offset, uint32_t dest_int_bits) {
+    uint32_t dest_x_offset, uint32_t dest_int_bits,
+    uint32_t depth_pass_direction) {
   xenos::ColorRenderTargetFormat storage_format =
       is_depth
           ? xenos::ColorRenderTargetFormat::k_8_8_8_8
@@ -5978,6 +5985,7 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
     uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
     uint32_t dest_number;
     uint32_t dest_int_bits;
+    uint32_t depth_pass_direction;
   } params{surface,
            // A destination x offset (an assembled column) shifts the shader's
            // destination->source mapping and bound; the scissor excludes the
@@ -5988,8 +5996,9 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
            uint32_t(!is_depth && raw_copy &&
                     dest_pixel_format == uint64_t(MTLPixelFormatR32Float)),
            exp_bias_scale, dest_x_offset + clipped_width, clipped_height, 0u,
-           0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, dest_int_bits};
-  static_assert(sizeof(ResolveParams) == 28u * sizeof(uint32_t));
+           0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, dest_int_bits,
+           is_depth ? depth_pass_direction : 0u};
+  static_assert(sizeof(ResolveParams) == 29u * sizeof(uint32_t));
   // Match the guest-memory writer's quantization, including half-way cases.
   static const bool s_scaled_packed_color = ParseMetalEnvironmentFlag(
       std::getenv("XE_METAL_SCALED_PACKED_COLOR"), true);
@@ -6182,6 +6191,7 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
     uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
     uint32_t dest_number;
     uint32_t dest_int_bits;
+    uint32_t depth_pass_direction;
   } params{surface,
            source_x,
            source_y,
@@ -6204,8 +6214,9 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
            scatter ? scatter->dest_offset_y : 0u,
            scatter ? scatter->dest_extent_bytes : 0u,
            0u,
+           0u,
            0u};
-  static_assert(sizeof(ResolveParams) == 28u * sizeof(uint32_t));
+  static_assert(sizeof(ResolveParams) == 29u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
@@ -6295,6 +6306,7 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
     uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
     uint32_t dest_number;
     uint32_t dest_int_bits;
+    uint32_t depth_pass_direction;
   } params{surface,
            source_x,
            source_y,
@@ -6317,8 +6329,9 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
            scatter ? scatter->dest_offset_y : 0u,
            scatter ? scatter->dest_extent_bytes : 0u,
            dest_number,
+           0u,
            0u};
-  static_assert(sizeof(ResolveParams) == 28u * sizeof(uint32_t));
+  static_assert(sizeof(ResolveParams) == 29u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
   const bool direct = direct_color_source_ != nullptr;
