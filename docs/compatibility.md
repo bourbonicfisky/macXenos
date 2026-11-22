@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 294 of them. Each one
+These are the games macXenos is tested with regularly: 295 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -211,6 +211,7 @@ smoother.
 | Kane & Lynch: Dead Men | The breakout, beside the van | – | – | 30 | 30 |  |
 | The King of Fighters XII | Arcade fight | – | – | 60 | 60 |  |
 | Kingdoms of Amalur: Reckoning | First control in the Well of Souls | – | – | – | 30 | The lower half of the picture renders black |
+| Knights Contract | New game, the prologue in the plague village | – | – | 30 | – |  |
 | L.A. Noire | Upon Reflection, the patrol car | – | 30 | 30 | 30 |  |
 | LEGO Batman: The Videogame | Episode 1-1, Gotham street | – | 60 | – | 60 |  |
 | LEGO Indiana Jones 2: The Adventure Continues | The college hub | 60 | 60 | 60 | 60 |  |
