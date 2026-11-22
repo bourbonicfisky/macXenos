@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 272 of them. Each one
+These are the games macXenos is tested with regularly: 287 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -11,7 +11,7 @@ Mac didn't run the game in this round. The M4 mini column is partial for now:
 its run stopped part-way and will be completed. A few rows no Mac measured in
 this round keep figures from earlier builds and are marked "(earlier build)".
 Games added on November 22 were measured on one Mac only (the M4 mini, the M4
-Pro or the M1 Max), with a 1.1 development build.
+Pro, the M1 Max or the M5 Max), with a 1.1 development build.
 The M5 Max column is from an M5 Max Mac Studio, in runs between November 14
 and 16 (most of them with the 1.0.1 release candidate) that are still filling
 the column in.
@@ -72,6 +72,8 @@ smoother.
 | Blood Bowl | One-off match, the kick-off on the pitch | – | – | 102 | – | Doesn't cap its own frame rate (see below) |
 | Blood Drive | Tournament, the first event among the zombies | – | – | 30 | – |  |
 | Bloodbath | Training, a free-for-all against bots | – | – | 30 | – |  |
+| Blue Dragon | Shu on the village path after the opening | – | – | – | 30 |  |
+| Blur | Career, the first race at the Barcelona Oval | – | – | – | 30 |  |
 | Brothers in Arms: Hell's Highway | First chapter, the hospital | – | – | 30 | 30 |  |
 | Bully: Scholarship Edition | Bullworth campus entrance | 60 | 60 | 60 | 60 |  |
 | Burnout Paradise | Driving in Paradise City | – | 59 | 60 | 60 |  |
@@ -99,8 +101,11 @@ smoother.
 | Clive Barker's Jericho | Opening scene in the transport | – | – | 60 | 60 |  |
 | Command & Conquer: Red Alert 3 | Tutorial, the first training map | – | – | 30 | – |  |
 | Conan | Chapter 1, first control in the temple hall | 30 | – | – | – |  |
+| Condemned: Criminal Origins | First control in the opening alley | – | – | – | 44 | Runs at about 44 everywhere, menus included, instead of 30 or 60 |
 | Conflict: Denied Ops | Campaign, first control at the monastery | – | 30 | – | – |  |
 | The Conveni 200X | Scenario 1, the store placement map | – | – | 60 | – | Japanese release |
+| Crackdown | Campaign, first control in the Agency hangar | – | – | – | 28 | Runs a little under its 30 limit |
+| Crackdown 2 | The training room after the opening movie | – | – | – | 30 |  |
 | Crash Time 4: The Syndicate | Career, the first patrol in the city | – | 30 | – | – |  |
 | Crash Time 5: Undercover | Career, the first mission on an Alpine pass | – | 30 | – | – |  |
 | Crash Time: Autobahn Pursuit | The Cases, the first chase | – | 30 | – | – |  |
@@ -111,14 +116,20 @@ smoother.
 | Crysis 3 | First mission, inside the Liberty Dome | – | 31 | 31 | – |  |
 | CSI: Deadly Intent | Case 1, the first conversation at the crime scene | – | 60 | – | – |  |
 | CSI: Fatal Conspiracy | Episode 1, the first crime scene | – | 60 | – | – |  |
+| Dante's Inferno | First control in the Citadel of Acre | – | – | – | 60 |  |
 | Dark | First control in the night club | – | 175 | – | – | Doesn't cap its own frame rate (see below). The club scene renders almost black |
 | Dark Messiah of Might and Magic: Elements | Prologue, first control on the canyon ledge | – | 30 | – | – |  |
+| Dark Sector | First control on the Lasria rooftop | – | – | – | 60 |  |
 | Dark Souls | Undead Asylum | – | 30 | 30 | – |  |
 | Dark Souls II | Things Betwixt, the first glade | – | 60 | 60 | 60 |  |
 | Darkest of Days | Little Bighorn, first control on the hillside | – | 205 | – | – | Doesn't cap its own frame rate (see below) |
+| The Darkness | The opening car ride, the tunnel chase | – | – | – | 30 |  |
+| Darksiders II | First control in the frozen Veil | – | – | – | 38 | Doesn't cap its own frame rate (see below). Huge stretched polygons cover the picture |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 | 60 | 60 |  |
 | Dead or Alive Xtreme 2 | New Zack Island, the Day 1 map | – | 30 | – | – |  |
+| Dead Rising | 72 Hour Mode, the mall heliport | – | – | – | 30 | Once stayed on a loading screen after the roof-landing cutscene was skipped |
+| Dead Rising 2: Off the Record | The opening arena match | – | – | – | 30 |  |
 | Dead Space | Opening cutscene, the Kellion's cockpit | – | 30 | 30 | 30 |  |
 | Dead Space 3 | Prologue, first control in the blizzard | 30 | – | – | – |  |
 | Dead to Rights: Retribution | Prologue | 30 | 30 | 30 | – |  |
@@ -133,6 +144,8 @@ smoother.
 | Dragon Age: Origins - Awakening | The road to Vigil's Keep | 30 | 30 | 30 | 30 |  |
 | Dynasty Warriors 6 | Challenge mode, Rampage | – | 60 | – | 60 |  |
 | Dynasty Warriors 7 | Wei story, chapter 1 | – | – | 60 | 60 |  |
+| Earth Defense Force 2017 | Mission 1, the city street under the mothership | – | – | – | 60 |  |
+| Earth Defense Force 2025 | Mission 1, the city crossing | – | – | – | 50 | Runs below its 60 limit in this scene, which draws far more than most |
 | Eat Lead: The Return of Matt Hazard | Chapter 1, the warehouse yard | – | – | 30 | – |  |
 | The Elder Scrolls IV: Oblivion | Imperial Prison cell | – | – | 30 | 30 |  |
 | The Elder Scrolls V: Skyrim | Opening cart ride to Helgen | 30 | 30 | 30 | 30 | Sometimes crashes or stops responding in play; being worked on |
@@ -190,6 +203,7 @@ smoother.
 | Kane & Lynch 2: Dog Days | Shanghai opening | – | 60 | – | 60 |  |
 | Kane & Lynch: Dead Men | The breakout, beside the van | – | – | 30 | 30 |  |
 | The King of Fighters XII | Arcade fight | – | – | 60 | 60 |  |
+| Kingdoms of Amalur: Reckoning | First control in the Well of Souls | – | – | – | 30 | The lower half of the picture renders black |
 | L.A. Noire | Upon Reflection, the patrol car | – | 30 | 30 | 30 |  |
 | LEGO Batman: The Videogame | Episode 1-1, Gotham street | – | 60 | – | 60 |  |
 | LEGO Indiana Jones 2: The Adventure Continues | The college hub | 60 | 60 | 60 | 60 |  |
@@ -229,6 +243,7 @@ smoother.
 | NBA Live 09 | Practice gym | – | 60 | 60 | 60 | Can crash loading the practice gym if buttons are pressed during the opening movies |
 | NBA Street Homecourt | Venice Beach game | 60 | 60 | 60 | 60 | Can stall on the EA SPORTS BIG logo at start-up |
 | NCAA Football 14 | Exhibition, the opening coin toss | – | 30 | – | – |  |
+| Need for Speed: Carbon | Quick Race, the grid of a circuit race | – | – | – | 60 |  |
 | Need for Speed: Most Wanted | Quick Race, Ironwood Estates, on the start line | – | – | 60 | 60 |  |
 | Need for Speed: ProStreet | Race Day, Portland, on the grid | – | – | 60 | 60 |  |
 | Need for Speed: The Run | Stage 1, the car-crusher escape | 30 | 30 | 30 | 30 | Sometimes stops in this opening scene |
@@ -376,8 +391,8 @@ at the end and hit no GPU error. Notes list the problems still open in these gam
 problems fixed before these runs are not listed.
 
 Mafia II, Saints Row IV, 50 Cent: Blood on the Sand, Juiced 2: Hot Import
-Nights, Blood Bowl, AFL Live, Dark and Darkest of Days don't limit their own
-frame rate, so they run as fast as the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
+Nights, Blood Bowl, AFL Live, Dark, Darkest of Days and Darksiders II don't
+limit their own frame rate, so they run as fast as the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
 Graphics settings. Frogger: Hyper Arcade Edition doesn't limit its frame rate
 either. The game-select screen of Worms Collection is uncapped in
 the same way, but the Worms menu the test measures holds 60.
