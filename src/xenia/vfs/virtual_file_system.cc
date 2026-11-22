@@ -12,10 +12,19 @@
 #include "xenia/vfs/devices/xcontent_container_device.h"
 
 #include "devices/host_path_entry.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string.h"
 #include "xenia/kernel/xfile.h"
+
+DEFINE_bool(vfs_create_content_parents, true,
+            "Create missing folders when a title creates a file in the hard "
+            "drive's content tree (Partition1\\Content). Forza Motorsport 4's "
+            "Disc 2 install writes its packages there without making the "
+            "folders first and showed a disc read error at 0%. false restores "
+            "OBJECT_PATH_NOT_FOUND.",
+            "Content");
 
 namespace xe {
 namespace vfs {
@@ -215,6 +224,58 @@ bool VirtualFileSystem::DeletePath(const std::string_view path) {
   return parent->Delete(entry);
 }
 
+// The hard drive's content tree (Content\<owner>\<title>\<type>\<package>)
+// is the system's: a title writing a package there expects its folders to be
+// there. Forza Motorsport 4's Disc 2 installer creates
+// Partition1\Content\0000000000000000\4D530910\00000002\4d5309100000000N
+// with FILE_OVERWRITE_IF and makes no folder first; on a fresh content root
+// the open failed with OBJECT_PATH_NOT_FOUND and the game showed its disc
+// read error at 0% (Studio, 2026-11-21).
+bool VirtualFileSystem::CreatesContentParents(
+    const std::string_view path, FileDisposition creation_disposition) {
+  if (!cvars::vfs_create_content_parents) {
+    return false;
+  }
+  switch (creation_disposition) {
+    case FileDisposition::kCreate:
+    case FileDisposition::kOpenIf:
+    case FileDisposition::kOverwriteIf:
+    case FileDisposition::kSuperscede:
+      break;
+    default:
+      return false;
+  }
+  return xe::utf8::starts_with_case(path,
+                                    "\\Device\\Harddisk0\\Partition1\\Content\\");
+}
+
+Entry* VirtualFileSystem::CreateMissingDirectories(
+    const std::string_view directory_path) {
+  // Walk up to the deepest folder that exists, then create the rest.
+  std::vector<std::string> missing;
+  std::string existing_path(directory_path);
+  Entry* entry = nullptr;
+  while (!(entry = ResolvePath(existing_path))) {
+    std::string name = xe::utf8::find_name_from_guest_path(existing_path);
+    std::string parent = xe::utf8::find_base_guest_path(existing_path);
+    if (name.empty() || parent.empty() || parent == existing_path) {
+      return nullptr;
+    }
+    missing.push_back(std::move(name));
+    existing_path = std::move(parent);
+  }
+  for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
+    entry = entry->CreateEntry(*it, kFileAttributeDirectory);
+    if (!entry) {
+      return nullptr;
+    }
+  }
+  if (!missing.empty()) {
+    XELOGI("VFS: created missing content folders for {}", directory_path);
+  }
+  return entry;
+}
+
 X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
                                      const std::string_view path,
                                      FileDisposition creation_disposition,
@@ -244,6 +305,10 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
   if (!base_path.empty()) {
     parent_entry = !root_entry ? ResolvePath(base_path)
                                : root_entry->ResolvePath(base_path);
+    if (!parent_entry && !root_entry &&
+        CreatesContentParents(path, creation_disposition)) {
+      parent_entry = CreateMissingDirectories(base_path);
+    }
     if (!parent_entry) {
       *out_action = FileAction::kDoesNotExist;
       return X_STATUS_OBJECT_PATH_NOT_FOUND;
@@ -361,8 +426,16 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
   }
   if (!entry) {
     // Create if needed (either new or as a replacement).
-    entry = CreatePath(
-        path, !is_directory ? kFileAttributeNormal : kFileAttributeDirectory);
+    const uint32_t attributes =
+        !is_directory ? kFileAttributeNormal : kFileAttributeDirectory;
+    entry = CreatePath(path, attributes);
+    if (!entry && parent_entry) {
+      // CreatePath resolves from the path's first part, so a full device path
+      // (\Device\Harddisk0\Partition1\Content\...) fails there although its
+      // folder resolved above: create the file in that folder.
+      entry = parent_entry->CreateEntry(
+          xe::utf8::find_name_from_guest_path(path), attributes);
+    }
     if (!entry) {
       return X_STATUS_ACCESS_DENIED;
     }

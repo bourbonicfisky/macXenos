@@ -89,6 +89,12 @@ DECLARE_bool(enable_early_precompilation);
 DECLARE_bool(honor_package_licenses);
 
 DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
+
+DEFINE_transient_path(
+    disc_swap_path, "",
+    "Diagnostic: answer XamSwapDisc's disc picker with this image instead of "
+    "opening the file picker (scripted runs).",
+    "Storage");
 UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
 DEFINE_string(
     jit_precompile_functions, "",
@@ -117,6 +123,7 @@ DEFINE_bool(allow_game_relative_writes, false,
             "General");
 
 DECLARE_bool(allow_plugins);
+DECLARE_bool(vfs_create_content_parents);
 
 DEFINE_int32(priority_class, 0,
              "Forces macXenos to use different process priority than default "
@@ -1346,6 +1353,11 @@ std::vector<std::filesystem::path> Emulator::DiscSetPaths() const {
 const std::filesystem::path Emulator::GetNewDiscPath(
     std::string window_message, uint32_t disc_number) {
   std::filesystem::path path = "";
+  if (!cvars::disc_swap_path.empty()) {
+    XELOGI("GetNewDiscPath: disc {} answered by --disc_swap_path = {}",
+           disc_number, xe::path_to_utf8(cvars::disc_swap_path));
+    return cvars::disc_swap_path;
+  }
   if (cvars::headless) {
     // No UI: an unattended run must not block on a modal picker.
     path = FindSiblingDisc(launch_path_, disc_number);
@@ -2132,6 +2144,24 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
   // Partition1 will go to this. Registering during CompleteLaunch allows us
   // to make sure any HostPathDevices are ready beforehand. (see comment above
   // cache:\ device registration for more info about why)
+  // The hard drive's content tree is the content root: a title that writes a
+  // package there raw (Forza Motorsport 4's Disc 2 install writes
+  // Partition1\Content\0000000000000000\4D530910\00000002\4d5309100000000N)
+  // lands it where XAM's content manager lists and mounts it. Before, the
+  // writes went to the NullDevice below and the install failed. Not when a
+  // loose XEX launch already mounted Partition1 (its own folder).
+  if (cvars::vfs_create_content_parents &&
+      !file_system_->ResolvePath("\\Device\\Harddisk0\\Partition1") &&
+      !file_system_->ResolvePath("\\Device\\Harddisk0\\Partition1\\Content")) {
+    std::error_code ec;
+    std::filesystem::create_directories(content_root_, ec);
+    auto content_device = std::make_unique<vfs::HostPathDevice>(
+        "\\Device\\Harddisk0\\Partition1\\Content", content_root_, false);
+    if (content_device->Initialize()) {
+      file_system_->RegisterDevice(std::move(content_device));
+    }
+  }
+
   auto null_paths = {std::string("\\Partition0"), std::string("\\Cache0"),
                      std::string("\\Cache1")};
   auto null_device =
