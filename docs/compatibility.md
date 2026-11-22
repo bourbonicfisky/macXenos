@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 295 of them. Each one
+These are the games macXenos is tested with regularly: 297 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -235,6 +235,7 @@ smoother.
 | Mercenaries 2: World in Flames | New game, the speedboat off the coast | – | 60 | – | 60 |  |
 | Metal Gear Solid HD Collection | Metal Gear Solid 3, Virtuous Mission, the jungle at first control | – | 60 | – | 60 | Disc 1 of the collection |
 | Metal Gear Solid V: Ground Zeroes | Camp Omega, the cliff at first control | – | – | 57 | 60 | Some textures show wrong colours or coloured noise, Snake's suit among them. Not yet measured on the M4 Macs: their tests stop short of this scene |
+| Metal Gear Solid V: The Phantom Pain | Prologue, the hospital ward at first control | 60 | – | – | – | Runs from Disc 2; Disc 1 is read from the image beside it |
 | Metro 2033 | Prologue, first control | – | – | 29 | 30 |  |
 | Midnight Club: Los Angeles | Free roam | – | – | 30 | 30 |  |
 | Mirror's Edge | Story, first chapter | – | 30 | 30 | 30 |  |
@@ -320,6 +321,7 @@ smoother.
 | Tony Hawk's American Wasteland | Free Skate, Hollywood | – | – | 60 | 60 |  |
 | Tony Hawk's Project 8 | Free Skate, first level | 60 | 60 | 60 | 60 |  |
 | Ultra Street Fighter IV | Arcade fight | – | 60 | 60 | 60 | Rarely crashes while starting |
+| Vanquish | Chapter 1, the opening tutorial aboard the ship | 21 | – | – | – | Runs at about 21, below its 30 limit |
 | Virtua Tennis 4 | Exhibition match, first serve | – | 60 | – | 60 |  |
 | Viva Piñata | Garden | 30 | 30 | 30 | 30 |  |
 | WALL-E | First level | – | – | 60 | 60 |  |
