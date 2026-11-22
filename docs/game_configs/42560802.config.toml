@@ -1,0 +1,11 @@
+# macXenos built-in per-title config: LEGO Pirates of the Caribbean (42560802).
+# Same TT Games engine generation as LEGO Marvel Super Heroes (57520835):
+# vertex shaders export to memory with a render target bound
+# (MetalMemexportUnrouted class=rasterizing-vertex, 17 distinct reports per
+# boot). With that export class off (the Metal default) the opening cutscene
+# on the ship is giant flat polygon shards in red and slate (reported with
+# LEGO Marvel in GitHub issue 20); routed, Weatherby and Elizabeth on deck
+# render clean, 0 unrouted, 30 fps either way (M1 Max, release/1.1
+# fff0b939b, 2026-11-21).
+[GPU]
+metal_memexport_raster = true
