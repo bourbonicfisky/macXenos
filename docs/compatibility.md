@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 252 of them. Each one
+These are the games macXenos is tested with regularly: 272 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -10,8 +10,8 @@ The games were split between them, so many ran on only one; a dash means that
 Mac didn't run the game in this round. The M4 mini column is partial for now:
 its run stopped part-way and will be completed. A few rows no Mac measured in
 this round keep figures from earlier builds and are marked "(earlier build)".
-Games added on November 22 were measured on one Mac only (the M4 mini or the
-M1 Max), with a 1.1 development build.
+Games added on November 22 were measured on one Mac only (the M4 mini, the M4
+Pro or the M1 Max), with a 1.1 development build.
 The M5 Max column is from an M5 Max Mac Studio, in runs between November 14
 and 16 (most of them with the 1.0.1 release candidate) that are still filling
 the column in.
@@ -39,9 +39,13 @@ smoother.
 | 007 Legends | Opening level | – | 60 | – | 60 |  |
 | 007: Blood Stone | Athens harbour, in the speedboat | – | – | 30 | 30 |  |
 | 007: Quantum of Solace | First level | – | 30 | – | 30 |  |
+| 2010 FIFA World Cup South Africa | Quick Match, USA v Mexico, CPU vs CPU | – | 60 | – | – |  |
+| 2014 FIFA World Cup Brazil | Kick Off, Brazil v Argentina at the Maracanã | – | 60 | – | – | Runs 30 when the test ends on a Brazil set piece waiting for the player; open play holds 60 |
 | 50 Cent: Blood on the Sand | Mission 1, the opening street | – | – | 118 | 128 | Doesn't cap its own frame rate (see below) |
 | Ace Combat 6: Fires of Liberation | Mission 1, the take-off sequence | – | – | 30 | 30 |  |
 | Ace Combat: Assault Horizon | Mission 1, over Miami | – | – | 30 | 30 |  |
+| AFL Live | Single match, CPU vs CPU at the MCG | – | 124 | – | – | Doesn't cap its own frame rate (see below) |
+| AFL Live 2 | Single match, CPU vs CPU (random teams and venue) | – | 30 | – | – |  |
 | Afro Samurai | Village tutorial fight | – | – | 30 | 30 |  |
 | Alan Wake | Opening nightmare on the mountain road | – | – | 30 | 30 |  |
 | Assassin's Creed | The Animus tutorial crowd | – | 30 | 30 | – |  |
@@ -57,6 +61,7 @@ smoother.
 | BioShock | The plane crash, first control | 30 | 30 | 30 | 30 |  |
 | BioShock 2 | Adonis Luxury Resort | – | 30 | – | 30 |  |
 | Birds of Steel | Takeoff tutorial, the fighter on the island airstrip | – | – | 60 | – |  |
+| Black College Football: The Xperience | Play Now, the opening coin toss | – | 30 | – | – |  |
 | Blades of Time | Chapter 1, the first fight on the stone stairs | 30 | – | – | – |  |
 | Bladestorm: The Hundred Years' War | New game, character creation in the tavern | – | – | 30 | – |  |
 | BlazBlue: Calamity Trigger | Training, Ragna vs the training dummy | – | – | 60 | – | The fighters are drawn in the wrong colours (the menus and portraits are right) |
@@ -84,6 +89,7 @@ smoother.
 | Captain America: Super Soldier | The trench at first control | 60 | 60 | 60 | 60 | Occasionally starts to a black screen (one start in four in testing); starting the game again gets past it |
 | Carrier Command: Gaea Mission | Campaign, first control at the crash site | – | – | 60 | – |  |
 | Cartoon Network: Punch Time Explosion XL | Story mode, the first level | – | – | 60 | – |  |
+| Champion Jockey: G1 Jockey & Gallop Racer | Free Race, Greenfield 3200 m | – | 30 | – | – |  |
 | Chaotic: Shadow Warriors | Story mode, first control in the Forest of Life | – | – | 60 | – |  |
 | Chikyuu Boueigun 4 (Earth Defense Force 4, Japan) | Mission 1, the city street as the giant ants advance | 44 | – | – | – | Runs below its 60 limit in this scene, which draws far more than most |
 | Chromehounds | First training sortie | – | 60 | – | 60 |  |
@@ -93,14 +99,26 @@ smoother.
 | Clive Barker's Jericho | Opening scene in the transport | – | – | 60 | 60 |  |
 | Command & Conquer: Red Alert 3 | Tutorial, the first training map | – | – | 30 | – |  |
 | Conan | Chapter 1, first control in the temple hall | 30 | – | – | – |  |
+| Conflict: Denied Ops | Campaign, first control at the monastery | – | 30 | – | – |  |
 | The Conveni 200X | Scenario 1, the store placement map | – | – | 60 | – | Japanese release |
+| Crash Time 4: The Syndicate | Career, the first patrol in the city | – | 30 | – | – |  |
+| Crash Time 5: Undercover | Career, the first mission on an Alpine pass | – | 30 | – | – |  |
+| Crash Time: Autobahn Pursuit | The Cases, the first chase | – | 30 | – | – |  |
+| Crash: Mind over Mutant | First control in Crash's house | – | 30 | – | – |  |
+| Create | The first-run tutorial stage | – | 30 | – | – |  |
 | Cross Channel: In Memory of All People | New game, the first story line | – | – | 60 | – | Japanese release |
 | Crysis 2 | First mission | 31 | 31 | 31 | 31 |  |
 | Crysis 3 | First mission, inside the Liberty Dome | – | 31 | 31 | – |  |
+| CSI: Deadly Intent | Case 1, the first conversation at the crime scene | – | 60 | – | – |  |
+| CSI: Fatal Conspiracy | Episode 1, the first crime scene | – | 60 | – | – |  |
+| Dark | First control in the night club | – | 175 | – | – | Doesn't cap its own frame rate (see below). The club scene renders almost black |
+| Dark Messiah of Might and Magic: Elements | Prologue, first control on the canyon ledge | – | 30 | – | – |  |
 | Dark Souls | Undead Asylum | – | 30 | 30 | – |  |
 | Dark Souls II | Things Betwixt, the first glade | – | 60 | 60 | 60 |  |
+| Darkest of Days | Little Bighorn, first control on the hillside | – | 205 | – | – | Doesn't cap its own frame rate (see below) |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 | 60 | 60 |  |
+| Dead or Alive Xtreme 2 | New Zack Island, the Day 1 map | – | 30 | – | – |  |
 | Dead Space | Opening cutscene, the Kellion's cockpit | – | 30 | 30 | 30 |  |
 | Dead Space 3 | Prologue, first control in the blizzard | 30 | – | – | – |  |
 | Dead to Rights: Retribution | Prologue | 30 | 30 | 30 | – |  |
@@ -119,6 +137,7 @@ smoother.
 | The Elder Scrolls IV: Oblivion | Imperial Prison cell | – | – | 30 | 30 |  |
 | The Elder Scrolls V: Skyrim | Opening cart ride to Helgen | 30 | 30 | 30 | 30 | Sometimes crashes or stops responding in play; being worked on |
 | Enchanted Arms | Opening battle | – | 30 | – | 30 |  |
+| Eragon | First level, the forest clearing | – | 60 | – | – |  |
 | F.E.A.R. | Instant Action, Distribution | – | 30 | 30 | 30 |  |
 | F1 2011 | Time Trial, Melbourne | – | – | 30 | 30 |  |
 | Fable II | Childhood, Bowerstone at night | – | 30 | 29 | 30 |  |
@@ -209,6 +228,7 @@ smoother.
 | NBA Ballers: Chosen One | 1-on-1 game | 60 | 60 | 59 | 60 | A built-in game patch fixes the game's own loading hang |
 | NBA Live 09 | Practice gym | – | 60 | 60 | 60 | Can crash loading the practice gym if buttons are pressed during the opening movies |
 | NBA Street Homecourt | Venice Beach game | 60 | 60 | 60 | 60 | Can stall on the EA SPORTS BIG logo at start-up |
+| NCAA Football 14 | Exhibition, the opening coin toss | – | 30 | – | – |  |
 | Need for Speed: Most Wanted | Quick Race, Ironwood Estates, on the start line | – | – | 60 | 60 |  |
 | Need for Speed: ProStreet | Race Day, Portland, on the grid | – | – | 60 | 60 |  |
 | Need for Speed: The Run | Stage 1, the car-crusher escape | 30 | 30 | 30 | 30 | Sometimes stops in this opening scene |
@@ -356,8 +376,8 @@ at the end and hit no GPU error. Notes list the problems still open in these gam
 problems fixed before these runs are not listed.
 
 Mafia II, Saints Row IV, 50 Cent: Blood on the Sand, Juiced 2: Hot Import
-Nights and Blood Bowl don't limit their own frame rate, so they run as fast as
-the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
+Nights, Blood Bowl, AFL Live, Dark and Darkest of Days don't limit their own
+frame rate, so they run as fast as the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
 Graphics settings. Frogger: Hyper Arcade Edition doesn't limit its frame rate
 either. The game-select screen of Worms Collection is uncapped in
 the same way, but the Worms menu the test measures holds 60.
