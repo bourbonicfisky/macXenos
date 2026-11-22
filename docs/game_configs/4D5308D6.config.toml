@@ -1,0 +1,15 @@
+# macXenos built-in per-title config: Fable III (4D5308D6).
+# The Prince/Princess choice on the misty hill (the menu scene) draws through
+# vertex shaders that export to memory with a render target bound
+# (MetalMemexportUnrouted class=rasterizing-vertex: 6 per boot by the choice,
+# 17 by the first bedroom). With that export class off (the Metal default)
+# the far hills and the mist break into flat grey and white slabs and the sky
+# is blown out to plain white (4 of 4 boots). Routed, the mist is blue and
+# the clouds and far hills render (4 of 4 boots); the menu stays at 30 fps,
+# 9.0 commits/frame and ~380 draws/frame either way. In the first bedroom the
+# picture is the same and the game issues 2135 draws/frame instead of 6364
+# (13.2 vs 14.7 commits/frame, 30 fps). The hang after the choice's save
+# (title_issues) happens with it off as well (9 of 11 boots off, 9 of 10 on).
+# (M4 mini + M4 Pro, release/1.1 fff0b939b, 2026-11-21)
+[GPU]
+metal_memexport_raster = true
