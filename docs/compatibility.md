@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 228 of them. Each one
+These are the games macXenos is tested with regularly: 233 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -10,6 +10,8 @@ The games were split between them, so many ran on only one; a dash means that
 Mac didn't run the game in this round. The M4 mini column is partial for now:
 its run stopped part-way and will be completed. A few rows no Mac measured in
 this round keep figures from earlier builds and are marked "(earlier build)".
+Five games added on November 22 were measured only on the M4 mini, with a 1.1
+development build.
 The M5 Max column is from an M5 Max Mac Studio, in runs between November 14
 and 16 (most of them with the 1.0.1 release candidate) that are still filling
 the column in.
@@ -54,6 +56,7 @@ smoother.
 | Bionic Commando | First level | – | – | 60 | 60 |  |
 | BioShock | The plane crash, first control | 30 | 30 | 30 | 30 |  |
 | BioShock 2 | Adonis Luxury Resort | – | 30 | – | 30 |  |
+| Blades of Time | Chapter 1, the first fight on the stone stairs | 30 | – | – | – |  |
 | Blitz: The League II | Pause menu over the opening kickoff | – | – | 43 | 60 | Can stop during start-up (rare). Not measured on the M4 Macs in this round: their tests didn't reach this scene |
 | Brothers in Arms: Hell's Highway | First chapter, the hospital | – | – | 30 | 30 |  |
 | Bully: Scholarship Edition | Bullworth campus entrance | 60 | 60 | 60 | 60 |  |
@@ -70,10 +73,12 @@ smoother.
 | Call of Duty: Modern Warfare 3 | First mission, Black Tuesday | – | 60 | – | 60 |  |
 | Call of Juarez: Bound in Blood | Chapter 1, the trenches | – | – | 60 | 60 |  |
 | Captain America: Super Soldier | The trench at first control | 60 | 60 | 60 | 60 | Occasionally starts to a black screen (one start in four in testing); starting the game again gets past it |
+| Chikyuu Boueigun 4 (Earth Defense Force 4, Japan) | Mission 1, the city street as the giant ants advance | 44 | – | – | – | Runs below its 60 limit in this scene, which draws far more than most |
 | Chromehounds | First training sortie | – | 60 | – | 60 |  |
 | The Chronicles of Riddick: Assault on Dark Athena | Butcher Bay, the cell block | – | 30 | – | 30 |  |
 | Clash of the Titans: The Videogame | First control on the beach | – | 30 | – | 30 |  |
 | Clive Barker's Jericho | Opening scene in the transport | – | – | 60 | 60 |  |
+| Conan | Chapter 1, first control in the temple hall | 30 | – | – | – |  |
 | Crysis 2 | First mission | 31 | 31 | 31 | 31 |  |
 | Crysis 3 | First mission, inside the Liberty Dome | – | 31 | 31 | – |  |
 | Dark Souls | Undead Asylum | – | 30 | 30 | – |  |
@@ -81,6 +86,7 @@ smoother.
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 | 60 | 60 |  |
 | Dead Space | Opening cutscene, the Kellion's cockpit | – | 30 | 30 | 30 |  |
+| Dead Space 3 | Prologue, first control in the blizzard | 30 | – | – | – |  |
 | Dead to Rights: Retribution | Prologue | 30 | 30 | 30 | – |  |
 | Def Jam: Icon | Exhibition fight | – | – | 30 | 30 |  |
 | Deus Ex: Human Revolution | Sarif Industries, Megan's lab | – | – | 30 | 30 |  |
@@ -138,6 +144,7 @@ smoother.
 | The Incredible Hulk | First story scene | 30 | 30 | 30 | 30 | The Hulk isn't visible and doesn't respond in this scene; may be by design |
 | Infinite Undiscovery | Opening scene in the dungeon | – | – | 30 | 30 |  |
 | Iron Man | First mission, Escape | – | 60 | – | 60 |  |
+| Juiced 2: Hot Import Nights | Career start, the driver intro before the first challenge | 104 | – | – | – | Doesn't cap its own frame rate (see below) |
 | Jumper: Griffin's Story | The courtyard fight tutorial | – | – | 60 | 60 |  |
 | Jurassic Park: The Game | Episode 1 opening | – | – | 60 | 60 |  |
 | Jurassic: The Hunted | First level, the jungle path | 30 | 30 | 30 | 30 | In the opening walk, a vertical seam in the lighting runs down the right of the picture |
@@ -327,9 +334,9 @@ Every figure in the tables comes from a test where the game was still running
 at the end and hit no GPU error. Notes list the problems still open in these games;
 problems fixed before these runs are not listed.
 
-Mafia II, Saints Row IV and 50 Cent: Blood on the Sand don't limit their own
-frame rate, so they run as fast as the Mac allows, and the table measures them
-that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
+Mafia II, Saints Row IV, 50 Cent: Blood on the Sand and Juiced 2: Hot Import
+Nights don't limit their own frame rate, so they run as fast as the Mac
+allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
 Graphics settings. Frogger: Hyper Arcade Edition doesn't limit its frame rate
 either. The game-select screen of Worms Collection is uncapped in
 the same way, but the Worms menu the test measures holds 60.
