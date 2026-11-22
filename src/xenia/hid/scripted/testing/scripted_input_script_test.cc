@@ -313,6 +313,38 @@ player = 4
   }
 }
 
+TEST_CASE("script parser reads the optional start_on_keystroke field",
+          "[hid][scripted][parser]") {
+  const std::string steps = "[[step]]\nmarker = \"done\"\n";
+  ScriptLoadResult omitted = ParseInputScript(MakeDocument(steps));
+  REQUIRE(omitted);
+  REQUIRE_FALSE(omitted.script->start_on_keystroke());
+
+  for (bool value : {true, false}) {
+    ScriptLoadResult result = ParseInputScript(MakeDocument(
+        steps, std::string(R"(
+version = 1
+name = "test script"
+expected_title_id = "1234ABCD"
+player = 0
+start_on_keystroke = )") + (value ? "true" : "false") + "\n"));
+    INFO(result.error);
+    REQUIRE(result);
+    REQUIRE(result.script->start_on_keystroke() == value);
+  }
+
+  for (std::string_view bad : {"1", "\"true\"", "0"}) {
+    RequireFailureContaining(
+        MakeDocument(steps, std::string(R"(
+version = 1
+name = "test script"
+expected_title_id = "1234ABCD"
+player = 0
+start_on_keystroke = )") + std::string(bad) + "\n"),
+        "'start_on_keystroke' must be a boolean");
+  }
+}
+
 TEST_CASE("script parser rejects ambiguous and invalid step kinds",
           "[hid][scripted][parser][negative]") {
   SECTION("step has no kind") {

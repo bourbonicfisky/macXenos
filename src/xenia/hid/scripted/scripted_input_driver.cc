@@ -232,19 +232,22 @@ X_RESULT ScriptedInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
     out_keystroke->user_index = static_cast<uint8_t>(script_->player());
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  // A keystroke poll reads (and, if it is the first poll, starts) the same
-  // timeline as GetState: some menus read only keystrokes
-  // (XamInputGetKeystrokeEx; Banjo-Kazooie: Nuts & Bolts), and some titles
-  // poll only keystrokes before their title screen (The Legend of Spyro:
-  // Dawn of the Dragon), so waiting for a state poll would never start it.
-  NoteTimelineStart("keystroke");
-  if (!timeline_->completed()) {
-    CacheState(timeline_->Poll());
-  } else if (!live_file_.empty()) {
-    CacheState(PollLive(now_function_()));
-  }
-  if (transition_telemetry_) {
-    LogTransitionObservation();
+  // Once the timeline runs, keystroke polls follow it: some menus read only
+  // keystrokes (XamInputGetKeystrokeEx; Banjo-Kazooie: Nuts & Bolts). By
+  // default only the first state poll starts it, so existing routes keep
+  // their anchor; a profile with start_on_keystroke = true also lets the
+  // first keystroke poll start it, for titles that poll only keystrokes
+  // before their title screen (The Legend of Spyro: Dawn of the Dragon).
+  if (timeline_->started() || script_->start_on_keystroke()) {
+    NoteTimelineStart("keystroke");
+    if (!timeline_->completed()) {
+      CacheState(timeline_->Poll());
+    } else if (!live_file_.empty()) {
+      CacheState(PollLive(now_function_()));
+    }
+    if (transition_telemetry_) {
+      LogTransitionObservation();
+    }
   }
   if (!out_keystroke) {
     return X_ERROR_EMPTY;
@@ -419,7 +422,7 @@ void ScriptedInputDriver::IngestLiveLines(
       script_->expected_title_id(), script_->player(), std::move(steps),
       static_cast<uint32_t>(
           std::min<uint64_t>(expanded, kMaximumExpandedTransitions)),
-      std::chrono::milliseconds(nominal_ms));
+      std::chrono::milliseconds(nominal_ms), script_->start_on_keystroke());
   live_timeline_ = std::make_unique<ScriptedInputTimeline>(
       script, now_function_, [this](const TimelineEvent& event) {
         if (event.type == TimelineEventType::kMarker) {

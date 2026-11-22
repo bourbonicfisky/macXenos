@@ -62,7 +62,8 @@ class InputScript final {
   InputScript(std::filesystem::path canonical_path, uint64_t content_digest,
               std::string name, std::string expected_title_id, uint32_t player,
               std::vector<ScriptStep> steps, uint32_t expanded_transition_count,
-              std::chrono::milliseconds nominal_duration);
+              std::chrono::milliseconds nominal_duration,
+              bool start_on_keystroke = false);
 
   uint32_t version() const { return kScriptVersion; }
   const std::filesystem::path& canonical_path() const {
@@ -82,6 +83,10 @@ class InputScript final {
   std::chrono::milliseconds nominal_duration() const {
     return nominal_duration_;
   }
+  // Optional top-level field 'start_on_keystroke' (default false): when set,
+  // the first eligible keystroke poll may start the timeline, not only the
+  // first state poll.
+  bool start_on_keystroke() const { return start_on_keystroke_; }
 
  private:
   const std::filesystem::path canonical_path_;
@@ -92,6 +97,7 @@ class InputScript final {
   const std::vector<ScriptStep> steps_;
   const uint32_t expanded_transition_count_;
   const std::chrono::milliseconds nominal_duration_;
+  const bool start_on_keystroke_;
 };
 
 struct ScriptLoadResult {
