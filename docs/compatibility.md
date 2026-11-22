@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 303 of them. Each one
+These are the games macXenos is tested with regularly: 304 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -218,6 +218,7 @@ smoother.
 | Kingdoms of Amalur: Reckoning | First control in the Well of Souls | – | – | – | 30 | The lower half of the picture renders black |
 | Knights Contract | New game, the prologue in the plague village | – | – | 30 | – |  |
 | L.A. Noire | Upon Reflection, the patrol car | – | 30 | 30 | 30 |  |
+| The Legend of Spyro: Dawn of the Dragon | First control in the arena, the Basic moves tutorial | – | – | 60 | – |  |
 | LEGO Batman: The Videogame | Episode 1-1, Gotham street | – | 60 | – | 60 |  |
 | LEGO Indiana Jones 2: The Adventure Continues | The college hub | 60 | 60 | 60 | 60 |  |
 | LEGO Indiana Jones: The Original Adventures | The Lost Temple, first control | 60 | 60 | 60 | 60 |  |
@@ -342,12 +343,13 @@ smoother.
 
 ## Xbox Live Arcade
 
-50 Xbox Live Arcade games are tested too, in the same way. Most were measured
+51 Xbox Live Arcade games are tested too, in the same way. Most were measured
 in the same runs. Two that no Mac measured in this round keep figures from
 earlier builds (November 2 to 15). Sixteen added on November 22 were measured
 only on the M4 mini, with a 1.1 development build; they have dashes in the
 other columns. Lara Croft and the Guardian of Light has an M1 Max figure from
-its route validation on November 21.
+its route validation on November 21, and Trials HD, added later on November
+22, was measured only on the M1 Max.
 
 | Game | Test reaches | M4 mini · rc2 | M4 Pro · rc2 | M1 Max · rc2 | M5 Max | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
@@ -400,6 +402,7 @@ its route validation on November 21.
 | Teenage Mutant Ninja Turtles 1989 Arcade | Pause menu over Scene 1 | – | – | 60 | 60 |  |
 | Trials Evolution | First career event, on the start ramp | – | – | 60 | 60 |  |
 | Trials Fusion | Training Program 1, at the start line | 60 | 60 | 60 | 60 | A flat brown patch covers part of the track, and white specks show along some edges |
+| Trials HD | Tutorial track, at the start gate | – | – | 60 | – |  |
 | Virtua Fighter 2 | Pause menu over the first Arcade fight | – | – | 60 | 60 |  |
 
 Every figure in the tables comes from a test where the game was still running
