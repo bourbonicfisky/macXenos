@@ -1,0 +1,12 @@
+# macXenos built-in per-title config: Battlefield 3 (45410950).
+# The campaign (Disc 2, "Semper Fidelis" train) draws through vertex shaders
+# that export to memory with a render target bound (MetalMemexportUnrouted
+# class=rasterizing-vertex). With that export class off (the Metal default)
+# many train frames show garbage textures: lime blocks, white blotches,
+# striped door frames, rainbow floor tiles, the weapon as a black shard
+# (every boot). Routed, every live train frame is clean, at no measurable
+# cost: 29.9 vs 30.0 fps, 15.98 vs 15.68 commits/frame, 2412 vs 2420
+# draws/frame over 3-4 live cycles per arm. No faults, crashes or stalls.
+# (M4 Pro, release/1.1 722a4cab5 kit, 2026-11-22)
+[GPU]
+metal_memexport_raster = true
