@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 233 of them. Each one
+These are the games macXenos is tested with regularly: 252 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -10,8 +10,8 @@ The games were split between them, so many ran on only one; a dash means that
 Mac didn't run the game in this round. The M4 mini column is partial for now:
 its run stopped part-way and will be completed. A few rows no Mac measured in
 this round keep figures from earlier builds and are marked "(earlier build)".
-Five games added on November 22 were measured only on the M4 mini, with a 1.1
-development build.
+Games added on November 22 were measured on one Mac only (the M4 mini or the
+M1 Max), with a 1.1 development build.
 The M5 Max column is from an M5 Max Mac Studio, in runs between November 14
 and 16 (most of them with the 1.0.1 release candidate) that are still filling
 the column in.
@@ -56,8 +56,17 @@ smoother.
 | Bionic Commando | First level | – | – | 60 | 60 |  |
 | BioShock | The plane crash, first control | 30 | 30 | 30 | 30 |  |
 | BioShock 2 | Adonis Luxury Resort | – | 30 | – | 30 |  |
+| Birds of Steel | Takeoff tutorial, the fighter on the island airstrip | – | – | 60 | – |  |
 | Blades of Time | Chapter 1, the first fight on the stone stairs | 30 | – | – | – |  |
+| Bladestorm: The Hundred Years' War | New game, character creation in the tavern | – | – | 30 | – |  |
+| BlazBlue: Calamity Trigger | Training, Ragna vs the training dummy | – | – | 60 | – | The fighters are drawn in the wrong colours (the menus and portraits are right) |
+| BlazBlue: Continuum Shift Extend | Training, Ragna vs the training dummy | – | – | 60 | – | The fighters are drawn in the wrong colours (the menus and portraits are right) |
+| Blazing Angels 2: Secret Missions of WWII | Campaign mission 1, the Spitfire on the airshow runway | – | – | 30 | – |  |
+| Blazing Angels: Squadrons of WWII | Campaign mission 1, the biplane on the airfield | – | – | 60 | – |  |
 | Blitz: The League II | Pause menu over the opening kickoff | – | – | 43 | 60 | Can stop during start-up (rare). Not measured on the M4 Macs in this round: their tests didn't reach this scene |
+| Blood Bowl | One-off match, the kick-off on the pitch | – | – | 102 | – | Doesn't cap its own frame rate (see below) |
+| Blood Drive | Tournament, the first event among the zombies | – | – | 30 | – |  |
+| Bloodbath | Training, a free-for-all against bots | – | – | 30 | – |  |
 | Brothers in Arms: Hell's Highway | First chapter, the hospital | – | – | 30 | 30 |  |
 | Bully: Scholarship Edition | Bullworth campus entrance | 60 | 60 | 60 | 60 |  |
 | Burnout Paradise | Driving in Paradise City | – | 59 | 60 | 60 |  |
@@ -73,12 +82,19 @@ smoother.
 | Call of Duty: Modern Warfare 3 | First mission, Black Tuesday | – | 60 | – | 60 |  |
 | Call of Juarez: Bound in Blood | Chapter 1, the trenches | – | – | 60 | 60 |  |
 | Captain America: Super Soldier | The trench at first control | 60 | 60 | 60 | 60 | Occasionally starts to a black screen (one start in four in testing); starting the game again gets past it |
+| Carrier Command: Gaea Mission | Campaign, first control at the crash site | – | – | 60 | – |  |
+| Cartoon Network: Punch Time Explosion XL | Story mode, the first level | – | – | 60 | – |  |
+| Chaotic: Shadow Warriors | Story mode, first control in the Forest of Life | – | – | 60 | – |  |
 | Chikyuu Boueigun 4 (Earth Defense Force 4, Japan) | Mission 1, the city street as the giant ants advance | 44 | – | – | – | Runs below its 60 limit in this scene, which draws far more than most |
 | Chromehounds | First training sortie | – | 60 | – | 60 |  |
 | The Chronicles of Riddick: Assault on Dark Athena | Butcher Bay, the cell block | – | 30 | – | 30 |  |
+| Civil War: A Nation Divided | Fredericksburg, first control before the bridge | – | – | 30 | – |  |
 | Clash of the Titans: The Videogame | First control on the beach | – | 30 | – | 30 |  |
 | Clive Barker's Jericho | Opening scene in the transport | – | – | 60 | 60 |  |
+| Command & Conquer: Red Alert 3 | Tutorial, the first training map | – | – | 30 | – |  |
 | Conan | Chapter 1, first control in the temple hall | 30 | – | – | – |  |
+| The Conveni 200X | Scenario 1, the store placement map | – | – | 60 | – | Japanese release |
+| Cross Channel: In Memory of All People | New game, the first story line | – | – | 60 | – | Japanese release |
 | Crysis 2 | First mission | 31 | 31 | 31 | 31 |  |
 | Crysis 3 | First mission, inside the Liberty Dome | – | 31 | 31 | – |  |
 | Dark Souls | Undead Asylum | – | 30 | 30 | – |  |
@@ -99,6 +115,7 @@ smoother.
 | Dragon Age: Origins - Awakening | The road to Vigil's Keep | 30 | 30 | 30 | 30 |  |
 | Dynasty Warriors 6 | Challenge mode, Rampage | – | 60 | – | 60 |  |
 | Dynasty Warriors 7 | Wei story, chapter 1 | – | – | 60 | 60 |  |
+| Eat Lead: The Return of Matt Hazard | Chapter 1, the warehouse yard | – | – | 30 | – |  |
 | The Elder Scrolls IV: Oblivion | Imperial Prison cell | – | – | 30 | 30 |  |
 | The Elder Scrolls V: Skyrim | Opening cart ride to Helgen | 30 | 30 | 30 | 30 | Sometimes crashes or stops responding in play; being worked on |
 | Enchanted Arms | Opening battle | – | 30 | – | 30 |  |
@@ -144,6 +161,7 @@ smoother.
 | The Incredible Hulk | First story scene | 30 | 30 | 30 | 30 | The Hulk isn't visible and doesn't respond in this scene; may be by design |
 | Infinite Undiscovery | Opening scene in the dungeon | – | – | 30 | 30 |  |
 | Iron Man | First mission, Escape | – | 60 | – | 60 |  |
+| JASF: Jane's Advanced Strike Fighters | Campaign mission 1, the jet on the runway | – | – | 30 | – |  |
 | Juiced 2: Hot Import Nights | Career start, the driver intro before the first challenge | 104 | – | – | – | Doesn't cap its own frame rate (see below) |
 | Jumper: Griffin's Story | The courtyard fight tutorial | – | – | 60 | 60 |  |
 | Jurassic Park: The Game | Episode 1 opening | – | – | 60 | 60 |  |
@@ -207,6 +225,7 @@ smoother.
 | Portal 2 | Relaxation Vault | – | 30 | 30 | 30 |  |
 | Prince of Persia: The Forgotten Sands | Opening | 30 | 30 | 30 | 30 |  |
 | Project Gotham Racing 3 | Street race in Tokyo, on the grid | – | 30 | 30 | 30 |  |
+| Project Sylpheed: Arc of Deception | Stage 1, the asteroid field | – | – | 60 | – |  |
 | Pure | Tutorial ride | – | – | 30 | 30 |  |
 | Quantum Theory | First control in the Tower | 30 | 30 | 30 | 30 |  |
 | Rage | Campaign opening | – | 60 | 60 | 60 |  |
@@ -272,11 +291,12 @@ smoother.
 
 ## Xbox Live Arcade
 
-49 Xbox Live Arcade games are tested too, in the same way. Most were measured
+50 Xbox Live Arcade games are tested too, in the same way. Most were measured
 in the same runs. Two that no Mac measured in this round keep figures from
 earlier builds (November 2 to 15). Sixteen added on November 22 were measured
 only on the M4 mini, with a 1.1 development build; they have dashes in the
-other columns.
+other columns. Lara Croft and the Guardian of Light has an M1 Max figure from
+its route validation on November 21.
 
 | Game | Test reaches | M4 mini · rc2 | M4 Pro · rc2 | M1 Max · rc2 | M5 Max | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
@@ -304,6 +324,7 @@ other columns.
 | The King of Fighters '98 Ultimate Match | Arcade Play, the first fight | – | – | 60 | 60 |  |
 | The King of Fighters 2002 Unlimited Match | Team Play, a CPU vs CPU team match | 60 | – | – | – | Tested as the trial |
 | KOF SKY STAGE | Pause menu over stage 1 | 60 | – | – | – | Tested as the trial |
+| Lara Croft and the Guardian of Light | The Temple of Light entrance, the first bomb prompt | – | – | 30 | – |  |
 | Marvel Puzzle Quest: Dark Reign | The first match board | – | – | 30 | 30 |  |
 | Matt Hazard: Blood Bath and Beyond | The Hate Boat, the pool deck | – | – | 60 | 60 |  |
 | Mega Man 10 | Solar Man's stage, the first room | 60 | – | – | – | Tested as the trial |
@@ -334,9 +355,9 @@ Every figure in the tables comes from a test where the game was still running
 at the end and hit no GPU error. Notes list the problems still open in these games;
 problems fixed before these runs are not listed.
 
-Mafia II, Saints Row IV, 50 Cent: Blood on the Sand and Juiced 2: Hot Import
-Nights don't limit their own frame rate, so they run as fast as the Mac
-allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
+Mafia II, Saints Row IV, 50 Cent: Blood on the Sand, Juiced 2: Hot Import
+Nights and Blood Bowl don't limit their own frame rate, so they run as fast as
+the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
 Graphics settings. Frogger: Hyper Arcade Edition doesn't limit its frame rate
 either. The game-select screen of Worms Collection is uncapped in
 the same way, but the Worms menu the test measures holds 60.
