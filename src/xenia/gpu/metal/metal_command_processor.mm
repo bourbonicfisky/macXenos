@@ -16508,9 +16508,23 @@ bool MetalCommandProcessor::IssueCopy() {
         const bool array_dest =
             resolve_info.copy_dest_info.copy_dest_array ||
             resolve_info.copy_dest_info.copy_dest_slice;
+        // The shared copy shaders run here in their unscaled variants only,
+        // against the 1x guest destination. At a draw resolution scale the
+        // shared selector still sizes the dispatch for scaled pixels, so the
+        // unscaled shader resolves the wrong EDRAM samples and writes past
+        // the destination (Dead Space 3 builds its 32x32x32 colour-grading
+        // LUT from slice resolves; at 2x and 3x every 3D scene was false
+        // colour). Scaled sessions take the CPU writeback, which picks the
+        // representative sample. XE_METAL_SHARED_RESOLVE_SCALED=1 restores
+        // the shared route at scale.
+        static const bool s_shared_resolve_scaled = ParseMetalEnvironmentFlag(
+            std::getenv("XE_METAL_SHARED_RESOLVE_SCALED"), false);
+        const bool resolve_scaled =
+            draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1;
         const bool shared_resolve_route =
-            SharedResolveShadersEnabled() ||
-            (array_dest && SharedResolveArraysEnabled());
+            (!resolve_scaled || s_shared_resolve_scaled) &&
+            (SharedResolveShadersEnabled() ||
+             (array_dest && SharedResolveArraysEnabled()));
         if (canonical_resolve) {
           // Direct colour resolve: read the open colour attachment instead of
           // packing it into canonical EDRAM first (scope closed at the end of
