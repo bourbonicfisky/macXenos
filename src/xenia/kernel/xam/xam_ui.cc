@@ -13,8 +13,10 @@
 #include <cfloat>
 #include <chrono>
 #include <cstdlib>
+#include <iterator>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "xenia/app/emulator_window.h"
 #include "xenia/base/logging.h"
@@ -405,22 +407,27 @@ static dword_result_t XamShowMessageBoxUi(
   // Headless: answer with the focused button. A box that comes straight back
   // was answered with a button that reopens it ("Select storage device" with
   // no selector to show): each repeat steps to the next button, so an
-  // unattended run gets past it.
+  // unattended run gets past it. Repeats are counted per message, so a loop
+  // of two alternating boxes (Knights Contract: "Create save data?" No, then
+  // "Start without save data?" No, then the device selector again) also
+  // steps.
   uint32_t headless_button = active_button;
   if (cvars::headless) {
+    struct Repeat {
+      std::chrono::steady_clock::time_point time;
+      uint32_t step;
+    };
     static std::mutex repeat_mutex;
-    static std::string repeat_text;
-    static std::chrono::steady_clock::time_point repeat_time;
-    static uint32_t repeat_step = 0;
+    static std::unordered_map<std::string, Repeat> repeats;
     std::lock_guard<std::mutex> lock(repeat_mutex);
     auto now = std::chrono::steady_clock::now();
-    if (text == repeat_text && now - repeat_time < std::chrono::seconds(5)) {
-      ++repeat_step;
-    } else {
-      repeat_step = 0;
+    const auto window = std::chrono::seconds(5);
+    for (auto it = repeats.begin(); it != repeats.end();) {
+      it = now - it->second.time >= window ? repeats.erase(it) : std::next(it);
     }
-    repeat_text = text;
-    repeat_time = now;
+    auto found = repeats.find(text);
+    uint32_t repeat_step = found != repeats.end() ? found->second.step + 1 : 0;
+    repeats[text] = Repeat{now, repeat_step};
     headless_button =
         (uint32_t(active_button) + repeat_step) % uint32_t(buttons.size());
   }
