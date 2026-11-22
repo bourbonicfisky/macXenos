@@ -225,11 +225,14 @@ TEST_CASE("scripted driver exposes the standard connected gamepad contract",
   REQUIRE(driver.SetState(0, &vibration) == X_ERROR_DEVICE_NOT_CONNECTED);
 
   X_INPUT_KEYSTROKE keystroke = {};
-  REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
-  REQUIRE(keystroke.user_index == 1);
-  REQUIRE(driver.GetKeystroke(XUserIndexAny, 0, &keystroke) == X_ERROR_EMPTY);
   REQUIRE(driver.GetKeystroke(0, 0, &keystroke) ==
           X_ERROR_DEVICE_NOT_CONNECTED);
+  // The first eligible keystroke poll starts the timeline (START goes down).
+  REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_SUCCESS);
+  REQUIRE(keystroke.user_index == 1);
+  REQUIRE(driver.GetKeystroke(XUserIndexAny, 0, &keystroke) ==
+          X_ERROR_SUCCESS);
+  REQUIRE(keystroke.user_index == 1);
 
   ControllerIdentity identity;
   REQUIRE(driver.GetControllerIdentity(1, &identity));
@@ -240,7 +243,7 @@ TEST_CASE("scripted driver exposes the standard connected gamepad contract",
   REQUIRE_FALSE(driver.GetControllerIdentity(1, nullptr));
 }
 
-TEST_CASE("scripted keystrokes follow a started timeline",
+TEST_CASE("scripted keystrokes start and follow the timeline",
           "[hid][scripted][driver]") {
   FakeClock clock;
   ScriptedInputDriver driver(nullptr, 0, ParseDriverScript(),
@@ -254,19 +257,21 @@ TEST_CASE("scripted keystrokes follow a started timeline",
     REQUIRE(keystroke.user_index == 1);
   };
 
-  // A keystroke query neither starts nor reads an unstarted timeline.
-  clock.Advance(1s);
-  REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
-  X_INPUT_STATE state = {};
-  REQUIRE(driver.GetState(1, &state) == X_ERROR_SUCCESS);
-  REQUIRE(state.gamepad.buttons == (X_INPUT_GAMEPAD_START | X_INPUT_GAMEPAD_A));
-
-  // Hold: START, A and the right trigger (239) go down in bit order; the left
+  // Arbitrary host time before the first poll is not consumed; the first
+  // keystroke poll starts the timeline, with no state poll at all. Hold:
+  // START, A and the right trigger (239) go down in bit order; the left
   // trigger (17) and the sticks (111, -222) stay under their thresholds.
+  clock.Advance(1s);
   next(ui::VirtualKey::kXInputPadStart, X_INPUT_KEYSTROKE_KEYDOWN);
   next(ui::VirtualKey::kXInputPadA, X_INPUT_KEYSTROKE_KEYDOWN);
   next(ui::VirtualKey::kXInputPadRTrigger, X_INPUT_KEYSTROKE_KEYDOWN);
   REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
+
+  // A later state poll reads the same, already running timeline.
+  X_INPUT_STATE state = {};
+  REQUIRE(driver.GetState(1, &state) == X_ERROR_SUCCESS);
+  REQUIRE(state.gamepad.buttons == (X_INPUT_GAMEPAD_START | X_INPUT_GAMEPAD_A));
+  REQUIRE(state.packet_number == 1);
 
   // Release, read through keystrokes alone: no GetState in between.
   clock.Advance(200ms);

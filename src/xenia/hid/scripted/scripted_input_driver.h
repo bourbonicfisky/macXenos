@@ -57,6 +57,9 @@ class ScriptedInputDriver final : public InputDriver {
  private:
   static ScriptedInputTimeline::Clock::time_point SteadyNow();
   void HandleTimelineEvent(const TimelineEvent& event);
+  // Logs which poll kind (state or keystroke) starts the timeline. Requires
+  // mutex_.
+  void NoteTimelineStart(const char* source);
   void CacheState(const GamepadState& state);
   // Both require mutex_ to be held by the caller.
   void LogTransitionObservation();

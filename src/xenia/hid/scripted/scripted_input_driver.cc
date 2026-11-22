@@ -187,6 +187,7 @@ X_RESULT ScriptedInputDriver::GetState(uint32_t user_index,
   if (transition_telemetry_) {
     ++poll_ordinal_;
   }
+  NoteTimelineStart("state");
   if (!timeline_->completed()) {
     CacheState(timeline_->Poll());
   } else if (!live_file_.empty()) {
@@ -231,18 +232,19 @@ X_RESULT ScriptedInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
     out_keystroke->user_index = static_cast<uint8_t>(script_->player());
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  // Keystrokes never start the timeline (the first GetState does), but once
-  // it runs they follow it: some menus read only keystrokes
-  // (XamInputGetKeystrokeEx; Banjo-Kazooie: Nuts & Bolts).
-  if (timeline_->started()) {
-    if (!timeline_->completed()) {
-      CacheState(timeline_->Poll());
-    } else if (!live_file_.empty()) {
-      CacheState(PollLive(now_function_()));
-    }
-    if (transition_telemetry_) {
-      LogTransitionObservation();
-    }
+  // A keystroke poll reads (and, if it is the first poll, starts) the same
+  // timeline as GetState: some menus read only keystrokes
+  // (XamInputGetKeystrokeEx; Banjo-Kazooie: Nuts & Bolts), and some titles
+  // poll only keystrokes before their title screen (The Legend of Spyro:
+  // Dawn of the Dragon), so waiting for a state poll would never start it.
+  NoteTimelineStart("keystroke");
+  if (!timeline_->completed()) {
+    CacheState(timeline_->Poll());
+  } else if (!live_file_.empty()) {
+    CacheState(PollLive(now_function_()));
+  }
+  if (transition_telemetry_) {
+    LogTransitionObservation();
   }
   if (!out_keystroke) {
     return X_ERROR_EMPTY;
@@ -424,6 +426,13 @@ void ScriptedInputDriver::IngestLiveLines(
           XELOGI("scripted_input_live marker '{}'", event.marker);
         }
       });
+}
+
+void ScriptedInputDriver::NoteTimelineStart(const char* source) {
+  if (timeline_->started()) {
+    return;
+  }
+  XELOGI("Scripted input timeline started by the first {} poll", source);
 }
 
 void ScriptedInputDriver::HandleTimelineEvent(const TimelineEvent& event) {
