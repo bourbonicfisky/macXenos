@@ -56,7 +56,7 @@ smoother.
 | Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 30 | 30 | 30 | Occasionally freezes at the boot logo or after the menu loads |
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 | 30 | 30 | 30 |  |
 | Batman: Arkham Origins | Blackgate rooftop | – | 30 | 30 | 30 |  |
-| Battlefield 3 | Semper Fidelis, the pause menu over the train fight | – | 30 | – | – | Tested on Easy, ending on the pause menu because the idle player dies quickly. Textures are corrupted in many frames |
+| Battlefield 3 | Semper Fidelis, the pause menu over the train fight | – | 30 | – | – | Tested on Easy, ending on the pause menu because the idle player dies quickly |
 | Battlefield: Bad Company | First level | – | – | 30 | – |  |
 | Bayonetta | Prologue, the clock tower fight | – | – | 60 | 60 |  |
 | Beautiful Katamari | Rolling practice | – | 60 | – | 60 |  |
