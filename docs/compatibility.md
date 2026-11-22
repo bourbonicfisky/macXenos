@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 297 of them. Each one
+These are the games macXenos is tested with regularly: 298 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -98,6 +98,7 @@ smoother.
 | Champion Jockey: G1 Jockey & Gallop Racer | Free Race, Greenfield 3200 m | – | 30 | – | – |  |
 | Chaotic: Shadow Warriors | Story mode, first control in the Forest of Life | – | – | 60 | – |  |
 | Chikyuu Boueigun 4 (Earth Defense Force 4, Japan) | Mission 1, the city street as the giant ants advance | 44 | – | – | – | Runs below its 60 limit in this scene, which draws far more than most |
+| Child of Eden | Stage 1, the Player Life tutorial card over the paused tunnel | 60 | – | – | – |  |
 | Chromehounds | First training sortie | – | 60 | – | 60 |  |
 | The Chronicles of Narnia: Prince Caspian | Level 1, Defend Cair Paravel | – | – | 30 | – | Tested without saving: the game's save step still loops |
 | The Chronicles of Riddick: Assault on Dark Athena | Butcher Bay, the cell block | – | 30 | – | 30 |  |
