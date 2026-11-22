@@ -37,13 +37,14 @@ class FakeClock {
   Clock::time_point now_ = Clock::time_point{};
 };
 
-std::shared_ptr<const InputScript> ParseDriverScript(uint32_t player = 1) {
+std::shared_ptr<const InputScript> ParseDriverScript(
+    uint32_t player = 1, bool start_on_keystroke = false) {
   const std::string document =
       "version = 1\n"
       "name = \"driver integration\"\n"
-      "expected_title_id = \"1234ABCD\"\n"
-      "player = " +
-      std::to_string(player) + R"(
+      "expected_title_id = \"1234ABCD\"\n" +
+      std::string(start_on_keystroke ? "start_on_keystroke = true\n" : "") +
+      "player = " + std::to_string(player) + R"(
 [[step]]
 buttons = ["start", "a"]
 left_trigger = 17
@@ -275,6 +276,46 @@ TEST_CASE("scripted keystrokes follow a started timeline",
   next(ui::VirtualKey::kXInputPadRTrigger, X_INPUT_KEYSTROKE_KEYUP);
   REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
   clock.Advance(1s);
+  REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
+}
+
+TEST_CASE("start_on_keystroke lets the first keystroke poll start the timeline",
+          "[hid][scripted][driver]") {
+  FakeClock clock;
+  ScriptedInputDriver driver(nullptr, 0, ParseDriverScript(1, true),
+                             [&clock] { return clock.Now(); });
+  X_INPUT_KEYSTROKE keystroke = {};
+  auto next = [&](ui::VirtualKey key, uint16_t flags) {
+    REQUIRE(driver.GetKeystroke(XUserIndexAny, 0, &keystroke) ==
+            X_ERROR_SUCCESS);
+    REQUIRE(keystroke.virtual_key == uint16_t(key));
+    REQUIRE(keystroke.flags == flags);
+    REQUIRE(keystroke.user_index == 1);
+  };
+
+  // Polls for another slot neither start nor consume the timeline.
+  clock.Advance(1s);
+  REQUIRE(driver.GetKeystroke(0, 0, &keystroke) ==
+          X_ERROR_DEVICE_NOT_CONNECTED);
+  clock.Advance(1s);
+
+  // The first eligible keystroke poll starts it, with no state poll at all.
+  next(ui::VirtualKey::kXInputPadStart, X_INPUT_KEYSTROKE_KEYDOWN);
+  next(ui::VirtualKey::kXInputPadA, X_INPUT_KEYSTROKE_KEYDOWN);
+  next(ui::VirtualKey::kXInputPadRTrigger, X_INPUT_KEYSTROKE_KEYDOWN);
+  REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
+
+  // A later state poll reads the same, already running timeline.
+  X_INPUT_STATE state = {};
+  REQUIRE(driver.GetState(1, &state) == X_ERROR_SUCCESS);
+  REQUIRE(state.gamepad.buttons == (X_INPUT_GAMEPAD_START | X_INPUT_GAMEPAD_A));
+  REQUIRE(state.packet_number == 1);
+
+  // The hold ends 200 ms after the keystroke poll that started it.
+  clock.Advance(200ms);
+  next(ui::VirtualKey::kXInputPadStart, X_INPUT_KEYSTROKE_KEYUP);
+  next(ui::VirtualKey::kXInputPadA, X_INPUT_KEYSTROKE_KEYUP);
+  next(ui::VirtualKey::kXInputPadRTrigger, X_INPUT_KEYSTROKE_KEYUP);
   REQUIRE(driver.GetKeystroke(1, 0, &keystroke) == X_ERROR_EMPTY);
 }
 

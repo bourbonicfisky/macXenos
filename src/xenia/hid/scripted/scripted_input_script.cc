@@ -157,7 +157,8 @@ InputScript::InputScript(std::filesystem::path canonical_path,
                          std::string expected_title_id, uint32_t player,
                          std::vector<ScriptStep> steps,
                          uint32_t expanded_transition_count,
-                         std::chrono::milliseconds nominal_duration)
+                         std::chrono::milliseconds nominal_duration,
+                         bool start_on_keystroke)
     : canonical_path_(std::move(canonical_path)),
       content_digest_(content_digest),
       name_(std::move(name)),
@@ -165,7 +166,8 @@ InputScript::InputScript(std::filesystem::path canonical_path,
       player_(player),
       steps_(std::move(steps)),
       expanded_transition_count_(expanded_transition_count),
-      nominal_duration_(nominal_duration) {}
+      nominal_duration_(nominal_duration),
+      start_on_keystroke_(start_on_keystroke) {}
 
 ScriptLoadResult ParseInputScript(std::string_view content,
                                   std::filesystem::path source_path) {
@@ -183,7 +185,8 @@ ScriptLoadResult ParseInputScript(std::string_view content,
 
   std::string error;
   if (!ValidateKeys(document,
-                    {"version", "name", "expected_title_id", "player", "step"},
+                    {"version", "name", "expected_title_id", "player",
+                     "start_on_keystroke", "step"},
                     "input script", &error)) {
     return Failure(std::move(error));
   }
@@ -215,6 +218,16 @@ ScriptLoadResult ParseInputScript(std::string_view content,
   }
   if (*player < 0 || *player > kMaximumPlayer) {
     return Failure("input script field 'player' must be in [0, 3]");
+  }
+
+  bool start_on_keystroke = false;
+  if (const toml::node* node = document.get("start_on_keystroke")) {
+    auto value = node->value_exact<bool>();
+    if (!value) {
+      return Failure(
+          "input script field 'start_on_keystroke' must be a boolean");
+    }
+    start_on_keystroke = *value;
   }
 
   const toml::array* step_array = document["step"].as_array();
@@ -378,7 +391,7 @@ ScriptLoadResult ParseInputScript(std::string_view content,
       std::move(source_path), digest, std::move(*name),
       std::move(*expected_title_id), static_cast<uint32_t>(*player),
       std::move(steps), static_cast<uint32_t>(expanded_transitions),
-      std::chrono::milliseconds(nominal_duration_ms));
+      std::chrono::milliseconds(nominal_duration_ms), start_on_keystroke);
   return {.script = std::move(script), .error = {}};
 }
 
