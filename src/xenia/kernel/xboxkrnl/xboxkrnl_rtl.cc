@@ -349,11 +349,15 @@ dword_result_t RtlUnicodeStringToAnsiString_entry(
     if (buffer_capacity < ansi_str.size() + 1) {
       // Too large - we just write what we can.
       result = X_STATUS_BUFFER_OVERFLOW;
-      memcpy(buffer_ptr, ansi_str.data(), buffer_capacity - 1);
+      if (buffer_capacity) {
+        memcpy(buffer_ptr, ansi_str.data(), buffer_capacity - 1);
+        buffer_ptr[buffer_capacity - 1] = 0;
+        destination_ptr->length = static_cast<uint16_t>(buffer_capacity - 1);
+      }
     } else {
       memcpy(buffer_ptr, ansi_str.data(), ansi_str.size() + 1);
+      destination_ptr->length = static_cast<uint16_t>(ansi_str.size());
     }
-    buffer_ptr[buffer_capacity - 1] = 0;  // \0
   }
   return result;
 }
@@ -929,9 +933,13 @@ void StoreContextRecord(uint8_t* p, const PPCContext* ctx, uint32_t iar,
     xe::store_and_swap<double>(p + kContextFpr + i * 8, ctx->f[i]);
   }
   xe::store_and_swap<uint32_t>(p + kContextUserModeControl, 0);
+  // SAT lives apart in vscr_sat, as mfvscr merges it into the low bit
   for (size_t i = 0; i < 4; ++i) {
-    xe::store_and_swap<uint32_t>(p + kContextVscr + i * 4,
-                                 ctx->vscr_vec.u32[i]);
+    uint32_t word = ctx->vscr_vec.u32[i];
+    if (i == 3) {
+      word |= ctx->vscr_sat & 1u;
+    }
+    xe::store_and_swap<uint32_t>(p + kContextVscr + i * 4, word);
   }
   for (size_t i = 0; i < 128; ++i) {
     for (size_t j = 0; j < 4; ++j) {
@@ -957,6 +965,7 @@ uint32_t LoadContextRecord(const uint8_t* p, PPCContext* ctx) {
     ctx->vscr_vec.u32[i] =
         xe::load_and_swap<uint32_t>(p + kContextVscr + i * 4);
   }
+  ctx->vscr_sat = static_cast<uint8_t>(ctx->vscr_vec.u32[3] & 1);
   for (size_t i = 0; i < 128; ++i) {
     for (size_t j = 0; j < 4; ++j) {
       ctx->v[i].u32[j] =

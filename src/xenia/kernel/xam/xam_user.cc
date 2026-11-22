@@ -113,7 +113,7 @@ X_HRESULT_result_t XamUserGetSigninInfo_entry(
   info.Zero();
 
   if (user_index >= XUserMaxUserCount) {
-    return X_E_NO_SUCH_USER;
+    return X_E_INVALIDARG;
   }
 
   if (!kernel_state()->xam_state()->IsUserSignedIn(user_index)) {
@@ -155,9 +155,11 @@ dword_result_t XamUserGetName_entry(dword_t user_index, dword_t buffer,
   // never exceed that limit.
   const auto& user_name = user_profile->name();
 
-  // buffer_len includes null-terminator. user_name does not.
-  const uint32_t bytes_to_copy = std::min(
-      buffer_len.value(), static_cast<uint32_t>(user_name.length()) + 1);
+  // buffer_len counts the null terminator that user_name lacks.
+  // A buffer_len of 0 takes the whole name.
+  const uint32_t name_bytes = static_cast<uint32_t>(user_name.length()) + 1;
+  const uint32_t bytes_to_copy =
+      buffer_len ? std::min(buffer_len.value(), name_bytes) : name_bytes;
 
   char* str_buffer = kernel_memory()->TranslateVirtual<char*>(buffer);
   xe::string_util::copy_truncating(str_buffer, user_name, bytes_to_copy);
@@ -245,6 +247,13 @@ uint32_t XamUserReadProfileSettingsEx(
   auto run = [=](uint32_t& extended_error, uint32_t& length) {
     extended_error = 0;
     length = 0;
+
+    // An XUID array with no XUIDs or more than 16 fails after the buffer size
+    // check.
+    if (xuids && (!xuid_count || xuid_count > 16)) {
+      extended_error = X_E_INVALIDARG;
+      return X_ERROR_FUNCTION_FAILED;
+    }
 
     auto user_profile = kernel_state()->xam_state()->GetUserProfile(user_index);
 
@@ -440,6 +449,10 @@ DECLARE_XAM_EXPORT1(XamUserCheckPrivilege, kUserProfiles, kStub);
 
 dword_result_t XamUserContentRestrictionGetFlags_entry(dword_t user_index,
                                                        lpdword_t out_flags) {
+  if (user_index >= XUserMaxUserCount && user_index != XUserIndexAny) {
+    return X_ERROR_INVALID_PARAMETER;
+  }
+
   if (!kernel_state()->xam_state()->IsUserSignedIn(user_index)) {
     return X_ERROR_NO_SUCH_USER;
   }
@@ -693,7 +706,7 @@ dword_result_t XamUserCreateTitlesPlayedEnumerator_entry(
 
   const auto user = kernel_state()->xam_state()->GetUserProfile(user_index);
   if (!user) {
-    return X_ERROR_INVALID_PARAMETER;
+    return X_ERROR_FUNCTION_FAILED;
   }
 
   auto e = object_ref<XTitleEnumerator>(
@@ -796,8 +809,9 @@ dword_result_t XamParseGamerTileKey_entry(pointer_t<X_USER_DATA> key_ptr,
     return X_ERROR_INVALID_PARAMETER;
   }
 
+  // A key that isn't a string, or isn't hex, succeeds without being parsed
   if (key_ptr->type != X_USER_DATA_TYPE::WSTRING) {
-    return X_ERROR_INVALID_PARAMETER;
+    return X_ERROR_SUCCESS;
   }
 
   if (key_ptr->data.unicode.size > 0x64) {
@@ -821,7 +835,7 @@ dword_result_t XamParseGamerTileKey_entry(pointer_t<X_USER_DATA> key_ptr,
                   [](unsigned char c) { return std::isxdigit(c); });
 
   if (!is_valid_hex_string) {
-    return X_ERROR_INVALID_PARAMETER;
+    return X_ERROR_SUCCESS;
   }
 
   const GamerPictureKey* gamer_picture_key =
@@ -858,59 +872,71 @@ dword_result_t XamReadTileToTexture_entry(dword_t tile_type, dword_t title_id,
                                           lpvoid_t buffer_ptr, dword_t stride,
                                           dword_t tile_height,
                                           dword_t overlapped_ptr) {
-  if (!buffer_ptr) {
-    return X_ERROR_INVALID_PARAMETER;
-  }
-
-  size_t buffer_size = size_t(stride) * size_t(tile_height);
-
+  // Every failure is ERROR_FUNCTION_FAILED and leaves the texture untouched.
+  // The extended error says where the read stopped. Tiles read by key pass
+  // XUSER_INDEX_NONE, which isn't looked up here.
+  X_HRESULT extended_error = X_E_SUCCESS;
+  std::span<const uint8_t> tile;
   auto user = kernel_state()->xam_state()->GetUserProfile(user_index);
   if (!user) {
-    return X_ERROR_INVALID_PARAMETER;
+    extended_error = user_index < XUserMaxUserCount
+                         ? X_E_NO_SUCH_USER
+                         : X_HRESULT_FROM_WIN32(X_ERROR_FILE_NOT_FOUND);
+  } else {
+    tile = kernel_state()->xam_state()->user_tracker()->GetIcon(
+        user->xuid(), title_id, static_cast<XTileType>(tile_type.value()),
+        tile_id);
+    if (tile.empty()) {
+      extended_error = X_HRESULT_FROM_WIN32(X_ERROR_FILE_NOT_FOUND);
+    } else if (!buffer_ptr) {
+      extended_error = X_E_INVALIDARG;
+    }
   }
 
-  std::span<const uint8_t> tile =
-      kernel_state()->xam_state()->user_tracker()->GetIcon(
-          user->xuid(), title_id, static_cast<XTileType>(tile_type.value()),
-          tile_id);
-
-  if (tile.empty()) {
-    return X_ERROR_SUCCESS;
-  }
-
-  int width, height, channels;
+  int width = 0, height = 0, channels = 0;
   unsigned char* imageData =
-      stbi_load_from_memory(tile.data(), static_cast<int>(tile.size()), &width,
-                            &height, &channels, STBI_rgb_alpha);
-
-  size_t icon_dimmension_size = width * height;
-  std::fill_n(reinterpret_cast<uint8_t*>(buffer_ptr.host_address()),
-              icon_dimmension_size * sizeof(uint32_t), 0);
-
-  for (int i = 0; i < icon_dimmension_size; i++) {
-    unsigned char* pixel = &imageData[i * sizeof(uint32_t)];
-
-    // RGBA to ARGB. TODO: Find faster method!
-    // RGBA->AGBR
-    std::swap(pixel[0], pixel[3]);
-    // AGBR->ARBG
-    std::swap(pixel[1], pixel[3]);
-    // ARBG->ARGB
-    std::swap(pixel[2], pixel[3]);
+      extended_error
+          ? nullptr
+          : stbi_load_from_memory(tile.data(), static_cast<int>(tile.size()),
+                                  &width, &height, &channels, STBI_rgb_alpha);
+  if (!extended_error && !imageData) {
+    extended_error = X_E_FAIL;
   }
 
-  memcpy(buffer_ptr, imageData,
-         std::min(buffer_size, static_cast<size_t>(icon_dimmension_size *
-                                                   sizeof(uint32_t))));
+  if (imageData) {
+    const size_t icon_dimmension_size = size_t(width) * size_t(height);
+    for (size_t i = 0; i < icon_dimmension_size; i++) {
+      unsigned char* pixel = &imageData[i * sizeof(uint32_t)];
 
-  stbi_image_free(imageData);
+      // RGBA to ARGB. TODO: Find faster method!
+      // RGBA->AGBR
+      std::swap(pixel[0], pixel[3]);
+      // AGBR->ARBG
+      std::swap(pixel[1], pixel[3]);
+      // ARBG->ARGB
+      std::swap(pixel[2], pixel[3]);
+    }
 
+    const uint32_t row_size = std::min<uint32_t>(
+        stride, uint32_t(width) * uint32_t(sizeof(uint32_t)));
+    const uint32_t rows = std::min<uint32_t>(tile_height, uint32_t(height));
+    auto dest = reinterpret_cast<uint8_t*>(buffer_ptr.host_address());
+    for (uint32_t y = 0; y < rows; y++) {
+      std::memcpy(dest + size_t(y) * stride,
+                  imageData + size_t(y) * width * sizeof(uint32_t), row_size);
+    }
+
+    stbi_image_free(imageData);
+  }
+
+  const X_RESULT result =
+      extended_error ? X_ERROR_FUNCTION_FAILED : X_ERROR_SUCCESS;
   if (overlapped_ptr) {
-    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr,
-                                                X_ERROR_SUCCESS);
+    kernel_state()->CompleteOverlappedImmediateEx(overlapped_ptr, result,
+                                                  extended_error, 0);
     return X_ERROR_IO_PENDING;
   }
-  return X_ERROR_SUCCESS;
+  return result;
 }
 DECLARE_XAM_EXPORT1(XamReadTileToTexture, kUserProfiles, kStub);
 
@@ -920,7 +946,7 @@ dword_result_t XamWriteGamerTile_entry(
     dword_t small_tile_id, dword_t for_enumerate,
     pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
   if (user_index >= XUserMaxUserCount) {
-    return X_E_INVALIDARG;
+    return X_ERROR_FUNCTION_FAILED;
   }
 
   // What is 0x10 flag?
@@ -1108,9 +1134,11 @@ dword_result_t XamUserGetUserFlagsFromXUID_entry(qword_t xuid) {
 }
 DECLARE_XAM_EXPORT1(XamUserGetUserFlagsFromXUID, kUserProfiles, kImplemented);
 
+// A profile without a language or country, like an offline one, gets the
+// console's setting.
 dword_result_t XamUserGetOnlineLanguageFromXUID_entry(qword_t xuid) {
   const auto& user = kernel_state()->xam_state()->GetUserProfile(xuid);
-  if (!user) {
+  if (!user || !user->GetLanguage()) {
     return kernel_state()->xconfig()->ReadSetting<uint32_t>(
         XCONFIG_USER_CATEGORY, XCONFIG_USER_LANGUAGE);
   }
@@ -1121,7 +1149,7 @@ DECLARE_XAM_EXPORT1(XamUserGetOnlineLanguageFromXUID, kUserProfiles,
 
 dword_result_t XamUserGetOnlineCountryFromXUID_entry(qword_t xuid) {
   const auto& user = kernel_state()->xam_state()->GetUserProfile(xuid);
-  if (!user) {
+  if (!user || !user->GetCountry()) {
     return kernel_state()->xconfig()->ReadSetting<uint8_t>(
         XCONFIG_USER_CATEGORY, XCONFIG_USER_COUNTRY);
   }
@@ -1185,7 +1213,7 @@ dword_result_t XamUserGetUserTenure_entry(dword_t user_index,
                                           lpqword_t milestone_date_ptr,
                                           dword_t overlap_ptr) {
   if (!kernel_state()->xam_state()->IsUserSignedIn(user_index)) {
-    return X_E_INVALIDARG;
+    return X_E_NO_SUCH_USER;
   }
 
   const auto& user_profile =

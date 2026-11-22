@@ -37,7 +37,8 @@ uint32_t ToXdkProtectFlags(uint32_t protect) {
     result = X_PAGE_NOACCESS;
   } else if ((protect & kMemoryProtectRead) &&
              !(protect & kMemoryProtectWrite)) {
-    result = X_PAGE_READONLY;
+    // A page made read-only reports PAGE_USER_READONLY too.
+    result = X_PAGE_READONLY | X_PAGE_USER_READONLY;
   } else {
     result = X_PAGE_READWRITE;
   }
@@ -281,7 +282,7 @@ dword_result_t NtProtectVirtualMemory_entry(lpdword_t base_addr_ptr,
   *region_size_ptr = adjusted_size;
 
   if (old_protect) {
-    *old_protect = tmp_old_protect;
+    *old_protect = ToXdkProtectFlags(tmp_old_protect);
   }
 
   return X_STATUS_SUCCESS;
@@ -450,9 +451,18 @@ uint32_t xeMmAllocatePhysicalMemoryEx(uint32_t flags, uint32_t region_size,
   // by D3D/etc.
 
   // Check protection bits.
-  if (!(protect_bits & (X_PAGE_READONLY | X_PAGE_READWRITE))) {
-    XELOGE("MmAllocatePhysicalMemoryEx: bad protection bits");
-    return 0;
+  // 54540817 passes X_MEM_LARGE_PAGES | X_PAGE_WRITECOMBINE with no access
+  // bits for its front buffer, so treat a missing access mode as read/write.
+  const uint32_t kAccessProtectBits = X_PAGE_READONLY | X_PAGE_READWRITE |
+                                      X_PAGE_EXECUTE_READ |
+                                      X_PAGE_EXECUTE_READWRITE;
+
+  if (!(protect_bits & kAccessProtectBits)) {
+    XELOGW(
+        "MmAllocatePhysicalMemoryEx: no access mode in protection bits {:08X} "
+        "(flags {:08X}, size {:08X}), assuming read/write",
+        protect_bits, flags, region_size);
+    protect_bits |= X_PAGE_READWRITE;
   }
 
   // Either may be OR'ed into protect_bits:
@@ -609,7 +619,7 @@ dword_result_t xeMmQueryStatistics(
   const uint32_t size = sizeof(X_MM_QUERY_STATISTICS_RESULT);
 
   if (stats_ptr->size != size) {
-    return X_STATUS_BUFFER_TOO_SMALL;
+    return X_STATUS_INVALID_PARAMETER;
   }
 
   // Zero out the struct.

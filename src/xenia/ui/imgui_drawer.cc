@@ -64,7 +64,7 @@ ImGuiDrawer::ImGuiDrawer(xe::ui::Window* window, size_t z_order)
 
 ImGuiDrawer::~ImGuiDrawer() {
   SetPresenter(nullptr);
-  if (!dialogs_.empty()) {
+  if (is_input_listener_added_) {
     window_->RemoveInputListener(this);
     if (internal_state_) {
       ImGui::SetCurrentContext(internal_state_);
@@ -92,7 +92,10 @@ void ImGuiDrawer::AddDialog(ImGuiDialog* dialog) {
     // situation of removing the only dialog, then adding a dialog, from within
     // a dialog's Draw function, re-registering the ImGuiDrawer may result in
     // ImGui being drawn multiple times in the current frame.
-    window_->AddInputListener(this, z_order_);
+    if (!is_input_listener_added_) {
+      window_->AddInputListener(this, z_order_);
+      is_input_listener_added_ = true;
+    }
     if (presenter_) {
       presenter_->AddUIDrawerFromUIThread(this, z_order_);
     }
@@ -544,14 +547,14 @@ void ImGuiDrawer::SetPresenter(Presenter* new_presenter) {
     if (presenter_ == new_presenter) {
       return;
     }
-    if (!dialogs_.empty()) {
+    if (HasAnythingToDraw()) {
       presenter_->RemoveUIDrawerFromUIThread(this);
     }
     ImGuiIO& io = GetIO();
   }
   presenter_ = new_presenter;
   if (presenter_) {
-    if (!dialogs_.empty()) {
+    if (HasAnythingToDraw()) {
       presenter_->AddUIDrawerFromUIThread(this, z_order_);
     }
   }
@@ -595,7 +598,7 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
     return;
   }
 
-  if (dialogs_.empty() && notifications_.empty()) {
+  if (!HasAnythingToDraw()) {
     return;
   }
 
@@ -730,7 +733,14 @@ ImGuiIO& ImGuiDrawer::GetIO() {
   return ImGui::GetIO();
 }
 
-void ImGuiDrawer::OnKeyDown(KeyEvent& e) { OnKey(e, true); }
+void ImGuiDrawer::OnKeyDown(KeyEvent& e) {
+  OnKey(e, true);
+  // Text typed into a field stays away from the game's keyboard input.
+  // Releases still pass since the key may have gone down before the field.
+  if (GetIO().WantTextInput) {
+    e.set_handled(true);
+  }
+}
 
 void ImGuiDrawer::OnKeyUp(KeyEvent& e) { OnKey(e, false); }
 
@@ -909,18 +919,25 @@ void ImGuiDrawer::DetachIfLastWindowRemoved() {
   // only dialog, then adding a dialog, from within a dialog's Draw function,
   // re-registering the ImGuiDrawer may result in ImGui being drawn multiple
   // times in the current frame.
-  if (!dialogs_.empty() || !notifications_.empty() || IsDrawingDialogs()) {
+  if (!dialogs_.empty() || IsDrawingDialogs()) {
     return;
   }
-  if (presenter_) {
+
+  // Only dialogs take input, even if notifications remain.
+  if (is_input_listener_added_) {
+    window_->RemoveInputListener(this);
+    is_input_listener_added_ = false;
+
+    // Clear all input since no input will be received anymore, and when the
+    // drawer becomes active again, it'd have an outdated input state otherwise
+    // which will be persistent until new events actualize individual input
+    // properties.
+    ClearInput();
+  }
+
+  if (!HasAnythingToDraw() && presenter_) {
     presenter_->RemoveUIDrawerFromUIThread(this);
   }
-  window_->RemoveInputListener(this);
-  // Clear all input since no input will be received anymore, and when the
-  // drawer becomes active again, it'd have an outdated input state otherwise
-  // which will be persistent until new events actualize individual input
-  // properties.
-  ClearInput();
 }
 
 void ImGuiDrawer::UpdateGamepads() {

@@ -278,7 +278,7 @@ void ProfileManager::Login(const uint64_t xuid, const uint8_t user_index,
       logged_profiles_.begin(), logged_profiles_.end(),
       [xuid](const auto& entry) { return entry.second->xuid() == xuid; });
   if (it != logged_profiles_.end()) {
-    Logout(it->first);
+    Logout(it->first, notify);
   }
 
   // Whoever holds the slot asked for leaves it.
@@ -334,14 +334,12 @@ void ProfileManager::Logout(const uint8_t user_index, bool notify) {
 
 void ProfileManager::LoginMultiple(
     const std::map<uint8_t, uint64_t>& profiles) {
-  int slots_mask = 0;
   for (auto [slot, xuid] : profiles) {
     Login(xuid, slot, false);
-    slots_mask |= (1 << slot);
   }
 
   kernel_state_->BroadcastNotification(kXNotificationSystemSignInChanged,
-                                       slots_mask);
+                                       GetUsedUserSlots().to_ulong());
 }
 
 std::vector<uint64_t> ProfileManager::FindProfiles() const {

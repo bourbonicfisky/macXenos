@@ -969,6 +969,7 @@ dword_result_t NtQueryFullAttributesFile_entry(
   auto entry = kernel_state()->file_system()->ResolvePath(target_path);
   if (entry) {
     // Found.
+    entry->update();
     file_info->creation_time = entry->create_timestamp();
     file_info->last_access_time = entry->access_timestamp();
     file_info->last_write_time = entry->write_timestamp();
@@ -1100,15 +1101,21 @@ dword_result_t NtOpenSymbolicLinkObject_entry(
 DECLARE_XBOXKRNL_EXPORT1(NtOpenSymbolicLinkObject, kFileSystem, kImplemented);
 
 // https://docs.microsoft.com/en-us/windows/win32/devnotes/ntquerysymboliclinkobject
-dword_result_t NtQuerySymbolicLinkObject_entry(
-    dword_t handle, pointer_t<X_ANSI_STRING> target) {
+dword_result_t NtQuerySymbolicLinkObject_entry(dword_t handle,
+                                               pointer_t<X_ANSI_STRING> target,
+                                               lpdword_t returned_length_ptr) {
   auto symlink =
       kernel_state()->object_table()->LookupObject<XSymbolicLink>(handle);
   if (!symlink) {
     return X_STATUS_NO_SUCH_FILE;
   }
-  auto length = std::min(static_cast<size_t>(target->maximum_length),
-                         symlink->target().size());
+  const auto length = static_cast<uint32_t>(symlink->target().size());
+  if (returned_length_ptr) {
+    *returned_length_ptr = length;
+  }
+  if (length > target->maximum_length) {
+    return X_STATUS_BUFFER_TOO_SMALL;
+  }
   if (length > 0) {
     auto target_buf = kernel_memory()->TranslateVirtual(target->pointer);
     std::memcpy(target_buf, symlink->target().c_str(), length);
@@ -1165,6 +1172,25 @@ dword_result_t NtDeviceIoControlFile_entry(
   return X_STATUS_SUCCESS;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtDeviceIoControlFile, kFileSystem, kStub);
+
+// cache: is a host folder mounted for every title, so no STFS volume is made
+// over a cache partition and the caller's device object stays as it was.
+dword_result_t StfsCreateDevice_entry(lpvoid_t params, dword_t params_size) {
+  if (params_size != 0x58) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(StfsCreateDevice, kFileSystem, kStub);
+
+dword_result_t StfsControlDevice_entry(lpvoid_t device, dword_t control_code,
+                                       lpvoid_t buffer) {
+  if (control_code > 4) {
+    return X_STATUS_INVALID_DEVICE_REQUEST;
+  }
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(StfsControlDevice, kFileSystem, kStub);
 // device_extension_size = additional bytes of data (aligned up to 8 byte
 // granularity) that will be allocated at the tail of the resulting device
 // object. although it is allocated at the tail, it is accessed through a

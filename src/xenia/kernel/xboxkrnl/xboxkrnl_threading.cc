@@ -1541,7 +1541,7 @@ dword_result_t NtReleaseSemaphore_entry(dword_t sem_handle,
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
-  if (previous_count_ptr) {
+  if (previous_count_ptr && XSUCCEEDED(result)) {
     *previous_count_ptr = (uint32_t)previous_count;
   }
 
@@ -1651,6 +1651,9 @@ dword_result_t NtCreateTimer_entry(lpdword_t handle_ptr,
                                    lpvoid_t obj_attributes_ptr,
                                    dword_t timer_type) {
   // timer_type = NotificationTimer (0) or SynchronizationTimer (1)
+  if (timer_type > 1) {
+    return X_STATUS_INVALID_PARAMETER;
+  }
 
   // Check for an existing timer with the same name.
   auto existing_object =
@@ -2144,9 +2147,8 @@ DECLARE_XBOXKRNL_EXPORT3(KeAcquireSpinLockAtRaisedIrql, kThreading,
 
 dword_result_t KeTryToAcquireSpinLockAtRaisedIrql_entry(
     pointer_t<X_KSPINLOCK> lock_ptr, const ppc_context_t& ppc_ctx) {
-  // Lock.
+  // A lock that's held, even by this processor, is refused with 0.
   auto lock = reinterpret_cast<uint32_t*>(lock_ptr.host_address());
-  assert_true(lock_ptr->prcb_of_owner != static_cast<uint32_t>(ppc_ctx->r[13]));
   PrefetchForCAS(lock);
   if (!ppc_ctx->processor->GuestAtomicCAS32(
           ppc_ctx, 0, static_cast<uint32_t>(ppc_ctx->r[13]),
