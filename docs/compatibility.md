@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 298 of them. Each one
+These are the games macXenos is tested with regularly: 303 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -130,6 +130,8 @@ smoother.
 | Dark Souls II | Things Betwixt, the first glade | – | 60 | 60 | 60 |  |
 | Darkest of Days | Little Bighorn, first control on the hillside | – | 205 | – | – | Doesn't cap its own frame rate (see below) |
 | The Darkness | The opening car ride, the tunnel chase | – | – | – | 30 |  |
+| The Darkness II | The opening restaurant scene | – | – | – | 32 | The menus draw no text or items, and walls, carpet and suits in the restaurant render as coloured noise |
+| Darksiders | The pause menu over the ruined city at first control | – | – | – | 120 | Doesn't cap its own frame rate (see below). War renders as stretched streaks and some text is garbled |
 | Darksiders II | First control in the frozen Veil | – | – | – | 38 | Doesn't cap its own frame rate (see below). Huge stretched polygons cover the picture |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 | 60 | 60 |  |
@@ -137,6 +139,7 @@ smoother.
 | Dead Rising | 72 Hour Mode, the mall heliport | – | – | – | 30 | Once stayed on a loading screen after the roof-landing cutscene was skipped |
 | Dead Rising 2: Off the Record | The opening arena match | – | – | – | 30 |  |
 | Dead Space | Opening cutscene, the Kellion's cockpit | – | 30 | 30 | 30 |  |
+| Dead Space 2 | The pause menu over the opening hospital scene | – | – | – | 30 |  |
 | Dead Space 3 | Prologue, first control in the blizzard | 30 | – | – | – |  |
 | Dead to Rights: Retribution | Prologue | 30 | 30 | 30 | – |  |
 | Def Jam: Icon | Exhibition fight | – | – | 30 | 30 |  |
@@ -152,6 +155,7 @@ smoother.
 | Dynasty Warriors 7 | Wei story, chapter 1 | – | – | 60 | 60 |  |
 | Earth Defense Force 2017 | Mission 1, the city street under the mothership | – | – | – | 60 |  |
 | Earth Defense Force 2025 | Mission 1, the city crossing | – | – | – | 50 | Runs below its 60 limit in this scene, which draws far more than most |
+| Earth Defense Force: Insect Armageddon | Chapter 1, the pause menu over the helicopter ride | – | – | – | 30 |  |
 | Eat Lead: The Return of Matt Hazard | Chapter 1, the warehouse yard | – | – | 30 | – |  |
 | The Elder Scrolls IV: Oblivion | Imperial Prison cell | – | – | 30 | 30 |  |
 | The Elder Scrolls V: Skyrim | Opening cart ride to Helgen | 30 | 30 | 30 | 30 | Sometimes crashes or stops responding in play; being worked on |
@@ -328,6 +332,7 @@ smoother.
 | WALL-E | First level | – | – | 60 | 60 |  |
 | Wanted: Weapons of Fate | Combat training, target practice | – | 60 | – | 60 |  |
 | Warhammer 40,000: Space Marine | First fight with the orks | – | – | 30 | 30 |  |
+| Warriors Orochi 3 | Free Mode, the camp | – | – | – | 30 |  |
 | WET | First level, the tea house | – | 30 | – | 30 |  |
 | Wolfenstein | Train station, first control | – | – | 30 | – |  |
 | Worms Collection | Worms, main menu | 60 | 60 | 60 | 60 |  |
@@ -402,8 +407,8 @@ at the end and hit no GPU error. Notes list the problems still open in these gam
 problems fixed before these runs are not listed.
 
 Mafia II, Saints Row IV, 50 Cent: Blood on the Sand, Juiced 2: Hot Import
-Nights, Blood Bowl, AFL Live, Dark, Darkest of Days and Darksiders II don't
-limit their own frame rate, so they run as fast as the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
+Nights, Blood Bowl, AFL Live, Dark, Darkest of Days, Darksiders and Darksiders
+II don't limit their own frame rate, so they run as fast as the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
 Graphics settings. Frogger: Hyper Arcade Edition doesn't limit its frame rate
 either. The game-select screen of Worms Collection is uncapped in
 the same way, but the Worms menu the test measures holds 60.
