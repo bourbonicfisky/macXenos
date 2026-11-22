@@ -398,8 +398,8 @@ TEST_CASE("Packed color snapshots retain every scaled subpixel",
     }
     [hdr_source replaceRegion:MTLRegionMake2D(0, 0, width, height)
         mipmapLevel:0 withBytes:hdr.data() bytesPerRow:width * 8];
-    // CanonicalResolveParams (28 words), identical to the production layout.
-    uint32_t params[28] = {};
+    // CanonicalResolveParams (29 words), identical to the production layout.
+    uint32_t params[29] = {};
     params[1] = 1;  // pitch in tiles
     params[5] = uint32_t(edram.size());
     params[10] = 2;  // source k_2_10_10_10

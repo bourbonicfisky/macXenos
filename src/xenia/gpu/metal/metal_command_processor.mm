@@ -9011,6 +9011,20 @@ bool MetalCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                    : 0;
   reg::RB_DEPTHCONTROL norm_depth = draw_util::GetNormalizedDepthControl(regs);
   bool depth_bound = norm_depth.z_enable || norm_depth.stencil_enable;
+  if (norm_depth.z_enable) {
+    switch (norm_depth.zfunc) {
+      case xenos::CompareFunction::kGreater:
+      case xenos::CompareFunction::kGreaterEqual:
+        last_depth_pass_direction_ = 1;
+        break;
+      case xenos::CompareFunction::kLess:
+      case xenos::CompareFunction::kLessEqual:
+        last_depth_pass_direction_ = 2;
+        break;
+      default:
+        break;
+    }
+  }
   auto rb_depth_info = regs.Get<reg::RB_DEPTH_INFO>();
   // MSAA fast-clear fold (metal_msaa_clear_fold.h): a qualifying runtime
   // clear is presented to the rest of the draw as a 1x draw over the same
@@ -17552,7 +17566,8 @@ bool MetalCommandProcessor::IssueCopy() {
                        /*dest_swap=*/false,
                        /*raw_copy=*/false,
                        snap, MTLPixelFormatR32Float, rw, rh, strip_y_offset,
-                       1.0f, strip_x_offset);
+                       1.0f, strip_x_offset, /*dest_int_bits=*/0,
+                       last_depth_pass_direction_);
       } else if (snap) {
         resolved = render_target_cache_->ResolveDepthToSnapshot(
             frame_command_buffer_, span_base, span_row_length, span_rows,

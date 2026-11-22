@@ -1351,6 +1351,11 @@ struct CanonicalResolveParams {
   // the RAM texture's bits (the guest's integer fetch rescales by 2^bits-1).
   // 0 for packed destinations and fraction/float number formats.
   uint dest_int_bits;
+  // Scaled depth snapshots of multisampled surfaces only (see
+  // xe_resolve_snapshot_depth): the direction in which the depth test last
+  // used with this depth passes. 1: larger passes (GREATER/GEQUAL), 2: smaller
+  // passes (LESS/LEQUAL), 0: unknown. 0 everywhere else.
+  uint depth_pass_direction;
 };
 // The draw resolution scale (host pixels per guest pixel) implied by the tile
 // geometry, and the host pixel a resolve reads for a guest pixel: the
@@ -1891,6 +1896,126 @@ inline float4 xe_resolve_snapshot_value(float4 value,
   }
   return value;
 }
+// The depth a scaled snapshot holds at a host pixel of a multisampled source.
+// At 1x a depth resolve of sample k gives each guest pixel the depth at that
+// sample's offset from the pixel center. Scaled rasterization keeps the Xenos
+// sample positions inside each HOST pixel, so there sample k is only 1/scale of
+// that offset from the host pixel center. A game that lines a later pass up
+// with the sample then compares depth taken at another point of every sloped
+// surface: Unreal Engine 3 shifts the viewport of its single-sampled lighting
+// passes by the guest sample 0 offset and tests them GEQUAL, with a 1e-6
+// margin, against the depth it restored from this resolve, so above 1x the
+// test failed on whole triangles (Gears of War and Gears of War 2 characters
+// drawn without their lights). The snapshot instead holds the depth at the
+// host pixel center plus `scale` times the sample offset.
+//
+// Every Xenos sample offset is diagonal (|x| == |y|) and its opposite sample
+// (k ^ 1: 2x 0/1, 4x 0/1 and 2/3) lies on the same diagonal, so along that
+// line through the pixel centers h + m * dir, sample k of pixel m sits at
+// m + a and sample k ^ 1 at m - a. Depth is affine across a triangle. When a
+// sample lies on the target (2x MSAA at 3x), it is the value. Otherwise the
+// two pixels whose samples bracket the target each extrapolate their own pair
+// to it; on one triangle both give the same value, and across a mesh crease,
+// where neither the interpolation nor either side is reliably the triangle the
+// later pass draws, the one on the passing side of the last depth test is
+// taken, so a redraw of the same surface passes as it does at 1x (with the
+// direction unknown, the bracketing samples are interpolated). Where a
+// bracketing pixel is outside the resolved rectangle, the pixel's own pair is
+// extrapolated. Assumes the Xenos positions (XE_METAL_XENOS_SAMPLE_POSITIONS,
+// default on). XE_SCALED_MSAA_DEPTH=0 (XE_METAL_SCALED_MSAA_DEPTH=0) keeps
+// sample k as is.
+#ifndef XE_SCALED_MSAA_DEPTH
+#define XE_SCALED_MSAA_DEPTH 1
+#endif
+inline float xe_resolve_depth_sample(device const uint* canonical,
+                                     constant CanonicalResolveParams& p,
+                                     int2 pixel, uint sample) {
+  uint idx = xe_edram_offset_bytes(uint(pixel.x), uint(pixel.y),
+                                   p.surface.base, p.surface.pitch,
+                                   p.surface.msaa, p.surface.is_depth, 0u,
+                                   sample) >>
+             2u;
+  return xe_depth_word_to_guest(canonical[idx % p.surface.words],
+                                p.surface.is_depth);
+}
+// Guest sample offsets from the pixel center in pixels (+y down), by guest
+// sample (kMetalXenosSamplePositions2x/4x).
+inline float2 xe_guest_sample_offset(uint msaa, uint sample) {
+  if (msaa == 1u) {
+    return sample == 0u ? float2(-0.25, 0.25) : float2(0.25, -0.25);
+  }
+  switch (sample) {
+    case 0u:
+      return float2(-0.125, -0.125);
+    case 1u:
+      return float2(0.125, 0.125);
+    case 2u:
+      return float2(-0.375, 0.375);
+    default:
+      return float2(0.375, -0.375);
+  }
+}
+// The depth of pixel m's sample pair (along the diagonal, sample k at m + a,
+// sample k ^ 1 at m - a) extrapolated to position u.
+inline float xe_resolve_depth_pair_at(device const uint* canonical,
+                                      constant CanonicalResolveParams& p,
+                                      int2 pixel, float m, float a, float u) {
+  uint k = p.sample_select;
+  float depth_k = xe_resolve_depth_sample(canonical, p, pixel, k);
+  float depth_opposite = xe_resolve_depth_sample(canonical, p, pixel, k ^ 1u);
+  return depth_k + (u - (m + a)) * (depth_k - depth_opposite) / (2.0 * a);
+}
+inline float xe_resolve_snapshot_depth(device const uint* canonical,
+                                       constant CanonicalResolveParams& p,
+                                       uint2 source) {
+  uint k = p.sample_select;
+  uint2 scale = xe_resolution_scale();
+  if (XE_SCALED_MSAA_DEPTH == 0 || scale.x <= 1u || scale.x != scale.y ||
+      p.surface.msaa == 0u || k >= (p.surface.msaa == 1u ? 2u : 4u)) {
+    return xe_resolve_depth_sample(canonical, p, int2(source), k);
+  }
+  float2 offset = xe_guest_sample_offset(p.surface.msaa, k);
+  float a = abs(offset.x);
+  int2 dir = int2(sign(offset));
+  float u = float(scale.x) * a;
+  // The greatest sample position <= u and the smallest >= u.
+  float lo_mk = floor(u - a), lo_mj = floor(u + a);
+  bool lo_is_k = lo_mk + a >= lo_mj - a;
+  float lo = lo_is_k ? lo_mk + a : lo_mj - a;
+  float lo_m = lo_is_k ? lo_mk : lo_mj;
+  float hi_mk = ceil(u - a), hi_mj = ceil(u + a);
+  bool hi_is_k = hi_mk + a <= hi_mj - a;
+  float hi = hi_is_k ? hi_mk + a : hi_mj - a;
+  float hi_m = hi_is_k ? hi_mk : hi_mj;
+  int2 lo_pixel = int2(source) + int(lo_m) * dir;
+  int2 hi_pixel = int2(source) + int(hi_m) * dir;
+  int2 rect_begin = int2(0, int(p.source_y * scale.y));
+  int2 rect_end =
+      int2(uint2(p.source_x + p.width, p.source_y + p.height) * scale);
+  if (any(min(lo_pixel, hi_pixel) < rect_begin) ||
+      any(max(lo_pixel, hi_pixel) >= rect_end)) {
+    return max(xe_resolve_depth_pair_at(canonical, p, int2(source), 0.0, a, u),
+               0.0);
+  }
+  if (hi <= lo) {
+    return xe_resolve_depth_sample(canonical, p, lo_pixel,
+                                   lo_is_k ? k : k ^ 1u);
+  }
+  float between = mix(xe_resolve_depth_sample(canonical, p, lo_pixel,
+                                              lo_is_k ? k : k ^ 1u),
+                      xe_resolve_depth_sample(canonical, p, hi_pixel,
+                                              hi_is_k ? k : k ^ 1u),
+                      (u - lo) / (hi - lo));
+  if (p.depth_pass_direction == 0u) {
+    return between;
+  }
+  float from_lo = xe_resolve_depth_pair_at(canonical, p, lo_pixel, lo_m, a, u);
+  float from_hi = xe_resolve_depth_pair_at(canonical, p, hi_pixel, hi_m, a, u);
+  return max(p.depth_pass_direction == 1u
+                 ? min(between, min(from_lo, from_hi))
+                 : max(between, max(from_lo, from_hi)),
+             0.0);
+}
 fragment float4 resolve_canonical_color_fs(
     ColorVOut in [[stage_in]],
     device const uint* canonical [[buffer(0)]],
@@ -1915,15 +2040,10 @@ fragment float4 resolve_canonical_depth_fs(
       dest.y - p.dest_y >= p.height) {
     discard_fragment();
   }
-  uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);
-  uint idx = xe_edram_offset_bytes(
-                 source.x, source.y, p.surface.base, p.surface.pitch,
-                 p.surface.msaa, p.surface.is_depth, 0u,
-                 p.sample_select) >>
-             2u;
-  uint word = canonical[idx % p.surface.words];
-  return float4(xe_depth_word_to_guest(word, p.surface.is_depth), 0.0, 0.0,
-                0.0);
+  return float4(xe_resolve_snapshot_depth(
+                    canonical, p,
+                    xe_resolve_snapshot_source(p, host_dest, dest)),
+                0.0, 0.0, 0.0);
 }
 // Compute twins of the two snapshot fragment functions above
 // (XE_METAL_SNAPSHOT_COMPUTE): one thread per host pixel of the clipped
@@ -1960,15 +2080,10 @@ kernel void resolve_canonical_depth_cs(
       dest.y - p.dest_y >= p.height) {
     return;
   }
-  uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);
-  uint idx = xe_edram_offset_bytes(
-                 source.x, source.y, p.surface.base, p.surface.pitch,
-                 p.surface.msaa, p.surface.is_depth, 0u,
-                 p.sample_select) >>
-             2u;
-  uint word = canonical[idx % p.surface.words];
-  snapshot.write(float4(xe_depth_word_to_guest(word, p.surface.is_depth), 0.0,
-                        0.0, 0.0),
+  snapshot.write(float4(xe_resolve_snapshot_depth(
+                            canonical, p,
+                            xe_resolve_snapshot_source(p, host_dest, dest)),
+                        0.0, 0.0, 0.0),
                  host_dest, 0u);
 }
 kernel void resolve_canonical_depth_raw(
