@@ -1,0 +1,10 @@
+# macXenos built-in per-title config: LEGO Marvel's Avengers (5752084F).
+# Same TT Games engine as LEGO Marvel Super Heroes (57520835): vertex
+# shaders export to memory with a render target bound (MetalMemexportUnrouted
+# class=rasterizing-vertex). With that export class off (the Metal default)
+# the title scene ("Press START button") is a frozen jumble of stretched
+# green and blue polygon shards with block noise and no logo after the first
+# cycle. Routed, the logos and the title scene render clean; 30 fps either
+# way, 31.9 -> 31.0 commits/frame (M1 Max, release/1.1 d89326edd, 2026-11-21).
+[GPU]
+metal_memexport_raster = true

@@ -1,0 +1,11 @@
+# macXenos built-in per-title config: LEGO Marvel Super Heroes (57520835).
+# The engine fills buffers through vertex shaders that export to memory with
+# a render target bound (MetalMemexportUnrouted class=rasterizing-vertex).
+# With that export class off (the Metal default) the in-engine logos and the
+# title scene draw rainbow polygon shards over the screen, the Silver Surfer
+# shot breaks into flat slabs and the LEGO Marvel logo goes missing on later
+# title cycles (GitHub #20: the whole game, cutscenes, gameplay and menus).
+# Routed, the logos and two title cycles render clean; 30 fps and ~12.9
+# commits/frame either way (M1 Max, release/1.1 d89326edd, 2026-11-21).
+[GPU]
+metal_memexport_raster = true
