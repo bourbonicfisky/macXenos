@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 290 of them. Each one
+These are the games macXenos is tested with regularly: 292 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -90,6 +90,7 @@ smoother.
 | Call of Duty: Modern Warfare 2 | First mission, the shooting range | – | – | 60 | 60 |  |
 | Call of Duty: Modern Warfare 3 | First mission, Black Tuesday | – | 60 | – | 60 |  |
 | Call of Juarez: Bound in Blood | Chapter 1, the trenches | – | – | 60 | 60 |  |
+| Capcom Digital Collection | 1942: Joint Strike, mission 1, picked from the launcher | – | – | 60 | – | Tested as the trial of 1942: Joint Strike |
 | Captain America: Super Soldier | The trench at first control | 60 | 60 | 60 | 60 | Occasionally starts to a black screen (one start in four in testing); starting the game again gets past it |
 | Carrier Command: Gaea Mission | Campaign, first control at the crash site | – | – | 60 | – |  |
 | Cartoon Network: Punch Time Explosion XL | Story mode, the first level | – | – | 60 | – |  |
@@ -97,6 +98,7 @@ smoother.
 | Chaotic: Shadow Warriors | Story mode, first control in the Forest of Life | – | – | 60 | – |  |
 | Chikyuu Boueigun 4 (Earth Defense Force 4, Japan) | Mission 1, the city street as the giant ants advance | 44 | – | – | – | Runs below its 60 limit in this scene, which draws far more than most |
 | Chromehounds | First training sortie | – | 60 | – | 60 |  |
+| The Chronicles of Narnia: Prince Caspian | Level 1, Defend Cair Paravel | – | – | 30 | – | Tested without saving: the game's save step still loops |
 | The Chronicles of Riddick: Assault on Dark Athena | Butcher Bay, the cell block | – | 30 | – | 30 |  |
 | Civil War: A Nation Divided | Fredericksburg, first control before the bridge | – | – | 30 | – |  |
 | Clash of the Titans: The Videogame | First control on the beach | – | 30 | – | 30 |  |
