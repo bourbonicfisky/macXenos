@@ -51,6 +51,24 @@ static const char* kSpaFilename = "spa.bin";
 
 static int content_device_id_ = 0;
 
+// An STFS package stored as one file (CON, LIVE or PIRS magic).
+static bool IsPackageFile(const std::filesystem::path& path) {
+  std::error_code ec;
+  if (!std::filesystem::is_regular_file(path, ec)) {
+    return false;
+  }
+  FILE* file = xe::filesystem::OpenFile(path, "rb");
+  if (!file) {
+    return false;
+  }
+  char magic[4] = {};
+  const bool read = fread(magic, 1, sizeof(magic), file) == sizeof(magic);
+  fclose(file);
+  return read && (std::memcmp(magic, "CON ", 4) == 0 ||
+                  std::memcmp(magic, "LIVE", 4) == 0 ||
+                  std::memcmp(magic, "PIRS", 4) == 0);
+}
+
 ContentPackage::ContentPackage(KernelState* kernel_state,
                                const std::string_view root_name,
                                const XCONTENT_AGGREGATE_DATA& data,
@@ -62,6 +80,23 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
   content_data_ = data;
 
   auto fs = kernel_state_->file_system();
+  if (std::filesystem::is_regular_file(package_path)) {
+    // A package a title copied onto the hard drive as one STFS file (Forza
+    // Motorsport 4's Disc 2 install writes its four packages to
+    // Partition1\Content raw), not a folder: mount it as the console would.
+    auto container =
+        vfs::XContentContainerDevice::CreateContentDevice(device_path_,
+                                                          package_path);
+    if (!container || !container->Initialize()) {
+      XELOGE("Cannot mount content package {}", package_path);
+      return;
+    }
+    license_ = container->license_mask();
+    fs->RegisterDevice(std::move(container));
+    fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
+    mounted_ = true;
+    return;
+  }
   auto device =
       std::make_unique<vfs::HostPathDevice>(device_path_, package_path, false);
   if (cvars::content_thumbnail_beside_header) {
@@ -281,8 +316,9 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(
     auto file_infos = xe::filesystem::ListFiles(package_root);
 
     for (const auto& file_info : file_infos) {
-      if (file_info.type != xe::filesystem::FileInfo::Type::kDirectory) {
-        // Directories only.
+      if (file_info.type != xe::filesystem::FileInfo::Type::kDirectory &&
+          !IsPackageFile(package_root / file_info.name)) {
+        // Package folders, and packages a title copied in as one STFS file.
         continue;
       }
 
@@ -472,6 +508,9 @@ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
 
   auto package = std::make_unique<ContentPackage>(kernel_state_, root_name,
                                                   data, package_path);
+  if (!package->is_mounted()) {
+    return nullptr;
+  }
   return package;
 }
 

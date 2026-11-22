@@ -43,6 +43,11 @@ DEFINE_bool(
     "non-I/O job). Revert before any fix.",
     "Kernel");
 
+DEFINE_bool(log_file_io, false,
+            "Diagnostic: log every NtCreateFile (path, status, guest lr) and "
+            "every failed or short NtReadFile.",
+            "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
@@ -480,6 +485,16 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
   *handle_out = handle;
 
   IoLedgerOnOpen(target_path, result);
+  if (cvars::log_file_io) {
+    auto* ctx = cpu::ThreadState::Get() ? cpu::ThreadState::Get()->context()
+                                        : nullptr;
+    XELOGI("FileIO: open {:08X} disp={} access={:08X} opts={:08X} lr={:08X} "
+           "root={} path={}",
+           result, uint32_t(creation_disposition), uint32_t(desired_access),
+           uint32_t(create_options), ctx ? uint32_t(ctx->lr) : 0u,
+           root_entry ? root_entry->absolute_path() : std::string(),
+           target_path);
+  }
   return result;
 }
 DECLARE_XBOXKRNL_EXPORT1(NtCreateFile, kFileSystem, kImplemented);
@@ -537,6 +552,20 @@ dword_result_t NtReadFile_entry(dword_t file_handle, dword_t event_handle,
           byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr) : -1,
           &bytes_read, apc_context);
       ledger_bytes = bytes_read;
+      if (cvars::log_file_io &&
+          (XFAILED(result) || bytes_read != uint32_t(buffer_length))) {
+        auto* ctx = cpu::ThreadState::Get()
+                        ? cpu::ThreadState::Get()->context()
+                        : nullptr;
+        XELOGI("FileIO: read {:08X} off={:X} len={:X} got={:X} lr={:08X} {}",
+               result,
+               byte_offset_ptr ? static_cast<uint64_t>(*byte_offset_ptr)
+                               : ~0ull,
+               uint32_t(buffer_length), bytes_read,
+               ctx ? uint32_t(ctx->lr) : 0u,
+               file->entry() ? file->entry()->absolute_path()
+                             : std::string("?"));
+      }
       if (cvars::io_ledger_diag && bytes_read >= 16) {
         // First 16 bytes of what the guest received (content check).
         const uint8_t* hb = kernel_memory()->TranslateVirtual(buffer.guest_address());

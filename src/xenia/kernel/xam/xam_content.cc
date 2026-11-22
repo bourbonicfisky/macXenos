@@ -27,6 +27,13 @@
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/vfs/devices/stfs_xbox.h"
 #include "xenia/xbox.h"
+#include "xenia/emulator.h"
+
+DEFINE_bool(swap_disc_restore_launch_disc, true,
+            "When a title swaps back to the disc it was launched from, point "
+            "game: and d: back at that disc (they stay on the other disc "
+            "image otherwise).",
+            "Content");
 
 DEFINE_int32(
     license_mask, 0,
@@ -724,13 +731,47 @@ dword_result_t XamSwapDisc_entry(
     }
   };
 
+  auto filesystem = kernel_state()->file_system();
+  auto mount_path = "\\Device\\LauncherData";
+  // Where game: and d: pointed before the first swap away from the launched
+  // disc (the launch mount, \Device\Cdrom0 for a disc image).
+  static std::string launch_disc_target;
+
   if (info->disc_number == disc_number) {
+    // Asking for the launched disc again (the end of a content install from
+    // another disc): an earlier swap left game: and d: on the other image,
+    // so the title's next read of its own files failed and it called
+    // XamShowDirtyDiscErrorUI. Point them back at the launch mount.
+    // --swap_disc_restore_launch_disc=false keeps the old behavior.
+    std::string current_target;
+    if (cvars::swap_disc_restore_launch_disc && !launch_disc_target.empty() &&
+        filesystem->FindSymbolicLink(kDefaultGameSymbolicLink,
+                                     current_target) &&
+        current_target != launch_disc_target) {
+      filesystem->UnregisterSymbolicLink(kDefaultPartitionSymbolicLink);
+      filesystem->UnregisterSymbolicLink(kDefaultGameSymbolicLink);
+      filesystem->RegisterSymbolicLink(kDefaultGameSymbolicLink,
+                                       launch_disc_target);
+      filesystem->RegisterSymbolicLink(kDefaultPartitionSymbolicLink,
+                                       launch_disc_target);
+      XELOGI("XamSwapDisc: disc {} is the launched disc; game: and d: back "
+             "on {} (were {})",
+             uint32_t(disc_number), launch_disc_target, current_target);
+    }
     completion_event();
     return X_ERROR_SUCCESS;
   }
 
-  auto filesystem = kernel_state()->file_system();
-  auto mount_path = "\\Device\\LauncherData";
+  {
+    // Re-read on every swap away so a later title (or a relaunch) records
+    // its own launch mount, never the swap mount itself.
+    std::string current_target;
+    if (filesystem->FindSymbolicLink(kDefaultGameSymbolicLink,
+                                     current_target) &&
+        current_target != mount_path) {
+      launch_disc_target = current_target;
+    }
+  }
 
   if (filesystem->ResolvePath(mount_path) != NULL) {
     filesystem->UnregisterDevice(mount_path);

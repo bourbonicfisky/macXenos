@@ -61,6 +61,12 @@ class VirtualFileSystem {
                                    std::filesystem::path base_path);
 
  private:
+  // A create in the hard drive's content tree whose folders are missing makes
+  // them (vfs_create_content_parents).
+  static bool CreatesContentParents(const std::string_view path,
+                                    FileDisposition creation_disposition);
+  Entry* CreateMissingDirectories(const std::string_view directory_path);
+
   xe::global_critical_region global_critical_region_;
   std::vector<std::unique_ptr<Device>> devices_;
   std::unordered_map<std::string, std::string> symlinks_;
