@@ -8,3 +8,13 @@
 # gameplay frames washed out, strict 0 of 80)
 [GPU]
 occlusion_query = "strict"
+
+# Its five TaskThreads wait for jobs by calling Sleep(0) in a loop (about
+# 5.1 million calls a second); with the depressing thread_switch backoff
+# that is a pure spin on idle cores, about 5 cores busy at 30 fps (M4 mini:
+# ~500% CPU, 12.6 W). On a fanless Mac the heat throttles the chip and the
+# frame rate falls to 10-15 after a few minutes (GitHub issue 15, MacBook
+# Neo); the Guide dashboard suspends the threads and it briefly recovers.
+# The plain sleep backoff holds 30 fps at 77% CPU, 3.1 W (1.0.2, M4 mini).
+[Kernel]
+macos_spin0_depress = false
