@@ -265,14 +265,17 @@ smoother.
 
 ## Xbox Live Arcade
 
-33 Xbox Live Arcade games are tested too, in the same way and in the same
-runs. Two that no Mac measured in this round keep figures from earlier builds
-(November 2 to 15).
+49 Xbox Live Arcade games are tested too, in the same way. Most were measured
+in the same runs. Two that no Mac measured in this round keep figures from
+earlier builds (November 2 to 15). Sixteen added on November 22 were measured
+only on the M4 mini, with a 1.1 development build; they have dashes in the
+other columns.
 
 | Game | Test reaches | M4 mini · rc2 | M4 Pro · rc2 | M1 Max · rc2 | M5 Max | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | Awesomenauts | First-run tutorial, Lonestar at his base | – | – | 60 | 60 |  |
 | Blade Kitten | First control, after the opening cutscene | 30 | 30 | 30 | 30 | Half the screen can flash white in the opening cutscene |
+| Bliss Island | Adventure game, the Fruit Smoothie mini-game | 60 | – | – | – | Tested as the trial |
 | Brothers: A Tale of Two Sons | The village lane at dusk | – | – | 30 | 30 |  |
 | Call of Duty Classic | Camp Toccoa, the training ground | – | – | 60 | 60 |  |
 | Call of Juarez: Gunslinger | Episode 1, the road by the ruined barn | 30 | 30 | – | 30 | (earlier build) |
@@ -281,22 +284,37 @@ runs. Two that no Mac measured in this round keep figures from earlier builds
 | Earthworm Jim HD | New Junk City, the start of the level | – | – | 60 | 60 |  |
 | Ecco the Dolphin | Home Bay, the first level | – | – | 60 | 60 |  |
 | Flashback | The Titan jungle, by the waterfall | – | 30 | – | 30 | (earlier build) |
+| Frogger | The arcade game, the frog waiting on the bank | 60 | – | – | – | Tested as the trial |
+| Frogger 2 | Story mode, the first jungle island | 60 | – | – | – | Tested as the trial |
+| Frogger: Hyper Arcade Edition | Tile Capture, a party game against three CPU frogs | 214 | – | – | – | Tested as the trial. Doesn't cap its own frame rate (see below) |
 | From Dust | The first scene, the tribe on the night shore | – | – | 30 | 30 |  |
+| Guardian Heroes | Story mode, the tavern at the start of stage 1 | 60 | – | – | – | Tested as the trial |
 | Halo: Spartan Assault | Mission A-1, the outpost on an icy moon | 60 | 60 | 60 | 60 | Tested as the trial |
+| Heavy Weapon: Atomic Tank | Mission 1, Tundra Flats | 60 | – | – | – | Tested as the trial |
 | Hydrophobia | Kate's apartment, first control | – | – | 30 | 30 |  |
 | I Am Alive | First control on the ruined highway | – | – | 30 | 30 |  |
 | Ion Assault | Echelon Territory, stage 1 | – | – | 60 | 60 |  |
 | The King of Fighters '98 Ultimate Match | Arcade Play, the first fight | – | – | 60 | 60 |  |
+| The King of Fighters 2002 Unlimited Match | Team Play, a CPU vs CPU team match | 60 | – | – | – | Tested as the trial |
+| KOF SKY STAGE | Pause menu over stage 1 | 60 | – | – | – | Tested as the trial |
 | Marvel Puzzle Quest: Dark Reign | The first match board | – | – | 30 | 30 |  |
 | Matt Hazard: Blood Bath and Beyond | The Hate Boat, the pool deck | – | – | 60 | 60 |  |
+| Mega Man 10 | Solar Man's stage, the first room | 60 | – | – | – | Tested as the trial |
 | Mortal Kombat Arcade Kollection | Mortal Kombat, the attract loop | – | – | – | 54 | Runs at 54, the original arcade board's rate |
+| NBA Jam | Play Now, Celtics vs Lakers in a live game | 60 | – | – | – | Tested as the trial |
 | NBA Jam: On Fire Edition | Jam Now, a game in the Heat arena | – | – | – | 60 |  |
 | Orcs Must Die! | The Hallway, the first level | – | – | – | 30 |  |
+| PAC-MAN Championship Edition | Championship Mode, the replay after the run | 60 | – | – | – | Tested as the trial |
+| Prison Architect: Xbox 360 Edition | Prison Stories chapter 1, the canteen | 30 | – | – | – | Tested as the trial |
 | R-Type Dimensions | R-Type stage 1, in 3D | – | – | – | 60 |  |
 | Rez HD | Pause menu over Area 1 | – | – | 60 | 60 |  |
+| RISK | World Domination, a game between three computer players | 60 | – | – | – | Tested as the trial |
 | RoboBlitz | Karl's workshop, first control | – | – | – | 30 |  |
+| Sam & Max: Beyond Time and Space | Episode 1, first control in the office | 60 | – | – | – | Tested as the trial |
+| Scarygirl | Scarygirl's tree house, first control | 30 | – | – | – | Tested as the trial |
 | SEGA Bass Fishing | Arcade Mode, the Lodge | – | – | 60 | 60 |  |
 | Serious Sam 3: BFE | Broken Wings demo, the Cairo park | 15 | 14 | 6 | 11 | Tested as the trial. The buildings behind the park can render solid black, and the level runs at about 15 on the M4 Macs and 6 on the M1 Max |
+| Snoopy Flying Ace | Mission 1, the Frozen Fjord ring race | 31 | – | – | – | Tested as the trial |
 | Sonic & Knuckles | Mushroom Hill Zone, act 1 | – | – | 60 | 60 |  |
 | SoulCalibur II HD Online | Arcade fight, Mitsurugi vs Cassandra | 60 | 60 | 60 | 60 |  |
 | Super Street Fighter II Turbo HD Remix | Training mode, Ryu vs Ken | – | – | 60 | 60 |  |
@@ -312,7 +330,8 @@ problems fixed before these runs are not listed.
 Mafia II, Saints Row IV and 50 Cent: Blood on the Sand don't limit their own
 frame rate, so they run as fast as the Mac allows, and the table measures them
 that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
-Graphics settings. The game-select screen of Worms Collection is uncapped in
+Graphics settings. Frogger: Hyper Arcade Edition doesn't limit its frame rate
+either. The game-select screen of Worms Collection is uncapped in
 the same way, but the Worms menu the test measures holds 60.
 
 A game not listed here may still work; these are only the ones tested on every
