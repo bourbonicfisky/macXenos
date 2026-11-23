@@ -1,0 +1,51 @@
+# macXenos built-in game patch: Command & Conquer 3: Tiberium Wars (4541080E).
+# Crash ~5-10 s into Boot Camp (Code fetch fault at 00000000, lr 826830C8,
+# then DbgBreakPoint), most boots. The tutorial's first streamed file (a
+# movie/voice stream under \data\movies) is opened by 828467D8: it creates a
+# 1 MB file-stream object X (malloc 0x100140, ctor 827EC798), opens it with
+# flags 0x801 (0x800 = delete itself on close), posts an asynchronous open to
+# the game's I/O worker thread (827ED488 mode 1 -> 82847600 -> 82848330) and
+# polls the request once with a zero timeout (827ED7E8). It counts the stream
+# as started only when the poll says "still pending" (status 1); "already
+# opened" (status 3) is treated as a failure. On the console the open takes
+# disc time, so the poll is always pending. Here the worker finishes the open
+# in ~30 us, before the poll (~125 us after the post), so the init fails
+# every boot and the caller deletes the stream owner (828464A4), whose
+# destructor deletes X (82846764). X's destructor (827EC928) first calls
+# close (827ECC58), which sees the open + delete-on-close flags and deletes X
+# again from inside its own destructor; the outer destructor then continues
+# on freed memory and releases X's refcounted path string a second time
+# (827C6018 decrements [*(X+4) - 8]). In a freed 1 MB dlmalloc chunk X+4 is
+# the tree link to the chunk itself, so the decrement lands 16 bytes below
+# X: when X sits right after the per-frame 193-bucket hash table (object
+# DE490288 +0x44), that is bucket 190, a node pointer becomes p-1, and the
+# next frame's walk (82682DD8) calls through garbage. Whether it crashes
+# depends only on heap placement, hence the streaky rate (7 of 9, 7 of 16).
+# The game's own update (82846E48) already handles status 3 (it starts the
+# first read), so the patch makes the init accept 1 or 3:
+#   82846954 addi r11,r3,-1 / cntlzw / rlwinm  ->  clrlwi r11,r3,31 / nop / nop
+# Evidence: xenia-mac-evidence/defects-20261122/runtime/cc3-watch/ (hardware
+# write watchpoint on the bucket array tail: the writer is 827C6064 in the
+# string release called from X's destructor; guest probes: the open request
+# completes before the poll in every boot, crashing or not). A file with
+# this name in the storage root's patches/ folder replaces this one (set
+# is_enabled = false there to turn it off).
+title_name = "Command & Conquer 3: Tiberium Wars"
+title_id = "4541080E"
+hash = "09D8B89297A36602"
+
+[[patch]]
+    name = "Fix stream open race (Boot Camp crash)"
+    desc = "828467D8 treats an asynchronous file open that has already completed (status 3) as a failure; the cleanup then destroys the delete-on-close stream twice and corrupts the heap. Accept status 1 (pending) or 3 (opened)."
+    author = "macXenos"
+    is_enabled = true
+
+    [[patch.be32]]
+        address = 0x82846954
+        value = 0x546B07FE
+    [[patch.be32]]
+        address = 0x82846958
+        value = 0x60000000
+    [[patch.be32]]
+        address = 0x8284695C
+        value = 0x60000000
