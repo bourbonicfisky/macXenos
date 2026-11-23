@@ -29,7 +29,12 @@ namespace xe {
 namespace kernel {
 namespace xboxkrnl {
 
-void DbgBreakPoint_entry() { xe::debugging::Break(); }
+void DbgBreakPoint_entry() {
+  // With no debugger attached the trap ends the process; leave a line.
+  XELOGE("DbgBreakPoint called by the guest");
+  xe::FlushLog();
+  xe::debugging::Break();
+}
 DECLARE_XBOXKRNL_EXPORT2(DbgBreakPoint, kDebug, kStub, kImportant);
 
 // https://msdn.microsoft.com/en-us/library/xcb2z8hs.aspx
@@ -1617,6 +1622,32 @@ static uint32_t DispatchAccessViolation(PPCContext* context,
 uint32_t DispatchCodeFetchFault(PPCContext* context, uint32_t address) {
   if (!XThread::IsInThread()) {
     return 0;
+  }
+  {
+    // Name the fetch and its caller chain before the guest's handlers run: a
+    // handler that ends in DbgBreakPoint traps the process before the log
+    // thread writes anything (Command & Conquer 3, 2026-11-22).
+    auto* memory = kernel_memory();
+    std::string chain;
+    uint32_t sp = uint32_t(context->r[1]);
+    for (int i = 0; i < 12 && sp && memory->LookupHeap(sp); ++i) {
+      const uint32_t next =
+          xe::load_and_swap<uint32_t>(memory->TranslateVirtual(sp));
+      if (!next || next <= sp || next - sp > 0x100000 ||
+          !memory->LookupHeap(next - 8)) {
+        break;
+      }
+      chain += fmt::format(" {:08X}", xe::load_and_swap<uint32_t>(
+                                          memory->TranslateVirtual(next - 8)));
+      sp = next;
+    }
+    XELOGE(
+        "Code fetch fault at {:08X}: lr {:08X} ctr {:08X} r1 {:08X} r3 {:08X} "
+        "r31 {:08X}, return chain:{}",
+        address, uint32_t(context->lr), uint32_t(context->ctr),
+        uint32_t(context->r[1]), uint32_t(context->r[3]),
+        uint32_t(context->r[31]), chain);
+    xe::FlushLog();
   }
   // The call never ran, so lr holds its return address and r1 the caller's
   // stack pointer. The handlers return as if the faulting call had called
