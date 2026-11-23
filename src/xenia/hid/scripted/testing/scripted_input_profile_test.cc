@@ -39,11 +39,11 @@ constexpr std::array<ExpectedProfile, 5> kExpectedProfiles = {{
     {"434307FC-ultra-street-fighter-iv.toml", "434307FC",
      "gameplay_expected", 17, 29, 48000ms},
     {"534307E7-just-cause-2.toml", "534307E7", "gameplay_expected", 5, 11,
-     70000ms},
+     60000ms},
     {"4C4107D1-lego-star-wars-ii.toml", "4C4107D1", "gameplay_expected", 7,
-     10, 35400ms},
-    {"5454082B-red-dead-redemption.toml", "5454082B", "cinematic_expected", 8,
-     11, 640000ms},
+     10, 29400ms},
+    {"5454082B-red-dead-redemption.toml", "5454082B", "cinematic_expected", 7,
+     10, 40000ms},
 }};
 
 }  // namespace
