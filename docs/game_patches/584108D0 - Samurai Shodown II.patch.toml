@@ -29,6 +29,29 @@
 # inside XACT3DApply 62 us after main's check). A file with this name in the
 # storage root's patches/ folder replaces this one (set is_enabled = false
 # there to turn it off).
+# Second patch, "Serialise music cue use with XACT's engine lock" (2026-11-22,
+# race2): the null re-checks cannot catch a cue that is destroyed (by the
+# audio worker or the arcade thread's music player) after 8217CAF0 loaded
+# g_cue but before XACT locks it; the stale object then sends XACT3DApply into
+# a garbage critical section (0x3F8000C4) and the main thread hangs (1 boot in
+# 6 with the first patch alone). XACT's own state, including the destroy that
+# clears g_cue, is guarded by the engine's critical section at
+# [0x82771894]+0xC4 (every cue method takes [cue+0x14]+0xC4, every engine
+# method engine+0xC4). This patch runs the whole of 8217CAF0 (main thread) and
+# 8217CCC0 (music player, arcade thread) under that recursive lock, so g_cue
+# cannot change or be freed between their load and use. Each entry's first
+# word (mflr r12) becomes a branch to a wrapper in zero padding at the end of
+# the code section (82658000-826580B7: mflr/stw/std/stwu, r31 = engine+0xC4,
+# RtlEnterCriticalSection, bl body, RtlLeaveCriticalSection, return r3), and
+# the body stub re-executes mflr r12 and branches back to entry+4. Nothing
+# else runs under the lock that XACT does not already call with it held (the
+# extra code is plain math, a table lookup and debug prints), so no new lock
+# order is introduced. Checked live (M5 Max, 11-22): [g_cue+0x38] (the lock
+# the cue methods take) == g_engine 0x4000CC10, and engine+0xC4 holds a free
+# critical section. Generator: evidence samsho2/race2/mklock.py.
+# Shipped DISABLED: the 18-boot hang A/B has not run yet (the test host's
+# display was asleep, which voids the timing). Set is_enabled = true after
+# 18+ boots with 0 hangs and 0 crashes against the first patch alone.
 title_name = "Samurai Shodown II"
 title_id = "584108D0"
 hash = "F9CB97FDB98F1C8D"
@@ -87,3 +110,142 @@ hash = "F9CB97FDB98F1C8D"
     [[patch.be32]]
         address = 0x8217CC3C
         value = 0x4BFFFFE0
+
+[[patch]]
+    name = "Serialise music cue use with XACT's engine lock (hang after character select)"
+    desc = "The music cue can be destroyed between 8217CAF0's load of the cue pointer and XACT's lock, leaving a stale object that hangs in XACT3DApply. Run 8217CAF0 and the music player 8217CCC0 under the XACT engine's critical section."
+    author = "macXenos"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x8217CAF0
+        value = 0x484DB510
+    [[patch.be32]]
+        address = 0x8217CCC0
+        value = 0x484DB3A0
+    [[patch.be32]]
+        address = 0x82658000
+        value = 0x7D8802A6
+    [[patch.be32]]
+        address = 0x82658004
+        value = 0x9181FFF8
+    [[patch.be32]]
+        address = 0x82658008
+        value = 0xFBE1FFF0
+    [[patch.be32]]
+        address = 0x8265800C
+        value = 0x9421FF90
+    [[patch.be32]]
+        address = 0x82658010
+        value = 0x3D608277
+    [[patch.be32]]
+        address = 0x82658014
+        value = 0x83EB1894
+    [[patch.be32]]
+        address = 0x82658018
+        value = 0x3BFF00C4
+    [[patch.be32]]
+        address = 0x8265801C
+        value = 0x7FE3FB78
+    [[patch.be32]]
+        address = 0x82658020
+        value = 0x4BFA639D
+    [[patch.be32]]
+        address = 0x82658024
+        value = 0x4800002D
+    [[patch.be32]]
+        address = 0x82658028
+        value = 0x90610050
+    [[patch.be32]]
+        address = 0x8265802C
+        value = 0x7FE3FB78
+    [[patch.be32]]
+        address = 0x82658030
+        value = 0x4BFA637D
+    [[patch.be32]]
+        address = 0x82658034
+        value = 0x80610050
+    [[patch.be32]]
+        address = 0x82658038
+        value = 0x38210070
+    [[patch.be32]]
+        address = 0x8265803C
+        value = 0x8181FFF8
+    [[patch.be32]]
+        address = 0x82658040
+        value = 0x7D8803A6
+    [[patch.be32]]
+        address = 0x82658044
+        value = 0xEBE1FFF0
+    [[patch.be32]]
+        address = 0x82658048
+        value = 0x4E800020
+    [[patch.be32]]
+        address = 0x82658050
+        value = 0x7D8802A6
+    [[patch.be32]]
+        address = 0x82658054
+        value = 0x4BB24AA0
+    [[patch.be32]]
+        address = 0x82658060
+        value = 0x7D8802A6
+    [[patch.be32]]
+        address = 0x82658064
+        value = 0x9181FFF8
+    [[patch.be32]]
+        address = 0x82658068
+        value = 0xFBE1FFF0
+    [[patch.be32]]
+        address = 0x8265806C
+        value = 0x9421FF90
+    [[patch.be32]]
+        address = 0x82658070
+        value = 0x3D608277
+    [[patch.be32]]
+        address = 0x82658074
+        value = 0x83EB1894
+    [[patch.be32]]
+        address = 0x82658078
+        value = 0x3BFF00C4
+    [[patch.be32]]
+        address = 0x8265807C
+        value = 0x7FE3FB78
+    [[patch.be32]]
+        address = 0x82658080
+        value = 0x4BFA633D
+    [[patch.be32]]
+        address = 0x82658084
+        value = 0x4800002D
+    [[patch.be32]]
+        address = 0x82658088
+        value = 0x90610050
+    [[patch.be32]]
+        address = 0x8265808C
+        value = 0x7FE3FB78
+    [[patch.be32]]
+        address = 0x82658090
+        value = 0x4BFA631D
+    [[patch.be32]]
+        address = 0x82658094
+        value = 0x80610050
+    [[patch.be32]]
+        address = 0x82658098
+        value = 0x38210070
+    [[patch.be32]]
+        address = 0x8265809C
+        value = 0x8181FFF8
+    [[patch.be32]]
+        address = 0x826580A0
+        value = 0x7D8803A6
+    [[patch.be32]]
+        address = 0x826580A4
+        value = 0xEBE1FFF0
+    [[patch.be32]]
+        address = 0x826580A8
+        value = 0x4E800020
+    [[patch.be32]]
+        address = 0x826580B0
+        value = 0x7D8802A6
+    [[patch.be32]]
+        address = 0x826580B4
+        value = 0x4BB24C10
