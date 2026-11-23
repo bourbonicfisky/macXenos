@@ -371,7 +371,7 @@ evening) only on the M4 mini.
 | Frogger: Hyper Arcade Edition | Tile Capture, a party game against three CPU frogs | 214 | – | – | – | Tested as the trial. Doesn't cap its own frame rate (see below) |
 | From Dust | The first scene, the tribe on the night shore | – | – | 30 | 30 |  |
 | Guardian Heroes | Story mode, the tavern at the start of stage 1 | 60 | – | – | – | Tested as the trial |
-| Guardians of Middle-Earth | Main menu tour, the Inventory card | 30 | – | – | – | Menu test only: offline play stops on a loading screen |
+| Guardians of Middle-Earth | Training match, first lesson card | 30 | – | – | – |  |
 | Halo: Spartan Assault | Mission A-1, the outpost on an icy moon | 60 | 60 | 60 | 60 | Tested as the trial |
 | Haunted House | The first room, Jacob on Spooky difficulty | – | – | – | 60 |  |
 | Heavy Weapon: Atomic Tank | Mission 1, Tundra Flats | 60 | – | – | – | Tested as the trial |
