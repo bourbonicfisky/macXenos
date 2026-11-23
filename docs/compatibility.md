@@ -1,6 +1,6 @@
 # Game compatibility
 
-These are the games macXenos is tested with regularly: 304 of them. Each one
+These are the games macXenos is tested with regularly: 305 of them. Each one
 is started automatically, played to the point shown with a scripted
 controller, and measured for a minute. The M4 mini, M4 Pro and M1 Max columns
 are from macXenos 1.0.1-rc2 (build 202611152108), run on November 15 and 16,
@@ -71,6 +71,7 @@ smoother.
 | BlazBlue: Continuum Shift Extend | Training, Ragna vs the training dummy | – | – | 60 | – | The fighters are drawn in the wrong colours (the menus and portraits are right) |
 | Blazing Angels 2: Secret Missions of WWII | Campaign mission 1, the Spitfire on the airshow runway | – | – | 30 | – |  |
 | Blazing Angels: Squadrons of WWII | Campaign mission 1, the biplane on the airfield | – | – | 60 | – |  |
+| Blitz: The League | Quick Play, the pause menu over the line of scrimmage | – | – | – | 60 |  |
 | Blitz: The League II | Pause menu over the opening kickoff | – | – | 43 | 60 | Can stop during start-up (rare). Not measured on the M4 Macs in this round: their tests didn't reach this scene |
 | Blood Bowl | One-off match, the kick-off on the pitch | – | – | 102 | – | Doesn't cap its own frame rate (see below) |
 | Blood Drive | Tournament, the first event among the zombies | – | – | 30 | – |  |
@@ -343,13 +344,13 @@ smoother.
 
 ## Xbox Live Arcade
 
-51 Xbox Live Arcade games are tested too, in the same way. Most were measured
+52 Xbox Live Arcade games are tested too, in the same way. Most were measured
 in the same runs. Two that no Mac measured in this round keep figures from
 earlier builds (November 2 to 15). Sixteen added on November 22 were measured
 only on the M4 mini, with a 1.1 development build; they have dashes in the
 other columns. Lara Croft and the Guardian of Light has an M1 Max figure from
-its route validation on November 21, and Trials HD, added later on November
-22, was measured only on the M1 Max.
+its route validation on November 21, Trials HD, added later on November
+22, was measured only on the M1 Max, and Haunted House only on the M5 Max.
 
 | Game | Test reaches | M4 mini · rc2 | M4 Pro · rc2 | M1 Max · rc2 | M5 Max | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
@@ -370,6 +371,7 @@ its route validation on November 21, and Trials HD, added later on November
 | From Dust | The first scene, the tribe on the night shore | – | – | 30 | 30 |  |
 | Guardian Heroes | Story mode, the tavern at the start of stage 1 | 60 | – | – | – | Tested as the trial |
 | Halo: Spartan Assault | Mission A-1, the outpost on an icy moon | 60 | 60 | 60 | 60 | Tested as the trial |
+| Haunted House | The first room, Jacob on Spooky difficulty | – | – | – | 60 |  |
 | Heavy Weapon: Atomic Tank | Mission 1, Tundra Flats | 60 | – | – | – | Tested as the trial |
 | Hydrophobia | Kate's apartment, first control | – | – | 30 | 30 |  |
 | I Am Alive | First control on the ruined highway | – | – | 30 | 30 |  |
