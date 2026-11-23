@@ -49,9 +49,10 @@
 # order is introduced. Checked live (M5 Max, 11-22): [g_cue+0x38] (the lock
 # the cue methods take) == g_engine 0x4000CC10, and engine+0xC4 holds a free
 # critical section. Generator: evidence samsho2/race2/mklock.py.
-# Shipped DISABLED: the 18-boot hang A/B has not run yet (the test host's
-# display was asleep, which voids the timing). Set is_enabled = true after
-# 18+ boots with 0 hangs and 0 crashes against the first patch alone.
+# Validated 11-23: M1 Max interleaved A/B (unmuted, windowed), first patch
+# alone hung 5 of 12 boots (main thread in RtlEnterCriticalSection on
+# 0x3F8000C4 via XACT3DApply from 8217CAF0), both patches 0 of 12; the M4
+# mini never hung in either arm (20 + 20 boots) and 26 fix boots were clean.
 title_name = "Samurai Shodown II"
 title_id = "584108D0"
 hash = "F9CB97FDB98F1C8D"
@@ -115,7 +116,7 @@ hash = "F9CB97FDB98F1C8D"
     name = "Serialise music cue use with XACT's engine lock (hang after character select)"
     desc = "The music cue can be destroyed between 8217CAF0's load of the cue pointer and XACT's lock, leaving a stale object that hangs in XACT3DApply. Run 8217CAF0 and the music player 8217CCC0 under the XACT engine's critical section."
     author = "macXenos"
-    is_enabled = false
+    is_enabled = true
 
     [[patch.be32]]
         address = 0x8217CAF0
