@@ -133,7 +133,7 @@ smoother.
 | The Darkness | The opening car ride, the tunnel chase | – | – | – | 30 |  |
 | The Darkness II | The opening restaurant scene | – | – | – | 32 |  |
 | Darksiders | The pause menu over the ruined city at first control | – | – | 120 | 120 | Doesn't cap its own frame rate (see below) |
-| Darksiders II | First control in the frozen Veil | – | – | 85 | 38 | Doesn't cap its own frame rate (see below), but some starts hold at about 33 instead |
+| Darksiders II | First control in the frozen Veil | – | – | 85 | 38 | Holds about 30-35 with the game's adaptive vsync; the 85 is from before a built-in game patch, when some starts ran uncapped |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 | 60 | 60 |  |
 | Dead or Alive Xtreme 2 | New Zack Island, the Day 1 map | – | 30 | – | – |  |
