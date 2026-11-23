@@ -67,8 +67,8 @@ smoother.
 | Black College Football: The Xperience | Play Now, the opening coin toss | – | 30 | – | – |  |
 | Blades of Time | Chapter 1, the first fight on the stone stairs | 30 | – | – | – |  |
 | Bladestorm: The Hundred Years' War | New game, character creation in the tavern | – | – | 30 | – |  |
-| BlazBlue: Calamity Trigger | Training, Ragna vs the training dummy | – | – | 60 | – | The fighters are drawn in the wrong colours (the menus and portraits are right) |
-| BlazBlue: Continuum Shift Extend | Training, Ragna vs the training dummy | – | – | 60 | – | The fighters are drawn in the wrong colours (the menus and portraits are right) |
+| BlazBlue: Calamity Trigger | Training, Ragna vs the training dummy | – | – | 60 | – |  |
+| BlazBlue: Continuum Shift Extend | Training, Ragna vs the training dummy | – | – | 60 | – |  |
 | Blazing Angels 2: Secret Missions of WWII | Campaign mission 1, the Spitfire on the airshow runway | – | – | 30 | – |  |
 | Blazing Angels: Squadrons of WWII | Campaign mission 1, the biplane on the airfield | – | – | 60 | – |  |
 | Blitz: The League | Quick Play, the pause menu over the line of scrimmage | – | – | – | 60 |  |
@@ -216,7 +216,7 @@ smoother.
 | Kane & Lynch 2: Dog Days | Shanghai opening | – | 60 | – | 60 |  |
 | Kane & Lynch: Dead Men | The breakout, beside the van | – | – | 30 | 30 |  |
 | The King of Fighters XII | Arcade fight | – | – | 60 | 60 |  |
-| Kingdoms of Amalur: Reckoning | First control in the Well of Souls | – | – | – | 30 | The lower half of the picture renders black |
+| Kingdoms of Amalur: Reckoning | First control in the Well of Souls | – | – | – | 30 |  |
 | Knights Contract | New game, the prologue in the plague village | – | – | 30 | – |  |
 | L.A. Noire | Upon Reflection, the patrol car | – | 30 | 30 | 30 |  |
 | The Legend of Spyro: Dawn of the Dragon | First control in the arena, the Basic moves tutorial | – | – | 60 | – |  |
