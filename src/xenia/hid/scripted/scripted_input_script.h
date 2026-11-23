@@ -114,7 +114,8 @@ ScriptLoadResult LoadInputScript(const std::filesystem::path& path);
 // Discovery-only live input lines (--input_live_file). Lines appended to the
 // live file are consumed after the scripted timeline completes; each line is
 // one step, in the same units as the TOML profile:
-//   press <button>[+<button>...] [hold_ms] [release_ms] [repeat]
+//   press <button>[+<button>...] [<axis> <value>...] [hold_ms] [release_ms]
+//         [repeat]   (axes lx/ly/rx/ry/lt/rt are held with the buttons)
 //   stick <lx|ly|rx|ry> <value> [<axis> <value>...] [hold_ms] [release_ms]
 //   trigger <lt|rt> <value> [<axis> <value>...] [hold_ms] [release_ms]
 //   wait <ms>
