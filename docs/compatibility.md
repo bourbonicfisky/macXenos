@@ -130,7 +130,7 @@ smoother.
 | Dark Souls II | Things Betwixt, the first glade | – | 60 | 60 | 60 |  |
 | Darkest of Days | Little Bighorn, first control on the hillside | – | 205 | – | – | Doesn't cap its own frame rate (see below) |
 | The Darkness | The opening car ride, the tunnel chase | – | – | – | 30 |  |
-| The Darkness II | The opening restaurant scene | – | – | – | 32 | The menus draw no text or items, and walls, carpet and suits in the restaurant render as coloured noise |
+| The Darkness II | The opening restaurant scene | – | – | – | 32 |  |
 | Darksiders | The pause menu over the ruined city at first control | – | – | – | 120 | Doesn't cap its own frame rate (see below). War renders as stretched streaks and some text is garbled |
 | Darksiders II | First control in the frozen Veil | – | – | – | 38 | Doesn't cap its own frame rate (see below). Huge stretched polygons cover the picture |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 | 60 | 60 |  |
