@@ -21399,7 +21399,40 @@ void MetalCommandProcessor::TrimLazyMemexportBacklog() {
     }
     return uint32_t(std::min<unsigned long>(n, UINT32_MAX));
   }();
-  if (!s_limit || pending_memexports_.size() <= s_limit) {
+  // A completed armed export whose stream range is larger than this is
+  // published at the boundary instead of waiting for a CPU touch. Such a
+  // range is the window the export may write, usually far more than it does:
+  // Darksiders and Darksiders II export a few MB through a 60 MB window over
+  // their streaming vertex pool, and while those records stayed armed the
+  // game's CPU writes into the rest of the pool never reached the shared
+  // buffer (57 records pending for good, the pool drawn from stale bytes:
+  // stretched-polygon shards). The drain copies only the pages a record still
+  // owns. XE_METAL_LAZY_MEMEXPORT_LARGE_MB=0 keeps large records armed (the
+  // previous behavior).
+  static const uint32_t s_large_bytes = [] {
+    constexpr uint32_t kDefaultMb = 16;
+    const char* v = std::getenv("XE_METAL_LAZY_MEMEXPORT_LARGE_MB");
+    if (!v || !v[0]) {
+      return kDefaultMb << 20;
+    }
+    char* end = nullptr;
+    const unsigned long n = std::strtoul(v, &end, 10);
+    if (end == v || *end) {
+      return kDefaultMb << 20;
+    }
+    return uint32_t(std::min<unsigned long>(n, 4095)) << 20;
+  }();
+  const bool over_limit = s_limit && pending_memexports_.size() > s_limit;
+  bool large_pending = false;
+  if (!over_limit && s_large_bytes) {
+    for (const PendingMemexport& me : pending_memexports_) {
+      if (me.lazy_armed && me.size_bytes > s_large_bytes) {
+        large_pending = true;
+        break;
+      }
+    }
+  }
+  if (!over_limit && !large_pending) {
     return;
   }
   // Only armed records are the backlog; without lazy publication (rollback,
@@ -21413,7 +21446,8 @@ void MetalCommandProcessor::TrimLazyMemexportBacklog() {
   metal::GuestRangeSet ranges;
   uint32_t candidates = 0;
   for (const PendingMemexport& me : pending_memexports_) {
-    if (me.lazy_armed && me.submission && me.submission <= completed) {
+    if (me.lazy_armed && me.submission && me.submission <= completed &&
+        (over_limit || me.size_bytes > s_large_bytes)) {
       if (ranges.Add(metal::GuestRange::FromBaseLength(me.base_address,
                                                        me.size_bytes))) {
         ++candidates;
