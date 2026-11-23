@@ -1,0 +1,12 @@
+# macXenos built-in per-title config: Call of Duty: Advanced Warfare (41560914).
+# Both executables (the main menus and the multiplayer executable that
+# Multiplayer / Exo Survival relaunch into) draw through vertex shaders that
+# export to memory with a render target bound (MetalMemexportUnrouted
+# class=rasterizing-vertex, 16 reports in each process). With that export
+# class off (the Metal default) every Exo Survival (Bio Lab) frame shows
+# multicoloured noise and blocky garbage on world and weapon surfaces; routed,
+# the same views are clean, 60 fps both ways (~11-13 commits/frame both
+# ways), no faults. (M4 Pro, release/1.1 7ebf56f8f kit, 2026-11-22;
+# xenia-mac-evidence defects-20261122/triage3/codaw)
+[GPU]
+metal_memexport_raster = true
