@@ -768,6 +768,7 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   const RegisterFile& regs = register_file();
   bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
   last_update_draw_target_ = RenderTargetKey();
+  last_update_aliased_depth_write_color_bits_ = 0;
 
   auto rb_surface_info = regs.Get<reg::RB_SURFACE_INFO>();
   xenos::MsaaSamples msaa_samples = rb_surface_info.msaa_samples;
@@ -897,11 +898,20 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   // To handle this, color target is given ownership of the range, but the
   // current depth target is kept bound as read-only as long as the write ranges
   // don't overlap.
+  //
+  // A backend may also keep the depth target writable in this case
+  // (AreAliasedDepthWritesSupported): the color writes only the stencil byte,
+  // depth writes only bits 8:31, and the backend gives the color owner the
+  // depth bits before its words are read.
+  const bool aliased_depth_writes =
+      !interlock_barrier_only && normalized_depth_control.z_write_enable &&
+      msaa_samples == xenos::MsaaSamples::k1X &&
+      AreAliasedDepthWritesSupported();
   bool keep_aliased_depth = false;
   if (!interlock_barrier_only && cvars::aliased_depth_read_only &&
       (depth_and_color_rts_used_bits & 1) &&
       normalized_depth_control.z_enable &&
-      !normalized_depth_control.z_write_enable &&
+      (!normalized_depth_control.z_write_enable || aliased_depth_writes) &&
       !normalized_depth_control.stencil_enable) {
     uint32_t depth_base = guest_bases[0];
     for (uint32_t i = 1; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
@@ -917,9 +927,12 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     }
   }
 
-  // The color owner can't preserve depth if this draw also writes it.
+  // The color owner can't preserve depth if this draw also writes it (unless
+  // the backend merges the depth target's bits into it, see above).
+  const bool keep_aliased_depth_writable =
+      keep_aliased_depth && normalized_depth_control.z_write_enable;
   if (!interlock_barrier_only && (depth_and_color_rts_used_bits & 1) &&
-      normalized_depth_control.z_write_enable) {
+      normalized_depth_control.z_write_enable && !keep_aliased_depth_writable) {
     uint32_t depth_base = guest_bases[0];
     for (uint32_t i = 1; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
       if ((depth_and_color_rts_used_bits & (uint32_t(1) << i)) &&
@@ -1268,7 +1281,27 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
         break;
       }
     }
-    if (IsHostDepthCurrent(rt_keys[0], alias_start_tiles, alias_length_tiles)) {
+    if (keep_aliased_depth_writable) {
+      // The depth is written, so it must hold the range's depth bits: claim
+      // the range for it first if it doesn't (the color owner's claim below
+      // then takes the words from it, keeping the depth bits here).
+      rts[0] = GetOrCreateRenderTarget(rt_keys[0]);
+      if (!rts[0]) {
+        return false;
+      }
+      if (!IsHostDepthCurrent(rt_keys[0], alias_start_tiles,
+                              alias_length_tiles)) {
+        ChangeOwnership(rt_keys[0], alias_start_tiles, alias_length_tiles,
+                        &last_update_transfers_[0]);
+      }
+      for (uint32_t i = 1; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
+        if ((depth_and_color_rts_used_bits & (uint32_t(1) << i)) &&
+            guest_bases[i] == guest_bases[0]) {
+          last_update_aliased_depth_write_color_bits_ |= uint32_t(1) << i;
+        }
+      }
+    } else if (IsHostDepthCurrent(rt_keys[0], alias_start_tiles,
+                                  alias_length_tiles)) {
       rts[0] = GetOrCreateRenderTarget(rt_keys[0]);
       if (!rts[0]) {
         return false;

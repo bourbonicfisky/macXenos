@@ -16026,6 +16026,11 @@ bool MetalCommandProcessor::IssueCopy() {
                                  resolve_info)) {
     return true;
   }
+  // A depth target written under an aliased color owner (Dark's G-buffer)
+  // must reach the owner's words before they are resolved.
+  if (render_target_cache_) {
+    render_target_cache_->FlushAliasedDepthMerge();
+  }
   // Copy command 2 (compare to k_DXT3A_AS_1_1_1_1) exists only as the shared
   // resolve shader, and the Metal copy routes below do not know it: they would
   // copy the color as-is. Skip the copy but still perform the clears, as

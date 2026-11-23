@@ -1169,6 +1169,46 @@ bool MetalRenderTargetCache::Update(bool is_rasterization_done,
       }
     }
   }
+  {
+    // Aliased depth writes: the color owner needs the depth target's bits
+    // before anything other than another draw of the same pair touches it
+    // (this draw's transfers may read it).
+    const uint32_t alias_bits = last_update_aliased_depth_write_color_bits();
+    RenderTarget* const* used = last_update_used_render_targets();
+    uint32_t alias_slot = 0;
+    RenderTarget* alias_color = nullptr;
+    if (alias_bits && used[0] &&
+        xe::bit_scan_forward(alias_bits, &alias_slot) && used[alias_slot]) {
+      alias_color = used[alias_slot];
+    }
+    if (aliased_depth_merge_.pending &&
+        (!alias_color || alias_color->key() != aliased_depth_merge_.color ||
+         used[0]->key() != aliased_depth_merge_.depth)) {
+      FlushAliasedDepthMerge();
+    }
+    if (alias_color) {
+      const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
+      const uint32_t* starts = last_update_used_render_target_starts_tiles();
+      uint32_t start_tiles = alias_color->key().base_tiles + starts[alias_slot];
+      uint32_t end_tiles = std::min(start_tiles + lengths[alias_slot],
+                                    uint32_t(xenos::kEdramTileCount));
+      if (aliased_depth_merge_.pending) {
+        aliased_depth_merge_.start_tiles =
+            std::min(aliased_depth_merge_.start_tiles, start_tiles);
+        aliased_depth_merge_.end_tiles =
+            std::max(aliased_depth_merge_.end_tiles, end_tiles);
+      } else if (end_tiles > start_tiles) {
+        aliased_depth_sync_.valid = true;
+        aliased_depth_sync_.start_tiles = start_tiles;
+        aliased_depth_sync_.end_tiles = end_tiles;
+        aliased_depth_merge_.pending = true;
+        aliased_depth_merge_.color = alias_color->key();
+        aliased_depth_merge_.depth = used[0]->key();
+        aliased_depth_merge_.start_tiles = start_tiles;
+        aliased_depth_merge_.end_tiles = end_tiles;
+      }
+    }
+  }
   PerformTransfers(accumulated, last_update_transfers());
   if (!msaa_stencil_caches_.empty() && accumulated[0]) {
     // The draw may write the target's stencil (or open its pass with a
@@ -1322,6 +1362,150 @@ bool MetalRenderTargetCache::AreScissorRangeStartsSupported() const {
   static const bool s_enabled = ParseMetalEnvironmentFlag(
       std::getenv("XE_METAL_SCISSOR_RANGE_START"), true);
   return s_enabled;
+}
+
+bool MetalRenderTargetCache::AreAliasedDepthWritesSupported() const {
+  static const bool s_enabled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_ALIASED_DEPTH_WRITES"), true);
+  return s_enabled;
+}
+
+void MetalRenderTargetCache::FlushAliasedDepthMerge() {
+  if (!aliased_depth_merge_.pending) {
+    return;
+  }
+  AliasedDepthMerge merge = aliased_depth_merge_;
+  aliased_depth_merge_.pending = false;
+  auto* color = static_cast<MetalRenderTarget*>(FindRenderTarget(merge.color));
+  auto* depth = static_cast<MetalRenderTarget*>(FindRenderTarget(merge.depth));
+  if (!color || !depth || !color->texture() || !depth->texture() ||
+      merge.end_tiles <= merge.start_tiles) {
+    return;
+  }
+  if (color->pixel_format() != kColorFormat) {
+    // Only 8_8_8_8 storage holds the raw guest bytes the merge writes.
+    static uint32_t s_format_logs = 0;
+    if (s_format_logs++ < 4) {
+      XELOGW("MetalRenderTargetCache: aliased depth merge skipped for {} "
+             "(host format {})",
+             merge.color.GetDebugName(), color->pixel_format());
+    }
+    return;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!aliased_depth_merge_pipeline_) {
+    NSString* src = @R"METAL(
+      #include <metal_stdlib>
+      using namespace metal;
+      struct MergeParams {
+        uint base_tiles; uint pitch_tiles; uint start_tiles; uint end_tiles;
+        uint tile_width; uint tile_height; uint is_float24; uint pad;
+      };
+      struct VOut { float4 pos [[position]]; };
+      vertex VOut xe_alias_merge_vs(uint vid [[vertex_id]]) {
+        VOut o;
+        float2 t = float2(float((vid << 1) & 2), float(vid & 2));
+        o.pos = float4(t * 2.0 - 1.0, 0.0, 1.0);
+        return o;
+      }
+      // float32 -> guest 20e4 float24 (truncating), as the d2c transfer.
+      static uint xe_f32_to_f20e4(float f) {
+        if (!(f > 0.0)) return 0u;
+        uint u = as_type<uint>(f);
+        if (u >= 0x40000000u) return 0xFFFFFFu;
+        if (u < 0x38800000u) {
+          uint shift = min(113u - (u >> 23), 24u);
+          u = (0x800000u | (u & 0x7FFFFFu)) >> shift;
+        } else {
+          u -= 0x38000000u;
+        }
+        return (u >> 3) & 0xFFFFFFu;
+      }
+      // The color owner and the depth target share the base and the pitch, so
+      // a color pixel's EDRAM word is the depth target's pixel in the same
+      // tile with the 40-sample column halves swapped (depth addressing). The
+      // depth bits go to bytes 1-3 (G, B, A; the pipeline masks R, the guest
+      // stencil byte the color target wrote).
+      fragment float4 xe_alias_merge_fs(VOut in [[stage_in]],
+                                        depth2d<float> src [[texture(0)]],
+                                        constant MergeParams& p [[buffer(0)]]) {
+        uint2 dp = uint2(in.pos.xy);
+        uint tile = p.base_tiles + (dp.y / p.tile_height) * p.pitch_tiles +
+                    dp.x / p.tile_width;
+        if (tile < p.start_tiles || tile >= p.end_tiles) {
+          discard_fragment();
+        }
+        uint half_width = p.tile_width >> 1;
+        uint tx = dp.x % p.tile_width;
+        uint sx = dp.x - tx + (tx < half_width ? tx + half_width
+                                               : tx - half_width);
+        float d = src.read(uint2(sx, dp.y));
+        uint d24 = p.is_float24 != 0u ? xe_f32_to_f20e4(d * 2.0f)
+                                      : uint(rint(saturate(d) * 16777215.0));
+        return float4(0.0, float(d24 & 0xFFu), float((d24 >> 8) & 0xFFu),
+                      float((d24 >> 16) & 0xFFu)) / 255.0;
+      }
+    )METAL";
+    NSError* err = nil;
+    id<MTLLibrary> lib = [device newLibraryWithSource:src options:nil
+                                                error:&err];
+    if (!lib) {
+      XELOGE("MetalRenderTargetCache: aliased depth merge library failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return;
+    }
+    MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+    d.vertexFunction = [lib newFunctionWithName:@"xe_alias_merge_vs"];
+    d.fragmentFunction = [lib newFunctionWithName:@"xe_alias_merge_fs"];
+    d.colorAttachments[0].pixelFormat = (MTLPixelFormat)kColorFormat;
+    d.colorAttachments[0].writeMask = MTLColorWriteMaskGreen |
+                                      MTLColorWriteMaskBlue |
+                                      MTLColorWriteMaskAlpha;
+    id<MTLRenderPipelineState> ps =
+        [device newRenderPipelineStateWithDescriptor:d error:&err];
+    if (!ps) {
+      XELOGE("MetalRenderTargetCache: aliased depth merge pipeline failed: {}",
+             err ? err.localizedDescription.UTF8String : "?");
+      return;
+    }
+    aliased_depth_merge_pipeline_ = (__bridge_retained void*)ps;
+  }
+  id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)
+      command_processor_.PrepareTransferCommandBuffer(
+          uint32_t(MetalTransferSite::kOwnershipTransfer));
+  if (!cb) {
+    return;
+  }
+  struct MergeParams {
+    uint32_t base_tiles, pitch_tiles, start_tiles, end_tiles;
+    uint32_t tile_width, tile_height, is_float24, pad;
+  } params{merge.color.base_tiles,
+           merge.color.GetPitchTiles(),
+           merge.start_tiles,
+           merge.end_tiles,
+           xenos::kEdramTileWidthSamples * draw_resolution_scale_x(),
+           xenos::kEdramTileHeightSamples * draw_resolution_scale_y(),
+           uint32_t(merge.depth.GetDepthFormat() ==
+                    xenos::DepthRenderTargetFormat::kD24FS8),
+           0};
+  MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = (__bridge id<MTLTexture>)color->texture();
+  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> enc =
+      [cb renderCommandEncoderWithDescriptor:pass];
+  enc.label = @"rtcache:aliased-depth-merge";
+  [enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
+                                  aliased_depth_merge_pipeline_];
+  [enc setFragmentTexture:(__bridge id<MTLTexture>)depth->texture() atIndex:0];
+  [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
+  [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [enc endEncoding];
+  if (aliased_depth_merges_++ < 8) {
+    XELOGI("MetalRenderTargetCache: aliased depth merge {} <- {} tiles [{},{})",
+           merge.color.GetDebugName(), merge.depth.GetDebugName(),
+           merge.start_tiles, merge.end_tiles);
+  }
 }
 
 void* MetalRenderTargetCache::current_depth_texture() const {
@@ -1521,16 +1705,28 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
   const uint32_t* lengths = last_update_used_render_target_lengths_tiles();
   const uint32_t* starts = last_update_used_render_target_starts_tiles();
   id<MTLCommandBuffer> command_buffer = nil;
+  // A writable aliased depth target is outside the ownership layout (no
+  // range): bring it up to date once when its aliased draws begin; its later
+  // writes stay in the texture until FlushAliasedDepthMerge hands them to the
+  // color owner (marking it written would make it pack over the owner).
+  const bool sync_aliased_depth = aliased_depth_sync_.valid;
+  aliased_depth_sync_.valid = false;
   for (uint32_t slot = 0; slot <= xenos::kMaxColorRenderTargets; ++slot) {
     RenderTarget* render_target = used[slot];
-    if (!render_target || !lengths[slot]) {
+    const bool aliased_depth_slot = slot == 0 && sync_aliased_depth &&
+                                    render_target && !lengths[slot];
+    if (!render_target || (!lengths[slot] && !aliased_depth_slot)) {
       continue;
     }
     // The used span may start past the base (window offset in the EDRAM
     // bases); draw rows are still counted from the base (texture row 0).
     const uint32_t rt_base_tiles = render_target->key().base_tiles;
-    const uint32_t start_tiles = rt_base_tiles + starts[slot];
-    const uint32_t end_tiles = start_tiles + lengths[slot];
+    const uint32_t start_tiles = aliased_depth_slot
+                                     ? aliased_depth_sync_.start_tiles
+                                     : rt_base_tiles + starts[slot];
+    const uint32_t end_tiles = aliased_depth_slot
+                                   ? aliased_depth_sync_.end_tiles
+                                   : start_tiles + lengths[slot];
     const uint64_t attachment = GetCanonicalAttachmentId(render_target);
     static const bool s_sync_skip =
         MetalSwitchEnabled(cvars::metal_raster_sync_skip,
@@ -1786,6 +1982,7 @@ bool MetalRenderTargetCache::PrepareCurrentRasterViews() {
 }
 
 bool MetalRenderTargetCache::PrepareCanonicalEdramForReadback() {
+  FlushAliasedDepthMerge();
   if (!sample_edram_raster_enabled_) {
     return true;
   }
