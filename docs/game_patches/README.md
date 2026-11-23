@@ -28,3 +28,4 @@ Rules for adding one:
 |---|---|---|
 | NBA Ballers: Chosen One (4D5707DA) | Fix lost I/O wakeup | Boot hang on LOADING (~30% of boots): the I/O worker clears its ready flag without rechecking the queue. 2026-11-01. |
 | Blitz: The League (4D5707D4) | Fix mutex owner race | No frame ever presented (most boots): the mutex unlock clears its owner after RtlLeaveCriticalSection, so a thread that takes the lock in between never leaves it. 2026-11-22. |
+| Samurai Shodown II (584108D0) | Fix music cue null race | Crash at the blue story screen after the character select (1 boot in 2 to 4): the per-frame music-cue update reloads the cue pointer after XACT3DApply without a null check, and XACT clears it when it destroys a stopped cue. 2026-11-22. |
