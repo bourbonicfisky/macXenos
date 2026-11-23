@@ -132,8 +132,8 @@ smoother.
 | Darkest of Days | Little Bighorn, first control on the hillside | – | 205 | – | – | Doesn't cap its own frame rate (see below) |
 | The Darkness | The opening car ride, the tunnel chase | – | – | – | 30 |  |
 | The Darkness II | The opening restaurant scene | – | – | – | 32 |  |
-| Darksiders | The pause menu over the ruined city at first control | – | – | – | 120 | Doesn't cap its own frame rate (see below). War renders as stretched streaks and some text is garbled |
-| Darksiders II | First control in the frozen Veil | – | – | – | 38 | Doesn't cap its own frame rate (see below). Huge stretched polygons cover the picture |
+| Darksiders | The pause menu over the ruined city at first control | – | – | – | 120 | Doesn't cap its own frame rate (see below) |
+| Darksiders II | First control in the frozen Veil | – | – | – | 38 | Doesn't cap its own frame rate (see below) |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 | 60 | 60 |  |
 | Dead or Alive Xtreme 2 | New Zack Island, the Day 1 map | – | 30 | – | – |  |
