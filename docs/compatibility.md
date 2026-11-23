@@ -132,8 +132,8 @@ smoother.
 | Darkest of Days | Little Bighorn, first control on the hillside | – | 205 | – | – | Doesn't cap its own frame rate (see below) |
 | The Darkness | The opening car ride, the tunnel chase | – | – | – | 30 |  |
 | The Darkness II | The opening restaurant scene | – | – | – | 32 |  |
-| Darksiders | The pause menu over the ruined city at first control | – | – | – | 120 | Doesn't cap its own frame rate (see below) |
-| Darksiders II | First control in the frozen Veil | – | – | – | 38 | Doesn't cap its own frame rate (see below) |
+| Darksiders | The pause menu over the ruined city at first control | – | – | 120 | 120 | Doesn't cap its own frame rate (see below) |
+| Darksiders II | First control in the frozen Veil | – | – | 85 | 38 | Doesn't cap its own frame rate (see below), but some starts hold at about 33 instead |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 | 60 | 60 |  |
 | Dead or Alive Xtreme 2 | New Zack Island, the Day 1 map | – | 30 | – | – |  |
@@ -344,20 +344,21 @@ smoother.
 
 ## Xbox Live Arcade
 
-53 Xbox Live Arcade games are tested too, in the same way. Most were measured
+54 Xbox Live Arcade games are tested too, in the same way. Most were measured
 in the same runs. Two that no Mac measured in this round keep figures from
 earlier builds (November 2 to 15). Sixteen added on November 22 were measured
 only on the M4 mini, with a 1.1 development build; they have dashes in the
 other columns. Lara Croft and the Guardian of Light has an M1 Max figure from
 its route validation on November 21, Trials HD, added later on November
-22, was measured only on the M1 Max, Haunted House only on the M5 Max, and Guardians of Middle-Earth (added that
-evening) only on the M4 mini.
+22, was measured only on the M1 Max, Haunted House only on the M5 Max, Guardians of Middle-Earth (added that
+evening) only on the M4 mini, and Brain Challenge only on the M1 Max.
 
 | Game | Test reaches | M4 mini · rc2 | M4 Pro · rc2 | M1 Max · rc2 | M5 Max | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | Awesomenauts | First-run tutorial, Lonestar at his base | – | – | 60 | 60 |  |
 | Blade Kitten | First control, after the opening cutscene | 30 | 30 | 30 | 30 | Half the screen can flash white in the opening cutscene |
 | Bliss Island | Adventure game, the Fruit Smoothie mini-game | 60 | – | – | – | Tested as the trial |
+| Brain Challenge | Brain Test, the Balance rule demo | – | – | 60 | – | Tested as the trial |
 | Brothers: A Tale of Two Sons | The village lane at dusk | – | – | 30 | 30 |  |
 | Call of Duty Classic | Camp Toccoa, the training ground | – | – | 60 | 60 |  |
 | Call of Juarez: Gunslinger | Episode 1, the road by the ruined barn | 30 | 30 | – | 30 | (earlier build) |
