@@ -1,0 +1,75 @@
+# macXenos built-in game patch: Darksiders II (54510896).
+# Gameplay ran either locked near 30 fps or uncapped (80-160 fps, never
+# vsynced) depending on the boot. The renderer object (vtable 8220BE38) keeps
+# a vsync mode: SetVSyncMode (8292E630) maps mode 0 to present interval 2 and
+# sets an "adaptive" flag (+0x3EE), mode 1 to interval 1, mode 2 to
+# D3DPRESENT_INTERVAL_IMMEDIATE, and stores the interval at +0x1D4 and in the
+# D3D device (+0x36B0). Mode 0 is the default: each Present (8292E680) then
+# picks interval 2 when the last frame took under 35 ms (KeTimeStampBundle
+# ticks) and IMMEDIATE when it took longer, so the game holds 30 fps and
+# tears only when it falls behind.
+# GetVSyncMode (82929688) reads the mode back from +0x1D4 alone, so while the
+# adaptive Present has switched to IMMEDIATE after one slow frame it returns
+# 2 instead of 0. A loading screen (8297CAB8) saves that value, forces mode 1
+# and restores the saved mode when it ends (8297CBB0 -> SetVSyncMode at
+# 8297CBF0). If the frame before the loading screen took 35 ms or more, the
+# restore is SetVSyncMode(2): the adaptive flag is cleared and the game runs
+# IMMEDIATE (uncapped) for the rest of the session. 35 ms is only 1.7 ms over
+# a 30 fps frame, so host jitter (shader compiles, a busy host) decides it.
+# Watched live (M1 Max, uncapped boot): the device's present interval is
+# written 0x80000000 by SetVSyncMode(2) called from 8297CBF0 with the saved
+# mode. CP wait census: locked boots wait every frame on the D3D flip word
+# (0F7D6344, cleared by the vblank interrupt), uncapped boots never do.
+# The patch makes GetVSyncMode return 0 while the adaptive flag is set, so the
+# loading screen restores the adaptive mode (modes 1 and 2 read back as
+# before):
+#   lbz r10,0x3EE(r3) / lwz r11,0x1D4(r3) / li r3,0 / cmplwi cr6,r10,0 /
+#   bnelr cr6 / li r3,1 / cmplwi cr6,r11,1 / beqlr cr6 / li r3,2 / blr / nop
+# Before: 9 of 16 boots adaptive, 7 uncapped (M1 Max 2/6, M4 mini 7/9, M4
+# Pro 0/1). After: 6 of 6 adaptive on the M1 Max (32.8-33.5 fps). Evidence:
+# xenia-mac-evidence/defects-20261122/ds2-pacing/ (README.md). A file with this
+# name in the storage root's patches/ folder replaces this one (set
+# is_enabled = false there to turn it off).
+title_name = "Darksiders II"
+title_id = "54510896"
+hash = "2043EF5AE7F86AAE"
+
+[[patch]]
+    name = "Keep the adaptive 30 fps vsync after loading screens"
+    desc = "GetVSyncMode (82929688) reads the adaptive mode back as 'off' right after one slow frame, and the loading screen restores that, leaving gameplay uncapped for the session on some boots. Read the adaptive flag first."
+    author = "macXenos"
+    is_enabled = true
+
+    [[patch.be32]]
+        address = 0x82929688
+        value = 0x894303EE
+    [[patch.be32]]
+        address = 0x8292968C
+        value = 0x816301D4
+    [[patch.be32]]
+        address = 0x82929690
+        value = 0x38600000
+    [[patch.be32]]
+        address = 0x82929694
+        value = 0x2B0A0000
+    [[patch.be32]]
+        address = 0x82929698
+        value = 0x4C9A0020
+    [[patch.be32]]
+        address = 0x8292969C
+        value = 0x38600001
+    [[patch.be32]]
+        address = 0x829296A0
+        value = 0x2B0B0001
+    [[patch.be32]]
+        address = 0x829296A4
+        value = 0x4D9A0020
+    [[patch.be32]]
+        address = 0x829296A8
+        value = 0x38600002
+    [[patch.be32]]
+        address = 0x829296AC
+        value = 0x4E800020
+    [[patch.be32]]
+        address = 0x829296B0
+        value = 0x60000000
