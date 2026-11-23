@@ -225,6 +225,19 @@ class BaseHeap {
   // Inserts a free block and coalesces with adjacent free blocks.
   void InsertFreeBlock(uint32_t start_page, uint32_t page_count);
 
+  // On a heap whose guest pages are smaller than the host page (see
+  // ShouldSkipHostCommit in memory.cc), commits skip the host operation and
+  // rely on the mapping staying read/write. Protect (and Release with
+  // protect_on_release) can narrow a host page, though, and nothing widened it
+  // again when the guest pages were freed and committed anew, so the new
+  // owner faulted writing memory the page table records as read/write
+  // (Haunted House: a read-only scratch buffer released, then the next
+  // MEM_COMMIT at the same address zeroed). Re-derives the host access of
+  // every host page covering the committed range, as Protect does: the most
+  // permissive access of the committed guest pages in it.
+  void RestoreHostAccessAfterCommit(uint32_t start_page_number,
+                                    uint32_t end_page_number);
+
   Memory* memory_;
   uint8_t* membase_;
   HeapType heap_type_;
@@ -234,6 +247,9 @@ class BaseHeap {
   uint32_t page_size_shift_;
   uint32_t host_address_offset_;
   uint32_t unreserved_page_count_;
+  // A host page of this heap was given less than read/write access while its
+  // host commits are skipped (see RestoreHostAccessAfterCommit).
+  bool host_access_narrowed_ = false;
   xe::global_critical_region global_critical_region_;
   std::vector<PageEntry> page_table_;
 

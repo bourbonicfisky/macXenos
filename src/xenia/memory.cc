@@ -1390,6 +1390,9 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size,
     }
     page_entry.state = kMemoryAllocationReserve | allocation_type;
   }
+  if (allocation_type & kMemoryAllocationCommit) {
+    RestoreHostAccessAfterCommit(start_page_number, end_page_number);
+  }
 
   // Update free block tracker if any pages transitioned from free.
   if (had_free_pages) {
@@ -1573,6 +1576,9 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address,
     page_entry.state = kMemoryAllocationReserve | allocation_type;
     unreserved_page_count_--;
   }
+  if (allocation_type & kMemoryAllocationCommit) {
+    RestoreHostAccessAfterCommit(start_page_number, end_page_number);
+  }
 
   *out_address = heap_base_ + (start_page_number << page_size_shift_);
   return true;
@@ -1666,6 +1672,9 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
     // it. It's possible this is some virtual/physical stuff where the GPU
     // still can access it.
     if (cvars::protect_on_release) {
+      if (ShouldSkipHostCommit(*this)) {
+        host_access_narrowed_ = true;
+      }
       if (!xe::memory::Protect(TranslateRelative(base_page_number * page_size_),
                                base_page_entry.region_page_count * page_size_,
                                xe::memory::PageAccess::kNoAccess, nullptr)) {
@@ -1688,6 +1697,56 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
   InsertFreeBlock(base_page_number, base_page_entry.region_page_count);
 
   return true;
+}
+
+void BaseHeap::RestoreHostAccessAfterCommit(uint32_t start_page_number,
+                                            uint32_t end_page_number) {
+  // Only the guest virtual heaps: on the physical heaps host protection also
+  // carries the GPU write watches, which this must not lift. The flag keeps
+  // the common case (nothing ever narrowed) free of host calls.
+  if (!host_access_narrowed_ || heap_type_ != HeapType::kGuestVirtual ||
+      !ShouldSkipHostCommit(*this)) {
+    return;
+  }
+  const uint32_t xe_page_size = uint32_t(xe::memory::page_size());
+  const uint32_t page_size_mask = xe_page_size - 1;
+  const uint32_t start_offset =
+      host_address_offset_ + (start_page_number << page_size_shift_);
+  const uint64_t end_offset =
+      host_address_offset_ + (uint64_t(end_page_number + 1) << page_size_shift_);
+  for (uint64_t host_offset = start_offset & ~page_size_mask;
+       host_offset < end_offset; host_offset += xe_page_size) {
+    uint32_t first_guest_page =
+        host_offset > host_address_offset_
+            ? uint32_t((host_offset - host_address_offset_) >> page_size_shift_)
+            : 0;
+    uint64_t last_guest_page =
+        (host_offset + xe_page_size - 1 - host_address_offset_) >>
+        page_size_shift_;
+    last_guest_page =
+        std::min<uint64_t>(last_guest_page, page_table_.size() - 1);
+    xe::memory::PageAccess host_access = xe::memory::PageAccess::kNoAccess;
+    for (uint32_t p = first_guest_page; p <= last_guest_page; ++p) {
+      const auto& page_entry = page_table_[p];
+      if (!(page_entry.state & kMemoryAllocationCommit)) {
+        continue;
+      }
+      xe::memory::PageAccess page_access =
+          ToPageAccess(page_entry.current_protect);
+      if (page_access == xe::memory::PageAccess::kReadWrite) {
+        host_access = page_access;
+        break;
+      }
+      if (page_access == xe::memory::PageAccess::kReadOnly) {
+        host_access = page_access;
+      }
+    }
+    if (host_access == xe::memory::PageAccess::kNoAccess) {
+      continue;
+    }
+    xe::memory::Protect(membase_ + heap_base_ + host_offset, xe_page_size,
+                        host_access, nullptr);
+  }
 }
 
 bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
@@ -1756,6 +1815,10 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
        (((page_count << page_size_shift_) & page_size_mask) == 0) &&
        (((start_page_number << page_size_shift_) & page_size_mask) == 0))) {
     memory::PageAccess old_protect_access;
+    if (ShouldSkipHostCommit(*this) &&
+        ToPageAccess(protect) != xe::memory::PageAccess::kReadWrite) {
+      host_access_narrowed_ = true;
+    }
     if (!xe::memory::Protect(
             TranslateRelative(start_page_number << page_size_shift_),
             page_count << page_size_shift_, ToPageAccess(protect),
@@ -1814,6 +1877,9 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect,
           }
         }
 
+        if (host_access != xe::memory::PageAccess::kReadWrite) {
+          host_access_narrowed_ = true;
+        }
         xe::memory::Protect(
             reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(membase_) +
                                     heap_base_ + host_offset),
