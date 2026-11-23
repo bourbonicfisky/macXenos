@@ -1,0 +1,18 @@
+# macXenos built-in per-title config: Guardians of Middle-Earth (58411282,
+# Xbox Live Arcade).
+#
+# The renderer thread drains a command ring that the main thread fills
+# (queue object at guest 83949160). The producer (82252EF8) writes the
+# records, lwsync, then publishes its write position at +0x40. The consumer
+# (82253030) spins until +0x44 != +0x40 and returns; the caller (82252FC8)
+# then loads the record at its cursor (+0x2C) and calls the function pointer
+# the record starts with. There is no barrier between the position load and
+# the record loads: the in-order Xenon never performs the record load first,
+# an ARM host does, and the consumer then reads the previous lap's bytes.
+# 2026-11-22 (M4 mini, route batch): "Code fetch fault at 3F273D8C" on thread
+# F800017C, lr 82252FF4, ctr 3F273D8C (a float from an older command's
+# payload), ~100 s after boot on the main menu's tutorial tour.
+# Loads in the consumer and its caller are compiled in order.
+# (xenia-mac-evidence defects-20261122/runtime/gome)
+[CPU]
+jit_ordered_load_functions = "82252FC8,82253030"
