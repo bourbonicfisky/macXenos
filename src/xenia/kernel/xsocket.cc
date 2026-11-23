@@ -9,7 +9,10 @@
 
 #include "src/xenia/kernel/xsocket.h"
 
+#include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <set>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
@@ -35,6 +38,70 @@
 
 namespace xe {
 namespace kernel {
+
+namespace {
+
+// Ports below 1024 need privileges on some hosts, so Bind moves them up by
+// kPrivilegedPortShift. The guest must not see the move: a title that binds
+// port 1000 and then sends to port 1000 on its own (or the broadcast) address
+// expects that socket to receive it, and expects its own port back in
+// recvfrom/getsockname/accept. These are the host ports Bind produced.
+constexpr uint16_t kPrivilegedPortShift = 10000;
+std::mutex remapped_ports_mutex;
+std::set<uint16_t> remapped_ports;
+
+bool IsRemappedHostPort(uint16_t host_port) {
+  std::lock_guard<std::mutex> lock(remapped_ports_mutex);
+  return remapped_ports.count(host_port) != 0;
+}
+
+// Guest destination port -> host port: a privileged port some local socket
+// was moved from, or any privileged port on a loopback or broadcast address
+// (another instance on this host made the same move).
+uint16_t HostDestinationPort(uint16_t guest_port, uint32_t guest_addr) {
+  if (!guest_port || guest_port >= 1024) {
+    return guest_port;
+  }
+  const uint16_t shifted = uint16_t(guest_port + kPrivilegedPortShift);
+  const bool loopback = (guest_addr >> 24) == 127;
+  const bool broadcast = guest_addr == 0xFFFFFFFFu;
+  if (loopback || broadcast || IsRemappedHostPort(shifted)) {
+    return shifted;
+  }
+  return guest_port;
+}
+
+// Host port seen in a peer or local address -> the port the guest asked for.
+uint16_t GuestPort(uint16_t host_port) {
+  if (host_port > kPrivilegedPortShift &&
+      host_port < kPrivilegedPortShift + 1024 &&
+      IsRemappedHostPort(host_port)) {
+    return uint16_t(host_port - kPrivilegedPortShift);
+  }
+  return host_port;
+}
+
+// N_XSOCKADDR_IN holds the port and address as big-endian values; build a
+// host sockaddr_in from them (network order, BSD sin_len set).
+void ToNativeAddress(const N_XSOCKADDR_IN& in, sockaddr_in* out) {
+  std::memset(out, 0, sizeof(*out));
+#if XE_PLATFORM_MAC
+  out->sin_len = sizeof(sockaddr_in);
+#endif
+  out->sin_family = AF_INET;
+  const uint32_t addr = uint32_t(in.sin_addr);
+  out->sin_addr.s_addr = htonl(addr);
+  out->sin_port = htons(HostDestinationPort(uint16_t(in.sin_port), addr));
+}
+
+void FromNativeAddress(const sockaddr_in& in, N_XSOCKADDR_IN* out) {
+  out->sin_family = 2;  // AF_INET
+  out->sin_addr = ntohl(in.sin_addr.s_addr);
+  out->sin_port = GuestPort(ntohs(in.sin_port));
+  std::memset(out->x_sin_zero, 0, sizeof(out->x_sin_zero));
+}
+
+}  // namespace
 
 // Translate socket options to native
 // Note:
@@ -196,7 +263,23 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
 }
 
 X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
-  int ret = connect(native_handle_, (sockaddr*)name, name_len);
+  int ret;
+  if (name->address_family == 2 && name_len >= 8) {
+    // AF_INET: sa_data holds the big-endian port then the address.
+    N_XSOCKADDR_IN in;
+    in.sin_family = 2;
+    in.sin_port = uint16_t((uint8_t(name->sa_data[0]) << 8) |
+                           uint8_t(name->sa_data[1]));
+    in.sin_addr = (uint32_t(uint8_t(name->sa_data[2])) << 24) |
+                  (uint32_t(uint8_t(name->sa_data[3])) << 16) |
+                  (uint32_t(uint8_t(name->sa_data[4])) << 8) |
+                  uint32_t(uint8_t(name->sa_data[5]));
+    sockaddr_in native;
+    ToNativeAddress(in, &native);
+    ret = connect(native_handle_, (sockaddr*)&native, sizeof(native));
+  } else {
+    ret = connect(native_handle_, (sockaddr*)name, name_len);
+  }
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
@@ -210,21 +293,32 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
   // Note: sin_port is xe::be<uint16_t> which automatically handles endianness,
   // so we use it directly without ntohs/htons.
   const uint16_t original_port = uint16_t(name->sin_port);
-  if (original_port < 1024) {
-    uint16_t new_port = original_port + 10000;
-    name->sin_port = new_port;
+  uint16_t host_port = original_port;
+  if (original_port && original_port < 1024) {
+    host_port = uint16_t(original_port + kPrivilegedPortShift);
     XELOGW("XSocket::Bind: port {} requires privileges, remapping to port {}",
-           original_port, new_port);
+           original_port, host_port);
   }
 
-  int ret = bind(native_handle_, (sockaddr*)name, name_len);
+  sockaddr_in native = {};
+#if XE_PLATFORM_MAC
+  native.sin_len = sizeof(sockaddr_in);
+#endif
+  native.sin_family = AF_INET;
+  native.sin_addr.s_addr = htonl(uint32_t(name->sin_addr));
+  native.sin_port = htons(host_port);
+  int ret = bind(native_handle_, (sockaddr*)&native, sizeof(native));
 
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
 
+  if (host_port != original_port) {
+    std::lock_guard<std::mutex> lock(remapped_ports_mutex);
+    remapped_ports.insert(host_port);
+  }
   bound_ = true;
-  bound_port_ = name->sin_port;
+  bound_port_ = host_port;
 
   return X_STATUS_SUCCESS;
 }
@@ -248,8 +342,25 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
     return nullptr;
   }
 
-  std::memcpy(name, &n_sockaddr, n_name_len);
-  *name_len = n_name_len;
+  if (n_sockaddr.sa_family == AF_INET) {
+    N_XSOCKADDR_IN in;
+    FromNativeAddress(*reinterpret_cast<sockaddr_in*>(&n_sockaddr), &in);
+    name->address_family = 2;
+    // sa_data: big-endian port, then the big-endian address.
+    const uint16_t port = uint16_t(in.sin_port);
+    const uint32_t addr = uint32_t(in.sin_addr);
+    std::memset(name->sa_data, 0, sizeof(name->sa_data));
+    name->sa_data[0] = char(port >> 8);
+    name->sa_data[1] = char(port);
+    name->sa_data[2] = char(addr >> 24);
+    name->sa_data[3] = char(addr >> 16);
+    name->sa_data[4] = char(addr >> 8);
+    name->sa_data[5] = char(addr);
+    *name_len = sizeof(N_XSOCKADDR_IN);
+  } else {
+    std::memcpy(name, &n_sockaddr, n_name_len);
+    *name_len = n_name_len;
+  }
 
   // Create a kernel object to represent the new socket, and copy parameters
   // over.
@@ -292,15 +403,12 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
   }
   */
 
-  sockaddr_in nfrom;
+  sockaddr_in nfrom = {};
   socklen_t nfromlen = sizeof(sockaddr_in);
   int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len,
                      flags, (sockaddr*)&nfrom, &nfromlen);
-  if (from) {
-    from->sin_family = nfrom.sin_family;
-    from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
-    from->sin_port = nfrom.sin_port;
-    std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
+  if (from && ret >= 0) {
+    FromNativeAddress(nfrom, from);
   }
 
   if (from_len) {
@@ -330,13 +438,11 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags,
 
   sockaddr_in nto;
   if (to) {
-    nto.sin_addr.s_addr = to->sin_addr;
-    nto.sin_family = to->sin_family;
-    nto.sin_port = to->sin_port;
+    ToNativeAddress(*to, &nto);
   }
 
   return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
-                to ? (sockaddr*)&nto : nullptr, to_len);
+                to ? (sockaddr*)&nto : nullptr, to ? sizeof(nto) : 0);
 }
 
 bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port,
@@ -356,14 +462,29 @@ bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port,
 }
 
 X_STATUS XSocket::GetSockName(uint8_t* buf, int* buf_len) {
-  struct sockaddr sa = {};
-
-  int ret = getsockname(native_handle_, &sa, (socklen_t*)buf_len);
+  sockaddr_storage ss = {};
+  socklen_t len = sizeof(ss);
+  int ret = getsockname(native_handle_, (sockaddr*)&ss, &len);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
   }
 
-  std::memcpy(buf, &sa, *buf_len);
+  if (ss.ss_family == AF_INET && *buf_len >= int(sizeof(XSOCKADDR_IN))) {
+    // The guest layout: big-endian family, port and address.
+    N_XSOCKADDR_IN in;
+    FromNativeAddress(*reinterpret_cast<sockaddr_in*>(&ss), &in);
+    XSOCKADDR_IN guest = {};
+    guest.sin_family = in.sin_family;
+    guest.sin_port = uint16_t(in.sin_port);
+    guest.sin_addr = uint32_t(in.sin_addr);
+    std::memcpy(buf, &guest, sizeof(guest));
+    *buf_len = sizeof(guest);
+    return X_STATUS_SUCCESS;
+  }
+
+  const int copy = std::min<int>(*buf_len, int(len));
+  std::memcpy(buf, &ss, copy);
+  *buf_len = copy;
   return X_STATUS_SUCCESS;
 }
 
