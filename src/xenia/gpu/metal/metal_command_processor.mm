@@ -16530,6 +16530,7 @@ bool MetalCommandProcessor::IssueCopy() {
             (!resolve_scaled || s_shared_resolve_scaled) &&
             (SharedResolveShadersEnabled() ||
              (array_dest && SharedResolveArraysEnabled()));
+        bool color_snap_deferred_outer = false;
         if (canonical_resolve) {
           // Direct colour resolve: read the open colour attachment instead of
           // packing it into canonical EDRAM first (scope closed at the end of
@@ -16561,7 +16562,26 @@ bool MetalCommandProcessor::IssueCopy() {
               direct_color ||
               render_target_cache_->PrepareCanonicalEdramForResolve(
                   span_base, span_row_length, span_rows, span_pitch);
-          if (snap && canonical_prepared) {
+          static const bool s_resolve_fused_c = metal::ParseMetalEnvironmentFlag(
+              std::getenv("XE_METAL_RESOLVE_FUSED"), true);
+          static const bool s_no_writeback_pre =
+              std::getenv("XE_METAL_NO_WRITEBACK") != nullptr;
+          static const bool s_stage3_pre = [] {
+            const char* v = std::getenv("XE_METAL_STAGE3");
+            return !v || v[0] != '0';
+          }();
+          static const bool s_direct_verify_pre =
+              std::getenv("XE_METAL_DIRECT_COLOR_VERIFY") != nullptr;
+          color_snap_deferred_outer =
+              s_resolve_fused_c && snap && canonical_prepared &&
+              !shared_resolve_route && GpuResolveScatterEnabled() &&
+              !s_no_writeback_pre && s_stage3_pre && dest_int_bits == 0 &&
+              !s_direct_verify_pre && shared_memory_ &&
+              !resolve_info.copy_dest_info.copy_dest_array &&
+              !resolve_info.copy_dest_info.copy_dest_slice;
+          if (color_snap_deferred_outer) {
+            resolved = true;
+          } else if (snap && canonical_prepared) {
             resolved = render_target_cache_->ResolveCanonicalToSnapshot(
                          frame_command_buffer_, /*is_depth=*/false,
                          resolve_info.color_edram_info.base_tiles,
@@ -17182,37 +17202,91 @@ bool MetalCommandProcessor::IssueCopy() {
               // kernel, no staging, no CPU scatter.
               writeback_encoded = true;
             } else if (canonical_packed) {
-              writeback_encoded =
-                  render_target_cache_->ResolveCanonicalColorToBuffer(
-                      frame_command_buffer_,
-                      resolve_info.color_edram_info.base_tiles,
-                      resolve_info.color_edram_info.pitch_tiles,
-                      uint32_t(resolve_info.color_edram_info.msaa_samples),
-                      resolve_info.color_edram_info.format,
-                      resolve_info.color_edram_info.format_is_64bpp != 0,
-                      uint32_t(resolve_info.coordinate_info
-                                   .edram_offset_x_div_8)
-                          << 3,
-                      uint32_t(resolve_info.coordinate_info
-                                   .edram_offset_y_div_8)
-                          << 3,
-                      uint32_t(resolve_info.copy_dest_coordinate_info
-                                   .copy_sample_select),
-                      resolve_info.copy_dest_info.copy_dest_swap != 0,
-                      exp_bias_scale, dest_format, wb_bpp_log2,
-                      uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
-                      canonical_raw_copy,
-                      scatter_eligible ? (__bridge void*)shared_scatter_buffer
-                                       : (__bridge void*)staging,
-                      rw, rh,
-                      scatter_eligible ? &scatter_dest : nullptr,
-                      // XE_METAL_RESOLVE_NUMBER_FORMAT=0: pack every fixed
-                      // destination as an unsigned fraction (the old way).
-                      ResolveNumberFormatEnabled()
-                          ? uint32_t(
-                                resolve_info.copy_dest_info.copy_dest_number)
-                          : 0u,
-                      forwarding ? &forward : nullptr);
+              if (color_snap_deferred_outer && scatter_eligible) {
+                writeback_encoded =
+                    render_target_cache_->ResolveCanonicalColorFused(
+                        frame_command_buffer_,
+                        resolve_info.color_edram_info.base_tiles,
+                        resolve_info.color_edram_info.pitch_tiles,
+                        uint32_t(resolve_info.color_edram_info.msaa_samples),
+                        resolve_info.color_edram_info.format,
+                        resolve_info.color_edram_info.format_is_64bpp != 0,
+                        uint32_t(resolve_info.coordinate_info
+                                     .edram_offset_x_div_8)
+                            << 3,
+                        uint32_t(resolve_info.coordinate_info
+                                     .edram_offset_y_div_8)
+                            << 3,
+                        uint32_t(resolve_info.copy_dest_coordinate_info
+                                     .copy_sample_select),
+                        resolve_info.copy_dest_info.copy_dest_swap != 0,
+                        exp_bias_scale, dest_format, wb_bpp_log2,
+                        uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                        canonical_raw_copy, snap, dest_pixel_format,
+                        strip_y_offset, (__bridge void*)shared_scatter_buffer,
+                        rw, rh, scatter_dest,
+                        ResolveNumberFormatEnabled()
+                            ? uint32_t(resolve_info.copy_dest_info
+                                           .copy_dest_number)
+                            : 0u,
+                        forwarding ? &forward : nullptr);
+                if (writeback_encoded) {
+                  color_snap_deferred_outer = false;
+                }
+              }
+              if (color_snap_deferred_outer) {
+                render_target_cache_->ResolveCanonicalToSnapshot(
+                    frame_command_buffer_, /*is_depth=*/false,
+                    resolve_info.color_edram_info.base_tiles,
+                    resolve_info.color_edram_info.pitch_tiles,
+                    uint32_t(resolve_info.color_edram_info.msaa_samples),
+                    resolve_info.color_edram_info.format,
+                    resolve_info.color_edram_info.format_is_64bpp != 0,
+                    uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8)
+                        << 3,
+                    uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8)
+                        << 3,
+                    uint32_t(resolve_info.copy_dest_coordinate_info
+                                 .copy_sample_select),
+                    resolve_info.copy_dest_info.copy_dest_swap != 0,
+                    canonical_raw_copy, snap, dest_pixel_format, rw, rh,
+                    strip_y_offset, exp_bias_scale, /*dest_x_offset=*/0,
+                    dest_int_bits);
+                color_snap_deferred_outer = false;
+              }
+              if (!writeback_encoded) {
+                writeback_encoded =
+                    render_target_cache_->ResolveCanonicalColorToBuffer(
+                        frame_command_buffer_,
+                        resolve_info.color_edram_info.base_tiles,
+                        resolve_info.color_edram_info.pitch_tiles,
+                        uint32_t(resolve_info.color_edram_info.msaa_samples),
+                        resolve_info.color_edram_info.format,
+                        resolve_info.color_edram_info.format_is_64bpp != 0,
+                        uint32_t(resolve_info.coordinate_info
+                                     .edram_offset_x_div_8)
+                            << 3,
+                        uint32_t(resolve_info.coordinate_info
+                                     .edram_offset_y_div_8)
+                            << 3,
+                        uint32_t(resolve_info.copy_dest_coordinate_info
+                                     .copy_sample_select),
+                        resolve_info.copy_dest_info.copy_dest_swap != 0,
+                        exp_bias_scale, dest_format, wb_bpp_log2,
+                        uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                        canonical_raw_copy,
+                        scatter_eligible ? (__bridge void*)shared_scatter_buffer
+                                         : (__bridge void*)staging,
+                        rw, rh,
+                        scatter_eligible ? &scatter_dest : nullptr,
+                        // XE_METAL_RESOLVE_NUMBER_FORMAT=0: pack every fixed
+                        // destination as an unsigned fraction (the old way).
+                        ResolveNumberFormatEnabled()
+                            ? uint32_t(
+                                  resolve_info.copy_dest_info.copy_dest_number)
+                            : 0u,
+                        forwarding ? &forward : nullptr);
+              }
             } else {
               id<MTLCommandBuffer> wb_cb =
                   (__bridge id<MTLCommandBuffer>)frame_command_buffer_;
@@ -17358,6 +17432,26 @@ bool MetalCommandProcessor::IssueCopy() {
                   uint32_t(dc.offset_y_div_8) << 3);
             }
           }
+        }
+        if (color_snap_deferred_outer && snap && canonical_prepared) {
+          PrepareTransferCommandBuffer(
+              uint32_t(metal::MetalTransferSite::kResolve));
+          render_target_cache_->ResolveCanonicalToSnapshot(
+              frame_command_buffer_, /*is_depth=*/false,
+              resolve_info.color_edram_info.base_tiles,
+              resolve_info.color_edram_info.pitch_tiles,
+              uint32_t(resolve_info.color_edram_info.msaa_samples),
+              resolve_info.color_edram_info.format,
+              resolve_info.color_edram_info.format_is_64bpp != 0,
+              uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8) << 3,
+              uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) << 3,
+              uint32_t(resolve_info.copy_dest_coordinate_info
+                           .copy_sample_select),
+              resolve_info.copy_dest_info.copy_dest_swap != 0,
+              canonical_raw_copy, snap, dest_pixel_format, rw, rh,
+              strip_y_offset, exp_bias_scale, /*dest_x_offset=*/0,
+              dest_int_bits);
+          color_snap_deferred_outer = false;
         }
       } else {
         static uint32_t s_missing_color_rt_logs = 0;
@@ -17563,30 +17657,56 @@ bool MetalCommandProcessor::IssueCopy() {
       // snapshot) decode the guest 24-bit depth.
       bool is_float24 = resolve_info.depth_edram_info.format ==
                         uint32_t(xenos::DepthRenderTargetFormat::kD24FS8);
+      static const bool s_no_writeback_d =
+          std::getenv("XE_METAL_NO_WRITEBACK") != nullptr;
+      static const bool s_resolve_fused_d = metal::ParseMetalEnvironmentFlag(
+          std::getenv("XE_METAL_RESOLVE_FUSED"), true);
       bool resolved = false;
+      bool depth_snap_deferred = false;
       if (snap && render_target_cache_->sample_edram_raster_enabled()) {
-        resolved = render_target_cache_->PrepareCanonicalEdramForResolve(
-                       span_base, span_row_length, span_rows, span_pitch) &&
-                   render_target_cache_->ResolveCanonicalToSnapshot(
-                       frame_command_buffer_, /*is_depth=*/true,
-                       resolve_info.depth_edram_info.base_tiles,
-                       resolve_info.depth_edram_info.pitch_tiles,
-                       uint32_t(resolve_info.depth_edram_info.msaa_samples),
-                       resolve_info.depth_edram_info.format,
-                       /*is_64bpp=*/false,
-                       uint32_t(resolve_info.coordinate_info
-                                    .edram_offset_x_div_8)
-                           << 3,
-                       uint32_t(resolve_info.coordinate_info
-                                    .edram_offset_y_div_8)
-                           << 3,
-                       uint32_t(resolve_info.copy_dest_coordinate_info
-                                    .copy_sample_select),
-                       /*dest_swap=*/false,
-                       /*raw_copy=*/false,
-                       snap, MTLPixelFormatR32Float, rw, rh, strip_y_offset,
-                       1.0f, strip_x_offset, /*dest_int_bits=*/0,
-                       last_depth_pass_direction_);
+        const bool direct_depth =
+            render_target_cache_->BeginDirectDepthResolve(
+                resolve_info.depth_edram_info.base_tiles,
+                resolve_info.depth_edram_info.pitch_tiles,
+                uint32_t(resolve_info.depth_edram_info.msaa_samples),
+                resolve_info.depth_edram_info.format, span_base,
+                span_row_length, span_rows, span_pitch,
+                uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8)
+                    << 3,
+                uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8)
+                    << 3,
+                rw, rh,
+                uint32_t(resolve_info.copy_dest_coordinate_info
+                             .copy_sample_select),
+                snap);
+        const bool depth_prepared =
+            direct_depth ||
+            render_target_cache_->PrepareCanonicalEdramForResolve(
+                span_base, span_row_length, span_rows, span_pitch);
+        depth_snap_deferred =
+            s_resolve_fused_d && depth_prepared && !s_no_writeback_d &&
+            strip_x_offset == 0 && GpuResolveScatterEnabled() &&
+            shared_memory_ && !resolve_info.copy_dest_info.copy_dest_array &&
+            !resolve_info.copy_dest_info.copy_dest_slice;
+        if (depth_snap_deferred) {
+          resolved = true;
+        } else if (depth_prepared) {
+          resolved = render_target_cache_->ResolveCanonicalToSnapshot(
+              frame_command_buffer_, /*is_depth=*/true,
+              resolve_info.depth_edram_info.base_tiles,
+              resolve_info.depth_edram_info.pitch_tiles,
+              uint32_t(resolve_info.depth_edram_info.msaa_samples),
+              resolve_info.depth_edram_info.format,
+              /*is_64bpp=*/false,
+              uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8) << 3,
+              uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) << 3,
+              uint32_t(resolve_info.copy_dest_coordinate_info
+                           .copy_sample_select),
+              /*dest_swap=*/false,
+              /*raw_copy=*/false, snap, MTLPixelFormatR32Float, rw, rh,
+              strip_y_offset, 1.0f, strip_x_offset, /*dest_int_bits=*/0,
+              last_depth_pass_direction_);
+        }
       } else if (snap) {
         resolved = render_target_cache_->ResolveDepthToSnapshot(
             frame_command_buffer_, span_base, span_row_length, span_rows,
@@ -17614,8 +17734,6 @@ bool MetalCommandProcessor::IssueCopy() {
       // above the skipped exports). Blit the R32F snapshot to staging; the
       // canonical path stages the selected raw D24S8/D24FS8 word (including
       // stencil); the legacy fallback still packs its R32F snapshot.
-      static const bool s_no_writeback_d =
-          std::getenv("XE_METAL_NO_WRITEBACK") != nullptr;
       if (resolved && !s_no_writeback_d) {
         id<MTLDevice> wb_device = ((__bridge id<MTLTexture>)snap).device;
         // The staging buffer is allocated only when the GPU-resident scatter
@@ -17701,28 +17819,94 @@ bool MetalCommandProcessor::IssueCopy() {
                 depth_forward.height = depth_forward_target.height;
                 depth_forward.origin_y = depth_forward_target.origin_y;
               }
-              writeback_encoded =
-                  render_target_cache_->ResolveCanonicalDepthToBuffer(
-                      frame_command_buffer_,
-                      resolve_info.depth_edram_info.base_tiles,
-                      resolve_info.depth_edram_info.pitch_tiles,
-                      uint32_t(resolve_info.depth_edram_info.msaa_samples),
-                      resolve_info.depth_edram_info.format,
-                      uint32_t(resolve_info.coordinate_info
-                                   .edram_offset_x_div_8)
-                          << 3,
-                      uint32_t(resolve_info.coordinate_info
-                                   .edram_offset_y_div_8)
-                          << 3,
-                      uint32_t(resolve_info.copy_dest_coordinate_info
-                                   .copy_sample_select),
-                      shared_memory_->GetBuffer(), rw, rh,
-                      uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
-                      &depth_dest,
-                      depth_forward.texture ? &depth_forward : nullptr);
+              if (depth_snap_deferred) {
+                writeback_encoded =
+                    render_target_cache_->ResolveCanonicalDepthFused(
+                        frame_command_buffer_,
+                        resolve_info.depth_edram_info.base_tiles,
+                        resolve_info.depth_edram_info.pitch_tiles,
+                        uint32_t(resolve_info.depth_edram_info.msaa_samples),
+                        resolve_info.depth_edram_info.format,
+                        uint32_t(resolve_info.coordinate_info
+                                     .edram_offset_x_div_8)
+                            << 3,
+                        uint32_t(resolve_info.coordinate_info
+                                     .edram_offset_y_div_8)
+                            << 3,
+                        uint32_t(resolve_info.copy_dest_coordinate_info
+                                     .copy_sample_select),
+                        snap, strip_y_offset, last_depth_pass_direction_,
+                        shared_memory_->GetBuffer(), rw, rh,
+                        uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                        depth_dest,
+                        depth_forward.texture ? &depth_forward : nullptr);
+                if (writeback_encoded) {
+                  depth_snap_deferred = false;
+                }
+              }
+              if (depth_snap_deferred) {
+                render_target_cache_->ResolveCanonicalToSnapshot(
+                    frame_command_buffer_, /*is_depth=*/true,
+                    resolve_info.depth_edram_info.base_tiles,
+                    resolve_info.depth_edram_info.pitch_tiles,
+                    uint32_t(resolve_info.depth_edram_info.msaa_samples),
+                    resolve_info.depth_edram_info.format,
+                    /*is_64bpp=*/false,
+                    uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8)
+                        << 3,
+                    uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8)
+                        << 3,
+                    uint32_t(resolve_info.copy_dest_coordinate_info
+                                 .copy_sample_select),
+                    /*dest_swap=*/false,
+                    /*raw_copy=*/false, snap, MTLPixelFormatR32Float, rw, rh,
+                    strip_y_offset, 1.0f, strip_x_offset, /*dest_int_bits=*/0,
+                    last_depth_pass_direction_);
+                depth_snap_deferred = false;
+              }
+              if (!writeback_encoded) {
+                writeback_encoded =
+                    render_target_cache_->ResolveCanonicalDepthToBuffer(
+                        frame_command_buffer_,
+                        resolve_info.depth_edram_info.base_tiles,
+                        resolve_info.depth_edram_info.pitch_tiles,
+                        uint32_t(resolve_info.depth_edram_info.msaa_samples),
+                        resolve_info.depth_edram_info.format,
+                        uint32_t(resolve_info.coordinate_info
+                                     .edram_offset_x_div_8)
+                            << 3,
+                        uint32_t(resolve_info.coordinate_info
+                                     .edram_offset_y_div_8)
+                            << 3,
+                        uint32_t(resolve_info.copy_dest_coordinate_info
+                                     .copy_sample_select),
+                        shared_memory_->GetBuffer(), rw, rh,
+                        uint32_t(resolve_info.copy_dest_info.copy_dest_endian),
+                        &depth_dest,
+                        depth_forward.texture ? &depth_forward : nullptr);
+              }
               if (!writeback_encoded) {
                 depth_scatter = false;
               }
+            } else if (depth_snap_deferred) {
+              render_target_cache_->ResolveCanonicalToSnapshot(
+                  frame_command_buffer_, /*is_depth=*/true,
+                  resolve_info.depth_edram_info.base_tiles,
+                  resolve_info.depth_edram_info.pitch_tiles,
+                  uint32_t(resolve_info.depth_edram_info.msaa_samples),
+                  resolve_info.depth_edram_info.format,
+                  /*is_64bpp=*/false,
+                  uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8)
+                      << 3,
+                  uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8)
+                      << 3,
+                  uint32_t(resolve_info.copy_dest_coordinate_info
+                               .copy_sample_select),
+                  /*dest_swap=*/false,
+                  /*raw_copy=*/false, snap, MTLPixelFormatR32Float, rw, rh,
+                  strip_y_offset, 1.0f, strip_x_offset, /*dest_int_bits=*/0,
+                  last_depth_pass_direction_);
+              depth_snap_deferred = false;
             }
             if (IssueCopyGpuResolveLog()) {
               // Same census as MetalGpuScatter for the depth path: which depth
@@ -17840,6 +18024,27 @@ bool MetalCommandProcessor::IssueCopy() {
           }
         }
       }
+      if (depth_snap_deferred && snap) {
+        PrepareTransferCommandBuffer(
+            uint32_t(metal::MetalTransferSite::kResolve));
+        render_target_cache_->ResolveCanonicalToSnapshot(
+            frame_command_buffer_, /*is_depth=*/true,
+            resolve_info.depth_edram_info.base_tiles,
+            resolve_info.depth_edram_info.pitch_tiles,
+            uint32_t(resolve_info.depth_edram_info.msaa_samples),
+            resolve_info.depth_edram_info.format,
+            /*is_64bpp=*/false,
+            uint32_t(resolve_info.coordinate_info.edram_offset_x_div_8) << 3,
+            uint32_t(resolve_info.coordinate_info.edram_offset_y_div_8) << 3,
+            uint32_t(resolve_info.copy_dest_coordinate_info
+                         .copy_sample_select),
+            /*dest_swap=*/false,
+            /*raw_copy=*/false, snap, MTLPixelFormatR32Float, rw, rh,
+            strip_y_offset, 1.0f, strip_x_offset, /*dest_int_bits=*/0,
+            last_depth_pass_direction_);
+        depth_snap_deferred = false;
+      }
+      render_target_cache_->EndDirectDepthResolve();
     }
   }
   // Resolve CLEARS: guests set render-target base values this way (JC2's

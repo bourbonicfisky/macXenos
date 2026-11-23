@@ -443,6 +443,479 @@ TEST_CASE("Packed color snapshots retain every scaled subpixel",
   }
 }
 
+TEST_CASE("Direct extended color and fused resolves match canonical at scale",
+          "[l1][metal][draw_resolution_scale][direct_fused]") {
+  for (uint32_t scale : {1u, 2u, 3u}) {
+    ScaledMsl msl;
+    REQUIRE(msl.Init(scale, scale));
+    const uint32_t gw = 16, gh = 8;
+    const uint32_t hw = gw * scale, hh = gh * scale;
+    const uint32_t pitch_tiles = 1;
+    const uint32_t edram_words = 80 * 16 * scale * scale;
+    // Test 64bpp raw-view k_16_16_16_16_FLOAT (format 7): RGBA16Uint texture
+    // packed into canonical EDRAM vs direct 64_raw_1x and fused+fwd kernels.
+    std::vector<uint16_t> raw_tex(hw * hh * 4);
+    std::vector<uint32_t> edram(edram_words, 0u);
+    for (uint32_t y = 0; y < hh; ++y) {
+      for (uint32_t x = 0; x < hw; ++x) {
+        uint32_t i = y * hw + x;
+        uint16_t h0 = uint16_t(0x3C00u + ((i * 13u) & 0x3FFu));
+        uint16_t h1 = uint16_t(0x3800u + ((i * 29u) & 0x3FFu));
+        uint16_t h2 = uint16_t(0x3400u + ((i * 47u) & 0x3FFu));
+        uint16_t h3 = 0x3C00u;
+        raw_tex[i * 4 + 0] = h0;
+        raw_tex[i * 4 + 1] = h1;
+        raw_tex[i * 4 + 2] = h2;
+        raw_tex[i * 4 + 3] = h3;
+        uint32_t off = ScaledEdramOffsetBytes(x, y, 0, pitch_tiles, 0, false, 1,
+                                              0, scale, scale) /
+                       4u;
+        edram[off] = uint32_t(h0) | (uint32_t(h1) << 16u);
+        edram[off + 1] = uint32_t(h2) | (uint32_t(h3) << 16u);
+      }
+    }
+    id<MTLBuffer> canonical =
+        [msl.device newBufferWithBytes:edram.data()
+                                length:edram.size() * 4u
+                               options:MTLResourceStorageModeShared];
+    MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+    td.textureType = MTLTextureType2D;
+    td.pixelFormat = MTLPixelFormatRGBA16Uint;
+    td.width = hw;
+    td.height = hh;
+    td.storageMode = MTLStorageModeShared;
+    td.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> direct_tex = [msl.device newTextureWithDescriptor:td];
+    REQUIRE(direct_tex != nil);
+    [direct_tex replaceRegion:MTLRegionMake2D(0, 0, hw, hh)
+                  mipmapLevel:0
+                    withBytes:raw_tex.data()
+                  bytesPerRow:hw * 8];
+
+    auto make_snap = [&]() {
+      MTLTextureDescriptor* sd = [[MTLTextureDescriptor alloc] init];
+      sd.textureType = MTLTextureType2DArray;
+      sd.pixelFormat = MTLPixelFormatRGBA16Float;
+      sd.width = hw;
+      sd.height = hh;
+      sd.arrayLength = 1;
+      sd.storageMode = MTLStorageModeShared;
+      sd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+      return [msl.device newTextureWithDescriptor:sd];
+    };
+    auto make_fwd = [&]() {
+      MTLTextureDescriptor* fd = [[MTLTextureDescriptor alloc] init];
+      fd.textureType = MTLTextureType2D;
+      fd.pixelFormat = MTLPixelFormatRGBA16Uint;
+      fd.width = gw;
+      fd.height = gh;
+      fd.storageMode = MTLStorageModeShared;
+      fd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+      return [msl.device newTextureWithDescriptor:fd];
+    };
+    const uint32_t dest_extent = 32u * 32u * 8u;
+    auto make_buf = [&]() {
+      id<MTLBuffer> b =
+          [msl.device newBufferWithLength:dest_extent
+                                  options:MTLResourceStorageModeShared];
+      std::memset(b.contents, 0, dest_extent);
+      return b;
+    };
+    id<MTLTexture> snap_ref = make_snap();
+    id<MTLTexture> snap_dir = make_snap();
+    id<MTLTexture> snap_fused = make_snap();
+    id<MTLTexture> fwd_ref = make_fwd();
+    id<MTLTexture> fwd_fused = make_fwd();
+    id<MTLBuffer> buf_ref = make_buf();
+    id<MTLBuffer> buf_dir = make_buf();
+    id<MTLBuffer> buf_fused = make_buf();
+
+    uint32_t params[29] = {};
+    params[0] = 0;            // base
+    params[1] = pitch_tiles;  // pitch
+    params[2] = 0;            // msaa 1x
+    params[3] = 0;            // is_depth
+    params[4] = 1;            // fmt_log2 (64bpp)
+    params[5] = edram_words;
+    params[10] = 7;  // color_format k_16_16_16_16_FLOAT
+    params[11] = 1;  // dest_swap
+    float bias = 1.0f;
+    std::memcpy(&params[13], &bias, 4);
+    params[14] = gw;
+    params[15] = gh;
+    params[16] = 32;  // k_16_16_16_16_FLOAT texture dest
+    params[17] = 3;   // dest_bpp_log2 = 8 bytes
+    params[18] = 2;   // 8in32 endian
+    params[19] = 0;   // raw_copy = 0
+    params[20] = 1;   // scatter_enable
+    params[21] = 0;   // dest_base
+    params[22] = 32;  // dest_pitch_aligned
+    params[25] = dest_extent;
+    uint32_t origin[2] = {0, 0};
+    uint32_t rt_format = 7;
+    uint32_t snap_pack_1010102 = 0;
+    uint32_t fwd_params[5] = {2u, 2u, gw, gh, 0u};
+
+    id<MTLCommandBuffer> cb = [msl.queue commandBuffer];
+    // Reference: canonical cs + canonical packed_fwd.
+    {
+      auto enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:msl.Pipeline("resolve_canonical_color_cs")];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBytes:params length:sizeof(params) atIndex:1];
+      [enc setBytes:origin length:sizeof(origin) atIndex:2];
+      [enc setTexture:snap_ref atIndex:0];
+      [enc dispatchThreads:MTLSizeMake(hw, hh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [enc endEncoding];
+    }
+    {
+      auto enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:msl.Pipeline(
+                                       "resolve_canonical_color_packed_fwd")];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBuffer:buf_ref offset:0 atIndex:1];
+      [enc setBytes:params length:sizeof(params) atIndex:2];
+      [enc setBytes:fwd_params length:sizeof(fwd_params) atIndex:5];
+      [enc setTexture:fwd_ref atIndex:2];
+      [enc dispatchThreads:MTLSizeMake(gw, gh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [enc endEncoding];
+    }
+    // Direct unfused: direct 64_raw_1x cs + packed.
+    {
+      auto enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:msl.Pipeline(
+                                       "resolve_direct_color_cs_64_raw_1x")];
+      [enc setTexture:direct_tex atIndex:1];
+      [enc setBytes:params length:sizeof(params) atIndex:1];
+      [enc setBytes:origin length:sizeof(origin) atIndex:2];
+      [enc setBytes:&rt_format length:sizeof(rt_format) atIndex:3];
+      [enc setTexture:snap_dir atIndex:0];
+      [enc dispatchThreads:MTLSizeMake(hw, hh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [enc endEncoding];
+    }
+    {
+      auto enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:msl.Pipeline(
+                                       "resolve_direct_color_packed_64_raw_1x")];
+      [enc setTexture:direct_tex atIndex:0];
+      [enc setBuffer:buf_dir offset:0 atIndex:1];
+      [enc setBytes:params length:sizeof(params) atIndex:2];
+      [enc setBytes:&rt_format length:sizeof(rt_format) atIndex:3];
+      [enc dispatchThreads:MTLSizeMake(gw, gh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [enc endEncoding];
+    }
+    // Direct fused + forward in one dispatch.
+    {
+      auto enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:
+               msl.Pipeline("resolve_direct_color_fused_fwd_64_raw_1x")];
+      [enc setTexture:direct_tex atIndex:1];
+      [enc setBytes:params length:sizeof(params) atIndex:1];
+      [enc setBytes:origin length:sizeof(origin) atIndex:2];
+      [enc setBytes:&rt_format length:sizeof(rt_format) atIndex:3];
+      [enc setBuffer:buf_fused offset:0 atIndex:4];
+      [enc setBytes:fwd_params length:sizeof(fwd_params) atIndex:5];
+      [enc setBytes:&snap_pack_1010102
+             length:sizeof(snap_pack_1010102)
+            atIndex:6];
+      [enc setTexture:snap_fused atIndex:0];
+      [enc setTexture:fwd_fused atIndex:2];
+      [enc dispatchThreads:MTLSizeMake(hw, hh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [enc endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+
+    std::vector<uint8_t> s_ref(hw * hh * 8), s_dir(hw * hh * 8),
+        s_fus(hw * hh * 8);
+    [snap_ref getBytes:s_ref.data()
+           bytesPerRow:hw * 8
+         bytesPerImage:hw * hh * 8
+            fromRegion:MTLRegionMake2D(0, 0, hw, hh)
+           mipmapLevel:0
+                 slice:0];
+    [snap_dir getBytes:s_dir.data()
+           bytesPerRow:hw * 8
+         bytesPerImage:hw * hh * 8
+            fromRegion:MTLRegionMake2D(0, 0, hw, hh)
+           mipmapLevel:0
+                 slice:0];
+    [snap_fused getBytes:s_fus.data()
+             bytesPerRow:hw * 8
+           bytesPerImage:hw * hh * 8
+              fromRegion:MTLRegionMake2D(0, 0, hw, hh)
+             mipmapLevel:0
+                   slice:0];
+    std::vector<uint8_t> f_ref(gw * gh * 8), f_fus(gw * gh * 8);
+    [fwd_ref getBytes:f_ref.data()
+          bytesPerRow:gw * 8
+           fromRegion:MTLRegionMake2D(0, 0, gw, gh)
+          mipmapLevel:0];
+    [fwd_fused getBytes:f_fus.data()
+            bytesPerRow:gw * 8
+             fromRegion:MTLRegionMake2D(0, 0, gw, gh)
+            mipmapLevel:0];
+    INFO("scale=" << scale);
+    CHECK(s_dir == s_ref);
+    CHECK(s_fus == s_ref);
+    CHECK(std::memcmp(buf_dir.contents, buf_ref.contents, dest_extent) == 0);
+    CHECK(std::memcmp(buf_fused.contents, buf_ref.contents, dest_extent) == 0);
+    CHECK(f_fus == f_ref);
+  }
+}
+
+TEST_CASE("Direct depth and fused depth resolves match canonical at scale",
+          "[l1][metal][draw_resolution_scale][direct_depth]") {
+  for (uint32_t scale : {1u, 2u, 3u}) {
+    ScaledMsl msl;
+    REQUIRE(msl.Init(scale, scale));
+    const uint32_t gw = 16, gh = 8;
+    const uint32_t hw = gw * scale, hh = gh * scale;
+    const uint32_t edram_words = 80 * 16 * scale * scale;
+    // Create private Depth32Float_Stencil8 attachment, populate it via a
+    // render pass (varying depth + stencil), pack to canonical, then compare
+    // direct depth cs/raw/fused vs canonical cs/raw bit-for-bit.
+    MTLTextureDescriptor* dd = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                     width:hw
+                                    height:hh
+                                 mipmapped:NO];
+    dd.storageMode = MTLStorageModePrivate;
+    dd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead |
+               MTLTextureUsagePixelFormatView;
+    id<MTLTexture> depth_tex = [msl.device newTextureWithDescriptor:dd];
+    REQUIRE(depth_tex != nil);
+    id<MTLTexture> stencil_view =
+        [depth_tex newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+    REQUIRE(stencil_view != nil);
+
+    // Fill canonical EDRAM with distinct D24FS8 words, materialize into
+    // depth_tex, then compare direct resolve against canonical resolve.
+    std::vector<uint32_t> init_edram(edram_words, 0u);
+    for (uint32_t y = 0; y < hh; ++y) {
+      for (uint32_t x = 0; x < hw; ++x) {
+        uint32_t i = y * hw + x;
+        uint32_t d24 = 0x400000u + ((i * 997u) & 0x3FFFFFu);
+        uint32_t sten = (i * 37u + 11u) & 0xFFu;
+        uint32_t off = ScaledEdramOffsetBytes(x, y, 0, 1, 0, true, 0, 0, scale,
+                                              scale) /
+                       4u;
+        init_edram[off] = (d24 << 8u) | sten;
+      }
+    }
+    id<MTLBuffer> canonical =
+        [msl.device newBufferWithBytes:init_edram.data()
+                                length:init_edram.size() * 4u
+                               options:MTLResourceStorageModeShared];
+    // Populate depth_tex with varying per-pixel depth and stencil via
+    // materialize_depth_sten_ms_range_fs (msaa=0, sample_count=1) so every
+    // pixel has distinct depth24 and stencil8 values, then pack to canonical.
+    MTLRenderPipelineDescriptor* rpd =
+        [[MTLRenderPipelineDescriptor alloc] init];
+    rpd.vertexFunction = [msl.library newFunctionWithName:@"xe_depth_vs"];
+    rpd.fragmentFunction =
+        [msl.library newFunctionWithName:@"materialize_depth_sten_ms_range_fs"];
+    rpd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    rpd.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    rpd.rasterSampleCount = 1;
+    NSError* rpe = nil;
+    id<MTLRenderPipelineState> mat_pso =
+        [msl.device newRenderPipelineStateWithDescriptor:rpd error:&rpe];
+    REQUIRE(mat_pso != nil);
+    MTLDepthStencilDescriptor* dsd = [[MTLDepthStencilDescriptor alloc] init];
+    dsd.depthCompareFunction = MTLCompareFunctionAlways;
+    dsd.depthWriteEnabled = YES;
+    MTLStencilDescriptor* sd_s = [[MTLStencilDescriptor alloc] init];
+    sd_s.stencilCompareFunction = MTLCompareFunctionAlways;
+    sd_s.depthStencilPassOperation = MTLStencilOperationReplace;
+    sd_s.writeMask = 0xFF;
+    dsd.frontFaceStencil = sd_s;
+    dsd.backFaceStencil = sd_s;
+    id<MTLDepthStencilState> dss =
+        [msl.device newDepthStencilStateWithDescriptor:dsd];
+    {
+      MTLRenderPassDescriptor* rp =
+          [MTLRenderPassDescriptor renderPassDescriptor];
+      rp.depthAttachment.texture = depth_tex;
+      rp.depthAttachment.loadAction = MTLLoadActionDontCare;
+      rp.depthAttachment.storeAction = MTLStoreActionStore;
+      rp.stencilAttachment.texture = depth_tex;
+      rp.stencilAttachment.loadAction = MTLLoadActionDontCare;
+      rp.stencilAttachment.storeAction = MTLStoreActionStore;
+      id<MTLCommandBuffer> cb0 = [msl.queue commandBuffer];
+      id<MTLRenderCommandEncoder> renc =
+          [cb0 renderCommandEncoderWithDescriptor:rp];
+      uint32_t sp[6] = {0, 1, 0, 2, 0, edram_words};
+      uint32_t rng[2] = {0, 2048};
+      uint32_t hl = 0;
+      id<MTLBuffer> dummy_lane =
+          [msl.device newBufferWithLength:16
+                                  options:MTLResourceStorageModeShared];
+      [renc setRenderPipelineState:mat_pso];
+      [renc setDepthStencilState:dss];
+      [renc setFragmentBuffer:canonical offset:0 atIndex:0];
+      [renc setFragmentBytes:sp length:sizeof(sp) atIndex:1];
+      [renc setFragmentBytes:rng length:sizeof(rng) atIndex:2];
+      [renc setFragmentBytes:&hl length:sizeof(hl) atIndex:3];
+      [renc setFragmentBuffer:dummy_lane offset:0 atIndex:4];
+      [renc drawPrimitives:MTLPrimitiveTypeTriangle
+               vertexStart:0
+               vertexCount:3];
+      [renc endEncoding];
+      auto penc = [cb0 computeCommandEncoder];
+      [penc setComputePipelineState:msl.Pipeline("pack_depth")];
+      [penc setTexture:depth_tex atIndex:0];
+      [penc setTexture:stencil_view atIndex:1];
+      [penc setBuffer:canonical offset:0 atIndex:0];
+      [penc setBytes:sp length:sizeof(sp) atIndex:1];
+      [penc dispatchThreads:MTLSizeMake(hw, hh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [penc endEncoding];
+      [cb0 commit];
+      [cb0 waitUntilCompleted];
+      REQUIRE(cb0.error == nil);
+    }
+
+    auto make_snap = [&]() {
+      MTLTextureDescriptor* sd = [[MTLTextureDescriptor alloc] init];
+      sd.textureType = MTLTextureType2DArray;
+      sd.pixelFormat = MTLPixelFormatR32Float;
+      sd.width = hw;
+      sd.height = hh;
+      sd.arrayLength = 1;
+      sd.storageMode = MTLStorageModeShared;
+      sd.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+      return [msl.device newTextureWithDescriptor:sd];
+    };
+    const uint32_t dest_extent = 32u * 32u * 4u;
+    auto make_buf = [&]() {
+      id<MTLBuffer> b =
+          [msl.device newBufferWithLength:dest_extent
+                                  options:MTLResourceStorageModeShared];
+      std::memset(b.contents, 0, dest_extent);
+      return b;
+    };
+    id<MTLTexture> snap_ref = make_snap();
+    id<MTLTexture> snap_dir = make_snap();
+    id<MTLTexture> snap_fused = make_snap();
+    id<MTLBuffer> buf_ref = make_buf();
+    id<MTLBuffer> buf_dir = make_buf();
+    id<MTLBuffer> buf_fused = make_buf();
+
+    uint32_t params[29] = {};
+    params[0] = 0;  // base
+    params[1] = 1;  // pitch
+    params[2] = 0;  // msaa 1x
+    params[3] = 2;  // is_depth = kD24FS8
+    params[4] = 0;
+    params[5] = edram_words;
+    float bias = 1.0f;
+    std::memcpy(&params[13], &bias, 4);
+    params[14] = gw;
+    params[15] = gh;
+    params[17] = 2;  // 32bpp
+    params[18] = 2;  // 8in32 endian
+    params[19] = 1;  // raw
+    params[20] = 1;  // scatter
+    params[22] = 32;
+    params[25] = dest_extent;
+    uint32_t origin[2] = {0, 0};
+
+    id<MTLCommandBuffer> cb = [msl.queue commandBuffer];
+    {
+      auto enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:msl.Pipeline("resolve_canonical_depth_cs")];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBytes:params length:sizeof(params) atIndex:1];
+      [enc setBytes:origin length:sizeof(origin) atIndex:2];
+      [enc setTexture:snap_ref atIndex:0];
+      [enc dispatchThreads:MTLSizeMake(hw, hh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [enc endEncoding];
+    }
+    {
+      auto enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:msl.Pipeline("resolve_canonical_depth_raw")];
+      [enc setBuffer:canonical offset:0 atIndex:0];
+      [enc setBuffer:buf_ref offset:0 atIndex:1];
+      [enc setBytes:params length:sizeof(params) atIndex:2];
+      [enc dispatchThreads:MTLSizeMake(gw, gh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [enc endEncoding];
+    }
+    {
+      auto enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:msl.Pipeline("resolve_direct_depth_cs_1x")];
+      [enc setTexture:depth_tex atIndex:1];
+      [enc setBytes:params length:sizeof(params) atIndex:1];
+      [enc setBytes:origin length:sizeof(origin) atIndex:2];
+      [enc setTexture:snap_dir atIndex:0];
+      [enc dispatchThreads:MTLSizeMake(hw, hh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [enc endEncoding];
+    }
+    {
+      auto enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:msl.Pipeline("resolve_direct_depth_raw_1x")];
+      [enc setTexture:depth_tex atIndex:0];
+      [enc setTexture:stencil_view atIndex:1];
+      [enc setBuffer:buf_dir offset:0 atIndex:1];
+      [enc setBytes:params length:sizeof(params) atIndex:2];
+      [enc dispatchThreads:MTLSizeMake(gw, gh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [enc endEncoding];
+    }
+    {
+      auto enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:msl.Pipeline(
+                                       "resolve_direct_depth_fused_1x")];
+      [enc setTexture:depth_tex atIndex:1];
+      [enc setTexture:stencil_view atIndex:3];
+      [enc setBytes:params length:sizeof(params) atIndex:1];
+      [enc setBytes:origin length:sizeof(origin) atIndex:2];
+      [enc setBuffer:buf_fused offset:0 atIndex:4];
+      [enc setTexture:snap_fused atIndex:0];
+      [enc dispatchThreads:MTLSizeMake(hw, hh, 1)
+          threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+      [enc endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+
+    std::vector<uint32_t> s_ref(hw * hh), s_dir(hw * hh), s_fus(hw * hh);
+    [snap_ref getBytes:s_ref.data()
+           bytesPerRow:hw * 4
+         bytesPerImage:hw * hh * 4
+            fromRegion:MTLRegionMake2D(0, 0, hw, hh)
+           mipmapLevel:0
+                 slice:0];
+    [snap_dir getBytes:s_dir.data()
+           bytesPerRow:hw * 4
+         bytesPerImage:hw * hh * 4
+            fromRegion:MTLRegionMake2D(0, 0, hw, hh)
+           mipmapLevel:0
+                 slice:0];
+    [snap_fused getBytes:s_fus.data()
+             bytesPerRow:hw * 4
+           bytesPerImage:hw * hh * 4
+              fromRegion:MTLRegionMake2D(0, 0, hw, hh)
+             mipmapLevel:0
+                   slice:0];
+    INFO("scale=" << scale);
+    CHECK(s_dir == s_ref);
+    CHECK(s_fus == s_ref);
+    CHECK(std::memcmp(buf_dir.contents, buf_ref.contents, dest_extent) == 0);
+    CHECK(std::memcmp(buf_fused.contents, buf_ref.contents, dest_extent) == 0);
+  }
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace xe
