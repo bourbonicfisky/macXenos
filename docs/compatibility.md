@@ -344,13 +344,14 @@ smoother.
 
 ## Xbox Live Arcade
 
-52 Xbox Live Arcade games are tested too, in the same way. Most were measured
+53 Xbox Live Arcade games are tested too, in the same way. Most were measured
 in the same runs. Two that no Mac measured in this round keep figures from
 earlier builds (November 2 to 15). Sixteen added on November 22 were measured
 only on the M4 mini, with a 1.1 development build; they have dashes in the
 other columns. Lara Croft and the Guardian of Light has an M1 Max figure from
 its route validation on November 21, Trials HD, added later on November
-22, was measured only on the M1 Max, and Haunted House only on the M5 Max.
+22, was measured only on the M1 Max, Haunted House only on the M5 Max, and Guardians of Middle-Earth (added that
+evening) only on the M4 mini.
 
 | Game | Test reaches | M4 mini · rc2 | M4 Pro · rc2 | M1 Max · rc2 | M5 Max | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
@@ -370,6 +371,7 @@ its route validation on November 21, Trials HD, added later on November
 | Frogger: Hyper Arcade Edition | Tile Capture, a party game against three CPU frogs | 214 | – | – | – | Tested as the trial. Doesn't cap its own frame rate (see below) |
 | From Dust | The first scene, the tribe on the night shore | – | – | 30 | 30 |  |
 | Guardian Heroes | Story mode, the tavern at the start of stage 1 | 60 | – | – | – | Tested as the trial |
+| Guardians of Middle-Earth | Main menu tour, the Inventory card | 30 | – | – | – | Menu test only: offline play stops on a loading screen |
 | Halo: Spartan Assault | Mission A-1, the outpost on an icy moon | 60 | 60 | 60 | 60 | Tested as the trial |
 | Haunted House | The first room, Jacob on Spooky difficulty | – | – | – | 60 |  |
 | Heavy Weapon: Atomic Tank | Mission 1, Tundra Flats | 60 | – | – | – | Tested as the trial |
