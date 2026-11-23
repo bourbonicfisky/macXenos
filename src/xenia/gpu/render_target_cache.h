@@ -184,6 +184,17 @@ class RenderTargetCache {
   // range clamped to the rows above the scissor, which it never draws.
   // Backends that size host render targets from the used ranges opt in.
   virtual bool AreScissorRangeStartsSupported() const { return false; }
+  // Whether a single-sampled depth target may stay bound with depth writes
+  // while a 32bpp color target at the same base writes only the stencil byte
+  // (stencil off). Dark (4B5907E6) writes a material mask through the red
+  // channel of an 8_8_8_8 target over its depth buffer in the G-buffer pass and
+  // resolves depth and the mask from the shared words; dropping the depth
+  // leaves the depth resolve at the far plane and the deferred lights dark.
+  // The color target owns the range and the depth target keeps the depth bits
+  // (depth_bits_target), so a backend that opts in must give the color owner
+  // the depth bits (last_update_aliased_depth_write_color_bits) before its
+  // words are read.
+  virtual bool AreAliasedDepthWritesSupported() const { return false; }
 
   // Resolution scaling on the EDRAM side is performed by multiplying the EDRAM
   // tile size by the resolution scale.
@@ -628,6 +639,16 @@ class RenderTargetCache {
     return found != render_targets_.end() ? found->second : nullptr;
   }
 
+  // Color slots (bit 1 + index) whose last Update kept a writable depth target
+  // bound at the same base (AreAliasedDepthWritesSupported).
+  uint32_t last_update_aliased_depth_write_color_bits() const {
+    return last_update_aliased_depth_write_color_bits_;
+  }
+  // The live host render target with the key, or nullptr.
+  RenderTarget* FindRenderTarget(RenderTargetKey key) const {
+    auto it = render_targets_.find(key);
+    return it != render_targets_.end() ? it->second : nullptr;
+  }
   const std::vector<Transfer>* last_update_transfers() const {
     assert_true(GetPath() == Path::kHostRenderTargets);
     return last_update_transfers_;
@@ -893,6 +914,7 @@ class RenderTargetCache {
   // update: a resolve can come first (Dark Souls), and backends walk this.
   RenderTarget*
       last_update_used_render_targets_[1 + xenos::kMaxColorRenderTargets] = {};
+  uint32_t last_update_aliased_depth_write_color_bits_ = 0;
   // See TrackLastUpdateDrawTarget.
   RenderTargetKey last_update_draw_target_;
   // The latest frame each render target was drawn in, and the one before it,

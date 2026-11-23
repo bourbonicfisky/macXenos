@@ -95,6 +95,16 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // scissor top is drawn where the guest drew it. XE_METAL_SCISSOR_RANGE_START=0
   // restores ranges from the base.
   bool AreScissorRangeStartsSupported() const override;
+  // On: a single-sampled depth target stays bound with depth writes while an
+  // 8_8_8_8 target at its base writes only the stencil byte (Dark's G-buffer
+  // material mask); the depth bits are merged into the color owner before its
+  // words are read (FlushAliasedDepthMerge). XE_METAL_ALIASED_DEPTH_WRITES=0
+  // drops the depth target as before.
+  bool AreAliasedDepthWritesSupported() const override;
+  // Writes the pending aliased depth target's bits (8:31) into its color
+  // owner's words. Called before anything reads the color owner's words
+  // (ownership transfers, resolves, EDRAM readback).
+  void FlushAliasedDepthMerge();
   Path GetPath() const override {
     return Path::kHostRenderTargets;
   }
@@ -1259,6 +1269,25 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* transfer_x2x_depth_state_ = nullptr;    // id<MTLDepthStencilState>.
   std::unordered_map<uint64_t, void*> transfer_x2x_color_pipelines_;
   void* transfer_d2c_pipeline_ = nullptr;     // id<MTLRenderPipelineState>.
+  // Pending aliased depth merge (AreAliasedDepthWritesSupported): the color
+  // owner, the writable depth target at its base and the tiles drawn.
+  struct AliasedDepthMerge {
+    bool pending = false;
+    RenderTargetKey color;
+    RenderTargetKey depth;
+    uint32_t start_tiles = 0;
+    uint32_t end_tiles = 0;
+  };
+  AliasedDepthMerge aliased_depth_merge_;
+  // The aliased depth target's range to synchronize with the canonical EDRAM
+  // in the next PrepareCurrentRasterViews (the first draw of a merge).
+  struct {
+    bool valid = false;
+    uint32_t start_tiles = 0;
+    uint32_t end_tiles = 0;
+  } aliased_depth_sync_;
+  void* aliased_depth_merge_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
+  uint64_t aliased_depth_merges_ = 0;
   // Color reinterpret transfers (BGRA8 <-> R32Float containers of one word).
   void* transfer_reint_c2f_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
   void* transfer_reint_f2c_pipeline_ = nullptr;  // id<MTLRenderPipelineState>.
