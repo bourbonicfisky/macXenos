@@ -176,6 +176,14 @@ class RenderTargetCache {
   // targets don't span the rows above the draw's scissor keep every window
   // offset in the viewport.
   virtual bool IsWindowOffsetInEdramSupported() const { return true; }
+  // Whether a draw without a window offset starts its render target ranges at
+  // the scissor's top tile row rather than at the base. A title that places
+  // the bases of a lower tile one tile height apart and draws only the rows
+  // below a scissor top (Kingdoms of Amalur: 1280x384 + 1280x336 tiles, the
+  // lower one at rows 384-719 of targets 384 tiles apart) otherwise has every
+  // range clamped to the rows above the scissor, which it never draws.
+  // Backends that size host render targets from the used ranges opt in.
+  virtual bool AreScissorRangeStartsSupported() const { return false; }
 
   // Resolution scaling on the EDRAM side is performed by multiplying the EDRAM
   // tile size by the resolution scale.

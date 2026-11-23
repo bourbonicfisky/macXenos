@@ -1318,6 +1318,12 @@ bool MetalRenderTargetCache::IsWindowOffsetInEdramSupported() const {
   return s_enabled;
 }
 
+bool MetalRenderTargetCache::AreScissorRangeStartsSupported() const {
+  static const bool s_enabled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_SCISSOR_RANGE_START"), true);
+  return s_enabled;
+}
+
 void* MetalRenderTargetCache::current_depth_texture() const {
   auto* rt = static_cast<MetalRenderTarget*>(
       last_update_accumulated_render_targets()[0]);

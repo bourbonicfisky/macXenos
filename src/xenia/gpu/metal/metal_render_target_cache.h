@@ -90,6 +90,11 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   // IN_EDRAM=1 is safe but engages nothing: 0 of 398 corpus window-offset draws
   // reach the bases (xenia-mac-evidence/window-offset-20261026/).
   bool IsWindowOffsetInEdramSupported() const override;
+  // On: host render targets are grown to the rows of the ranges they are used
+  // with and raster views follow the range starts, so a range starting at the
+  // scissor top is drawn where the guest drew it. XE_METAL_SCISSOR_RANGE_START=0
+  // restores ranges from the base.
+  bool AreScissorRangeStartsSupported() const override;
   Path GetPath() const override {
     return Path::kHostRenderTargets;
   }

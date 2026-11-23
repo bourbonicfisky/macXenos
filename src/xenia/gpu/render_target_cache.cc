@@ -1161,6 +1161,35 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
       length_used_tiles_at_32bpp += right_tiles_at_32bpp - pitch_tiles_at_32bpp;
     }
   }
+  // Without a window offset, a draw whose scissor starts below the first row
+  // of tiles touches nothing above it either. Start the ranges at the
+  // scissor's tile row (whole rows only) and clamp the length from there, so
+  // targets based one tile height apart (Kingdoms of Amalur's lower tile, rows
+  // 384-719 of targets 384 tiles apart) own the rows they draw instead of the
+  // ones above the scissor.
+  uint32_t scissor_start_tiles_at_32bpp = 0;
+  if (!window_offset_tiles && !interlock_barrier_only &&
+      draw_extent_y_scale_ == 1 && AreScissorRangeStartsSupported()) {
+    draw_util::Scissor scissor;
+    draw_util::GetScissor(regs, scissor, true, true);
+    scissor_start_tiles_at_32bpp =
+        (scissor.offset[1]
+         << uint32_t(msaa_samples >= xenos::MsaaSamples::k2X)) /
+        xenos::kEdramTileHeightSamples * pitch_tiles_at_32bpp;
+    if (scissor_start_tiles_at_32bpp >= length_used_tiles_at_32bpp) {
+      scissor_start_tiles_at_32bpp = 0;
+    }
+    static uint32_t s_scissor_start_logs = 0;
+    if (scissor_start_tiles_at_32bpp && s_scissor_start_logs < 8) {
+      ++s_scissor_start_logs;
+      XELOGI(
+          "RenderTargetCache: ranges start at scissor row {} ({} tiles, pitch "
+          "{}, {} targets, first base {})",
+          scissor.offset[1], scissor_start_tiles_at_32bpp,
+          pitch_tiles_at_32bpp, edram_bases_sorted_count,
+          edram_bases_sorted_count ? edram_bases_sorted[0].first : 0);
+    }
+  }
   for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
     const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
     uint32_t rt_base = rt_base_index.first;
@@ -1204,12 +1233,15 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
                                          : uint32_t(0),
                                      xenos::kEdramTileCount);
     } else {
-      rt_starts_tiles[i] = 0;
+      rt_starts_tiles[i] = scissor_start_tiles_at_32bpp << rt_is_64bpp;
       // The last render target can occupy the EDRAM until the base of the
       // first render target (itself in case of 1 render target) with EDRAM
-      // addressing wrapping.
+      // addressing wrapping. With a scissor start the length counts from it:
+      // a range shorter than the distance between bases reaches no other
+      // target's range.
       rt_lengths_tiles[i] = std::min(
-          std::min(length_used_tiles_at_32bpp << rt_is_64bpp,
+          std::min((length_used_tiles_at_32bpp - scissor_start_tiles_at_32bpp)
+                       << rt_is_64bpp,
                    rt_max_distance_tiles_at_64bpp >> (rt_is_64bpp ^ 1)),
           ((i + 1 < edram_bases_sorted_count)
                ? edram_bases_sorted[i + 1].first
