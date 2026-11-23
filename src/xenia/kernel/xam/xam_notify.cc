@@ -91,6 +91,8 @@ dword_result_t XNotifyGetNext_entry(dword_t handle, dword_t match_id,
   if (param_ptr) {
     *param_ptr = dequeued ? param : 0;
   }
+  InputCensusNote("XNotifyGetNext", match_id, dequeued ? id : 0,
+                  dequeued ? param : 0, dequeued ? 1 : 0);
   return dequeued ? 1 : 0;
 }
 DECLARE_XAM_EXPORT2(XNotifyGetNext, kNone, kImplemented, kHighFrequency);

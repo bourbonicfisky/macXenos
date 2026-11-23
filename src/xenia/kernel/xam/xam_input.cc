@@ -7,7 +7,15 @@
  ******************************************************************************
  */
 
+#include <chrono>
+#include <map>
+#include <mutex>
+#include <string>
+#include <tuple>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/cpu/thread_state.h"
 #include "xenia/emulator.h"
 #include "xenia/hid/input.h"
 #include "xenia/hid/input_system.h"
@@ -18,9 +26,55 @@
 
 DECLARE_bool(allow_mic_initialization);
 
+DEFINE_bool(log_input_census, false,
+            "Log each distinct input/notification API call tuple (api, "
+            "arguments, result, guest caller) once, and call counts every 5 "
+            "seconds. Diagnostics for titles that ignore input.",
+            "HID");
+
 namespace xe {
 namespace kernel {
 namespace xam {
+
+void InputCensusNote(const char* api, uint32_t a, uint32_t b, uint32_t c,
+                     uint32_t result) {
+  if (!cvars::log_input_census) {
+    return;
+  }
+  using Key =
+      std::tuple<std::string, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t>;
+  static std::mutex mutex;
+  static std::map<Key, uint64_t> counts;
+  static auto last_dump = std::chrono::steady_clock::now();
+  uint32_t lr = 0;
+  if (auto* thread_state = cpu::ThreadState::Get()) {
+    lr = uint32_t(thread_state->context()->lr);
+  }
+  static std::map<Key, bool> seen;
+  std::lock_guard<std::mutex> lock(mutex);
+  Key key{api, a, b, c, result, lr};
+  if (counts.size() < 4096 && seen.size() < 65536) {
+    ++counts[key];
+    if (seen.emplace(key, true).second) {
+      XELOGI(
+          "InputCensus new {} a={:08X} b={:08X} c={:08X} result={:08X} "
+          "lr={:08X}",
+          api, a, b, c, result, lr);
+    }
+  }
+  auto now = std::chrono::steady_clock::now();
+  if (now - last_dump >= std::chrono::seconds(5)) {
+    last_dump = now;
+    for (const auto& [k, n] : counts) {
+      XELOGI(
+          "InputCensus count {} a={:08X} b={:08X} c={:08X} result={:08X} "
+          "lr={:08X} n={}",
+          std::get<0>(k), std::get<1>(k), std::get<2>(k), std::get<3>(k),
+          std::get<4>(k), std::get<5>(k), n);
+    }
+    counts.clear();
+  }
+}
 
 using xe::hid::X_INPUT_CAPABILITIES;
 using xe::hid::X_INPUT_FLAG;
@@ -49,7 +103,7 @@ dword_result_t XamEnableInactivityProcessing_entry(dword_t inactivity_index,
 }
 DECLARE_XAM_EXPORT1(XamEnableInactivityProcessing, kInput, kStub);
 
-dword_result_t XamInputGetCapabilitiesEx_entry(
+static dword_result_t XamInputGetCapabilitiesEx_impl(
     dword_t unk, dword_t user_index, dword_t flags,
     pointer_t<X_INPUT_CAPABILITIES> caps) {
   if (unk > 1) {
@@ -88,6 +142,14 @@ dword_result_t XamInputGetCapabilitiesEx_entry(
   auto lock = input_system->lock();
   return input_system->GetCapabilities(actual_user_index, actual_flags, caps);
 }
+dword_result_t XamInputGetCapabilitiesEx_entry(
+    dword_t unk, dword_t user_index, dword_t flags,
+    pointer_t<X_INPUT_CAPABILITIES> caps) {
+  uint32_t result =
+      XamInputGetCapabilitiesEx_impl(unk, user_index, flags, caps);
+  InputCensusNote("XamInputGetCapabilitiesEx", unk, user_index, flags, result);
+  return result;
+}
 DECLARE_XAM_EXPORT1(XamInputGetCapabilitiesEx, kInput, kSketchy);
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetcapabilities(v=vs.85).aspx
@@ -100,8 +162,8 @@ dword_result_t XamInputGetCapabilities_entry(
 DECLARE_XAM_EXPORT1(XamInputGetCapabilities, kInput, kSketchy);
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetstate(v=vs.85).aspx
-dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
-                                      pointer_t<X_INPUT_STATE> input_state) {
+static dword_result_t XamInputGetState_impl(
+    dword_t user_index, dword_t flags, pointer_t<X_INPUT_STATE> input_state) {
   if (input_state) {
     memset((void*)input_state.host_address(), 0, sizeof(X_INPUT_STATE));
   }
@@ -148,6 +210,39 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
 
   return result;
 }
+dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
+                                      pointer_t<X_INPUT_STATE> input_state) {
+  uint32_t result = XamInputGetState_impl(user_index, flags, input_state);
+  if (cvars::log_input_census && input_state && user_index < 4) {
+    static uint64_t last[4] = {};
+    uint64_t now_state =
+        uint64_t(uint16_t(input_state->gamepad.buttons)) |
+        (uint64_t(uint16_t(input_state->gamepad.thumb_lx)) << 16) |
+        (uint64_t(uint16_t(input_state->gamepad.thumb_ly)) << 32) |
+        (uint64_t(uint16_t(input_state->gamepad.thumb_rx)) << 48);
+    if (now_state != last[user_index]) {
+      last[user_index] = now_state;
+      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+      XELOGI(
+          "InputCensus change user={} buttons={:04X} lx={} ly={} rx={} "
+          "packet={} ui={} t={}",
+          uint32_t(user_index), uint16_t(input_state->gamepad.buttons),
+          int16_t(input_state->gamepad.thumb_lx),
+          int16_t(input_state->gamepad.thumb_ly),
+          int16_t(input_state->gamepad.thumb_rx),
+          uint32_t(input_state->packet_number),
+          kernel_state()->xam_state()->IsUIActive(), ms);
+    }
+  }
+  InputCensusNote(
+      "XamInputGetState", user_index, flags,
+      (input_state ? uint32_t(input_state->gamepad.buttons) : 0xFFFFu) |
+          (kernel_state()->xam_state()->IsUIActive() ? 0x80000000u : 0u),
+      result);
+  return result;
+}
 DECLARE_XAM_EXPORT2(XamInputGetState, kInput, kImplemented, kHighFrequency);
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputsetstate(v=vs.85).aspx
@@ -169,7 +264,7 @@ dword_result_t XamInputSetState_entry(
 DECLARE_XAM_EXPORT1(XamInputSetState, kInput, kImplemented);
 
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetkeystroke(v=vs.85).aspx
-dword_result_t XamInputGetKeystroke_entry(
+static dword_result_t XamInputGetKeystroke_impl(
     dword_t user_index, dword_t flags, pointer_t<X_INPUT_KEYSTROKE> keystroke) {
   // https://github.com/CodeAsm/ffplay360/blob/master/Common/AtgXime.cpp
   // user index = index or XUSER_INDEX_ANY
@@ -190,10 +285,20 @@ dword_result_t XamInputGetKeystroke_entry(
   auto lock = input_system->lock();
   return input_system->GetKeystroke(user_index, flags, keystroke);
 }
+dword_result_t XamInputGetKeystroke_entry(
+    dword_t user_index, dword_t flags, pointer_t<X_INPUT_KEYSTROKE> keystroke) {
+  uint32_t result = XamInputGetKeystroke_impl(user_index, flags, keystroke);
+  InputCensusNote("XamInputGetKeystroke", user_index, flags,
+                  keystroke ? (uint32_t(keystroke->virtual_key) |
+                               (uint32_t(keystroke->flags) << 16))
+                            : 0xFFFFFFFFu,
+                  result);
+  return result;
+}
 DECLARE_XAM_EXPORT1(XamInputGetKeystroke, kInput, kImplemented);
 
 // Same as non-ex, just takes a pointer to user index.
-dword_result_t XamInputGetKeystrokeEx_entry(
+static dword_result_t XamInputGetKeystrokeEx_impl(
     lpdword_t user_index_ptr, dword_t flags,
     pointer_t<X_INPUT_KEYSTROKE> keystroke) {
   if (!keystroke) {
@@ -237,6 +342,20 @@ dword_result_t XamInputGetKeystrokeEx_entry(
   }
   return result;
 }
+dword_result_t XamInputGetKeystrokeEx_entry(
+    lpdword_t user_index_ptr, dword_t flags,
+    pointer_t<X_INPUT_KEYSTROKE> keystroke) {
+  uint32_t result =
+      XamInputGetKeystrokeEx_impl(user_index_ptr, flags, keystroke);
+  InputCensusNote("XamInputGetKeystrokeEx",
+                  user_index_ptr ? uint32_t(*user_index_ptr) : 0xFFFFFFFFu,
+                  flags,
+                  keystroke ? (uint32_t(keystroke->virtual_key) |
+                               (uint32_t(keystroke->flags) << 16))
+                            : 0xFFFFFFFFu,
+                  result);
+  return result;
+}
 DECLARE_XAM_EXPORT1(XamInputGetKeystrokeEx, kInput, kImplemented);
 
 X_HRESULT_result_t XamUserGetDeviceContext_entry(dword_t user_index,
@@ -253,8 +372,12 @@ X_HRESULT_result_t XamUserGetDeviceContext_entry(dword_t user_index,
     } else {
       *out_ptr = (uint32_t)user_index;
     }
+    InputCensusNote("XamUserGetDeviceContext", user_index, device_type,
+                    *out_ptr, X_E_SUCCESS);
     return X_E_SUCCESS;
   } else {
+    InputCensusNote("XamUserGetDeviceContext", user_index, device_type, 0,
+                    X_E_DEVICE_NOT_CONNECTED);
     return X_E_DEVICE_NOT_CONNECTED;
   }
 }

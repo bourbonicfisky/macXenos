@@ -23,6 +23,11 @@ xe::cpu::Export* RegisterExport_xam(xe::cpu::Export* export_entry);
 // XNetGetTitleXnAddr returns) to `xnaddr`.
 void FillTitleXnAddr(void* xnaddr);
 
+// --log_input_census: logs each new (api, args, result, guest caller) tuple
+// once, and per-tuple call counts every 5 s.
+void InputCensusNote(const char* api, uint32_t a, uint32_t b, uint32_t c,
+                     uint32_t result);
+
 // Registration functions, one per file.
 #define XE_MODULE_EXPORT_GROUP(m, n)                                  \
   void Register##n##Exports(xe::cpu::ExportResolver* export_resolver, \
