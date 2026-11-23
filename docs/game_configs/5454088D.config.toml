@@ -1,0 +1,11 @@
+# macXenos built-in per-title config: The Darkness II (5454088D).
+# The main menu and the opening restaurant draw through vertex shaders that
+# export to memory with a render target bound (MetalMemexportUnrouted
+# class=rasterizing-vertex, 16+ per boot). With that export class off (the
+# Metal default) the main menu draws only its tendril background (no items)
+# and the restaurant's walls, carpet and suits are covered in coloured block
+# noise. Routed, the menu items draw and the scene is clean, at the same
+# 31.6 fps, 24.0 commits/frame and 269 draws/frame; no GPU faults.
+# (M4 Pro, release/1.1 722a4cab5 kit, 2026-11-22)
+[GPU]
+metal_memexport_raster = true
