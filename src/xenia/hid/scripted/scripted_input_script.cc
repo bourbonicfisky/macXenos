@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <fstream>
 #include <limits>
 #include <optional>
@@ -467,7 +468,57 @@ LiveLineParseResult ParseLiveInputLine(std::string_view line) {
     return {.step = MarkerStep{std::string(tokens[1])}, .error = {}};
   }
   GamepadState state;
+  // Reads <axis> <value> pairs from tokens[index]; stick axes lx/ly/rx/ry
+  // and trigger axes lt/rt as allowed. Returns the first token after them,
+  // or SIZE_MAX with *error set.
+  auto read_axes = [&](size_t index, bool allow_stick, bool allow_trigger,
+                       std::string* error) -> size_t {
+    auto is_stick = [](std::string_view token) {
+      return token == "lx" || token == "ly" || token == "rx" || token == "ry";
+    };
+    auto is_trigger = [](std::string_view token) {
+      return token == "lt" || token == "rt";
+    };
+    while (index < tokens.size() &&
+           ((allow_stick && is_stick(tokens[index])) ||
+            (allow_trigger && is_trigger(tokens[index])))) {
+      const std::string_view axis = tokens[index];
+      if (index + 1 >= tokens.size()) {
+        *error = "axis '" + std::string(axis) + "' needs a value";
+        return SIZE_MAX;
+      }
+      int64_t value = 0;
+      if (is_stick(axis)) {
+        if (!parse_int(tokens[index + 1], -32768, 32767, &value)) {
+          *error = "stick value must be in [-32768, 32767]";
+          return SIZE_MAX;
+        }
+        if (axis == "lx") {
+          state.left_stick_x = static_cast<int16_t>(value);
+        } else if (axis == "ly") {
+          state.left_stick_y = static_cast<int16_t>(value);
+        } else if (axis == "rx") {
+          state.right_stick_x = static_cast<int16_t>(value);
+        } else {
+          state.right_stick_y = static_cast<int16_t>(value);
+        }
+      } else {
+        if (!parse_int(tokens[index + 1], 0, 255, &value)) {
+          *error = "trigger value must be in [0, 255]";
+          return SIZE_MAX;
+        }
+        if (axis == "lt") {
+          state.left_trigger = static_cast<uint8_t>(value);
+        } else {
+          state.right_trigger = static_cast<uint8_t>(value);
+        }
+      }
+      index += 2;
+    }
+    return index;
+  };
   size_t timing_index = 0;
+  std::string axis_error;
   if (command == "press") {
     if (tokens.size() < 2) {
       return fail("press needs <button>[+<button>...]");
@@ -487,53 +538,24 @@ LiveLineParseResult ParseLiveInputLine(std::string_view line) {
       list = plus == std::string_view::npos ? std::string_view{}
                                             : list.substr(plus + 1);
     }
-    timing_index = 2;
+    // Optional stick/trigger pairs held together with the buttons, for
+    // menus that confirm with A while a stick is held (Naruto UNS3 Full
+    // Burst's Ultimate Decision).
+    timing_index = read_axes(2, true, true, &axis_error);
+    if (timing_index == SIZE_MAX) {
+      return fail(axis_error);
+    }
   } else if (command == "stick" || command == "trigger") {
     // One or more <axis> <value> pairs, so a diagonal is one line.
-    auto is_axis = [&](std::string_view token) {
-      return command == "stick" ? (token == "lx" || token == "ly" ||
-                                   token == "rx" || token == "ry")
-                                : (token == "lt" || token == "rt");
-    };
-    size_t index = 1;
-    while (index < tokens.size() && is_axis(tokens[index])) {
-      if (index + 1 >= tokens.size()) {
-        return fail(std::string(command) + " axis '" +
-                    std::string(tokens[index]) + "' needs a value");
-      }
-      const std::string_view axis = tokens[index];
-      int64_t value = 0;
-      if (command == "stick") {
-        if (!parse_int(tokens[index + 1], -32768, 32767, &value)) {
-          return fail("stick value must be in [-32768, 32767]");
-        }
-        if (axis == "lx") {
-          state.left_stick_x = static_cast<int16_t>(value);
-        } else if (axis == "ly") {
-          state.left_stick_y = static_cast<int16_t>(value);
-        } else if (axis == "rx") {
-          state.right_stick_x = static_cast<int16_t>(value);
-        } else {
-          state.right_stick_y = static_cast<int16_t>(value);
-        }
-      } else {
-        if (!parse_int(tokens[index + 1], 0, 255, &value)) {
-          return fail("trigger value must be in [0, 255]");
-        }
-        if (axis == "lt") {
-          state.left_trigger = static_cast<uint8_t>(value);
-        } else {
-          state.right_trigger = static_cast<uint8_t>(value);
-        }
-      }
-      index += 2;
+    const bool stick = command == "stick";
+    timing_index = read_axes(1, stick, !stick, &axis_error);
+    if (timing_index == SIZE_MAX) {
+      return fail(std::string(command) + " " + axis_error);
     }
-    if (index == 1) {
+    if (timing_index == 1) {
       return fail(std::string(command) + " needs <axis> <value>" +
-                  (command == "stick" ? " (axis lx, ly, rx or ry)"
-                                      : " (axis lt or rt)"));
+                  (stick ? " (axis lx, ly, rx or ry)" : " (axis lt or rt)"));
     }
-    timing_index = index;
   } else {
     return fail("unknown live command '" + std::string(command) + "'");
   }

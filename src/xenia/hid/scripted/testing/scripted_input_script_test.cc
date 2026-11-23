@@ -542,6 +542,16 @@ TEST_CASE("live input lines parse into single steps", "[hid][scripted][live]") {
   REQUIRE(input->hold_duration == 250ms);
   REQUIRE(input->release_duration == 750ms);
 
+  auto held = ParseLiveInputLine("press a lx -30000 rt 200 600 2000");
+  REQUIRE(held.error.empty());
+  input = std::get_if<InputStep>(&*held.step);
+  REQUIRE(input);
+  REQUIRE(input->state.buttons == X_INPUT_GAMEPAD_A);
+  REQUIRE(input->state.left_stick_x == -30000);
+  REQUIRE(input->state.right_trigger == 200);
+  REQUIRE(input->hold_duration == 600ms);
+  REQUIRE(input->release_duration == 2000ms);
+
   auto trigger = ParseLiveInputLine("trigger rt 255");
   REQUIRE(trigger.error.empty());
   input = std::get_if<InputStep>(&*trigger.step);
@@ -572,8 +582,9 @@ TEST_CASE("live input lines reject malformed steps", "[hid][scripted][live]") {
   for (std::string_view line :
        {"press", "press nope", "press a+a", "press a 0", "press a 500 0",
         "press a 500 500 0", "press a 500 500 1 extra", "stick lz 1",
-        "stick ly 40000", "stick lx 1 ly", "stick lx 1 lt 2", "trigger lt 256", "wait", "wait 0", "marker",
-        "jump a"}) {
+        "stick ly 40000", "stick lx 1 ly", "stick lx 1 lt 2", "trigger lt 256",
+        "trigger lt 1 lx 2", "press a lx", "press a lx 40000", "wait", "wait 0",
+        "marker", "jump a"}) {
     auto result = ParseLiveInputLine(line);
     INFO(line);
     REQUIRE_FALSE(result.error.empty());

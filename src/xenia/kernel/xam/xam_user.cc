@@ -99,13 +99,14 @@ dword_result_t XamUserGetSigninState_entry(dword_t user_index) {
         kernel_state()->xam_state()->GetUserProfile(user_index);
     signin_state = user_profile->signin_state();
   }
+  InputCensusNote("XamUserGetSigninState", user_index, 0, 0, signin_state);
   return signin_state;
 }
 DECLARE_XAM_EXPORT2(XamUserGetSigninState, kUserProfiles, kImplemented,
                     kHighFrequency);
 
-X_HRESULT_result_t XamUserGetSigninInfo_entry(
-    dword_t user_index, dword_t flags, pointer_t<X_USER_SIGNIN_INFO> info) {
+static X_HRESULT XamUserGetSigninInfo_impl(dword_t user_index, dword_t flags,
+                                           pointer_t<X_USER_SIGNIN_INFO> info) {
   if (!info) {
     return X_E_INVALIDARG;
   }
@@ -132,6 +133,13 @@ X_HRESULT_result_t XamUserGetSigninInfo_entry(
 
   info->signin_state = user_profile->signin_state();
   return X_E_SUCCESS;
+}
+X_HRESULT_result_t XamUserGetSigninInfo_entry(
+    dword_t user_index, dword_t flags, pointer_t<X_USER_SIGNIN_INFO> info) {
+  X_HRESULT result = XamUserGetSigninInfo_impl(user_index, flags, info);
+  InputCensusNote("XamUserGetSigninInfo", user_index, flags,
+                  info ? uint32_t(info->signin_state) : 0xFFFFFFFFu, result);
+  return result;
 }
 DECLARE_XAM_EXPORT1(XamUserGetSigninInfo, kUserProfiles, kImplemented);
 
