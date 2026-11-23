@@ -10,6 +10,7 @@
 #include "xenia/apu/sdl/sdl_audio_driver.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -108,6 +109,19 @@ bool SDLAudioDriver::Initialize() {
         double(frame_frequency_) / double(channel_samples_));
   }
 
+  if (const char* dump_env = std::getenv("XE_APU_DUMP")) {
+    // A title can register more than one audio client: the first device
+    // writes <path>, later ones <path>.1, <path>.2 and so on.
+    static std::atomic<uint32_t> dump_count{0};
+    const uint32_t dump_index = dump_count.fetch_add(1);
+    const std::string dump_path =
+        dump_index ? fmt::format("{}.{}", dump_env, dump_index) : dump_env;
+    dump_file_ = std::fopen(dump_path.c_str(), "wb");
+    dump_flags_file_ = std::fopen((dump_path + ".flags").c_str(), "wb");
+    XELOGI("ApuDump: {} Hz x {} channels float32 to {}", frame_frequency_,
+           sdl_device_channels_, dump_path);
+  }
+
   // The stream's device starts paused.
   SDL_ResumeAudioStreamDevice(sdl_stream_);
 
@@ -184,6 +198,14 @@ void SDLAudioDriver::Shutdown() {
     sdl_stream_ = nullptr;
     sdl_device_id_ = 0;
   }
+  if (dump_file_) {
+    std::fclose(dump_file_);
+    dump_file_ = nullptr;
+  }
+  if (dump_flags_file_) {
+    std::fclose(dump_flags_file_);
+    dump_flags_file_ = nullptr;
+  }
   if (sdl_initialized_) {
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
     sdl_initialized_ = false;
@@ -217,11 +239,17 @@ void SDLAudioDriver::FillFrameLocked() {
   }
   if (frames_queued_.empty()) {
     std::fill(frame_out_.begin(), frame_out_.end(), 0.0f);
+    if (dump_file_) {
+      std::fwrite(frame_out_.data(), sizeof(float), count, dump_file_);
+      if (dump_flags_file_) {
+        std::fputc(1, dump_flags_file_);
+      }
+    }
     return;
   }
   auto buffer = frames_queued_.front();
   frames_queued_.pop();
-  if (cvars::mute) {
+  if (cvars::mute && !dump_file_) {
     std::fill(frame_out_.begin(), frame_out_.end(), 0.0f);
   } else if (need_format_conversion_) {
     switch (sdl_device_channels_) {
@@ -242,6 +270,15 @@ void SDLAudioDriver::FillFrameLocked() {
     // (SDL2's SDL_MixAudioFormat into a zeroed buffer: a plain scale.)
     for (size_t i = 0; i < count; ++i) {
       frame_out_[i] = buffer[i] * volume_;
+    }
+  }
+  if (dump_file_) {
+    std::fwrite(frame_out_.data(), sizeof(float), count, dump_file_);
+    if (dump_flags_file_) {
+      std::fputc(0, dump_flags_file_);
+    }
+    if (cvars::mute) {
+      std::fill(frame_out_.begin(), frame_out_.end(), 0.0f);
     }
   }
   // The volume setting, on a squared curve so each step sounds about as

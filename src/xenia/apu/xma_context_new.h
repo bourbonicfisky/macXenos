@@ -132,6 +132,12 @@ class XmaContextNew : public XmaContext {
   // bits 24-26 (--xma_decode_subframe=false) reserves any.
   static uint32_t OutputHeadroom(const XMA_CONTEXT_DATA& data);
 
+  // Drops the subframes the decoded frame's header trims (--xma_frame_trim).
+  void ApplyFrameTrim(const XMA_CONTEXT_DATA* data, bool loop_start_frame);
+  // The trim fields the previous frame reported, to tell FFmpeg's leftovers.
+  uint32_t prev_trim_start_ = 0;
+  uint32_t prev_trim_end_ = 0;
+
   int32_t remaining_subframe_blocks_in_output_buffer_ = 0;
   uint8_t current_frame_remaining_subframes_ = 0;
 

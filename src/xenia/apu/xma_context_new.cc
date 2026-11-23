@@ -23,6 +23,8 @@ extern "C" {
 #include "third_party/FFmpeg/libavcodec/avcodec.h"
 #include "third_party/FFmpeg/libavutil/channel_layout.h"
 #include "third_party/FFmpeg/libavutil/error.h"
+#include "third_party/FFmpeg/libavutil/frame.h"
+#include "third_party/FFmpeg/libavutil/intreadwrite.h"
 #if XE_COMPILER_MSVC
 #pragma warning(pop)
 #endif
@@ -35,6 +37,15 @@ DEFINE_bool(
     "those bits as output headroom, the old behavior: the first frame then "
     "decodes in full and the context hands out up to 7 subframes more than "
     "the sound has (GTA V froze in its prologue, GitHub issue 16).",
+    "APU");
+
+DEFINE_bool(
+    xma_frame_trim, true,
+    "Leave out the leading and trailing samples an XMA frame header marks as "
+    "encoder delay and padding, in whole 128-sample subframes. Without it "
+    "every sound starts with 384 samples of silence and ends with padding, so "
+    "a sound the title loops by queueing its buffer again has a 13-22 ms gap "
+    "at each pass (OutRun Online Arcade's engine clicked, GitHub issue 25).",
     "APU");
 
 // Credits for most of this code goes to:
@@ -276,6 +287,8 @@ void XmaContextNew::ClearLocked(XMA_CONTEXT_DATA* data) {
   current_frame_remaining_subframes_ = 0;
   loop_frame_output_limit_ = 0;
   loop_start_skip_pending_ = false;
+  prev_trim_start_ = 0;
+  prev_trim_end_ = 0;
 }
 
 void XmaContextNew::Disable() { set_is_enabled(false); }
@@ -612,6 +625,7 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
 
     // Loop start: skip leading subframes per loop_subframe_skip.
     // Reducing remaining shifts the read offset forward in Consume().
+    const bool loop_start_frame = loop_start_skip_pending_;
     if (loop_start_skip_pending_) {
       const uint8_t skip = data->loop_subframe_skip << data->is_stereo;
       if (skip < current_frame_remaining_subframes_) {
@@ -622,6 +636,10 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
         current_frame_remaining_subframes_ -= skip;
       }
       loop_start_skip_pending_ = false;
+    }
+
+    if (cvars::xma_frame_trim) {
+      ApplyFrameTrim(data, loop_start_frame);
     }
 
     // DWORD1 bits 24-26 name the subframe of this frame to start from: the
@@ -697,6 +715,74 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
 }
 
 //  Frame & Packet searching methods
+
+void XmaContextNew::ApplyFrameTrim(const XMA_CONTEXT_DATA* data,
+                                   bool loop_start_frame) {
+  // The frame header's trim fields: the encoder delay before a sound's first
+  // sample (512 on every first frame seen) and the padding after its last. The
+  // xmaframes decoder reports them as skip-samples side data. FFmpeg keeps a
+  // field from the frame before when a header sets only the other one, and a
+  // sound's last frame is followed directly by the next sound's first when a
+  // title queues a buffer again, so a field repeating the previous frame's
+  // value is that leftover.
+  const AVFrameSideData* side_data =
+      av_frame_get_side_data(av_frame_, AV_FRAME_DATA_SKIP_SAMPLES);
+  if (!side_data || side_data->size < 8) {
+    prev_trim_start_ = 0;
+    prev_trim_end_ = 0;
+    return;
+  }
+  uint32_t trim_start = AV_RL32(side_data->data);
+  uint32_t trim_end = AV_RL32(side_data->data + 4);
+  const uint32_t reported_start = trim_start;
+  const uint32_t reported_end = trim_end;
+  if (trim_start && trim_start == prev_trim_start_) {
+    trim_start = 0;
+  }
+  if (trim_end && trim_end == prev_trim_end_) {
+    trim_end = 0;
+  }
+  prev_trim_start_ = reported_start;
+  prev_trim_end_ = reported_end;
+
+  // Where the sound sits in this decoder's output: its first sample comes
+  // one subframe before trim_start (sample 384 of the first frame for the
+  // usual 512, on every OutRun sound measured) and its last trim_end before
+  // the end of the last frame. Output goes in whole subframes, so the tail
+  // rounds to the nearest one: OutRun's engine loops then join pass to pass
+  // within 64 samples instead of through 13-22 ms of silence. A title that
+  // gives a start subframe has placed the start itself, and so has a loop
+  // jump with its own subframe skip.
+  constexpr uint32_t kSubframes = kSamplesPerFrame / kSamplesPerSubframe;
+  const bool start_placed = loop_start_frame || (cvars::xma_decode_subframe &&
+                                                 data->decode_subframe != 0);
+  const uint32_t lead =
+      (start_placed || trim_start <= kSamplesPerSubframe)
+          ? 0
+          : std::min((trim_start - kSamplesPerSubframe) / kSamplesPerSubframe,
+                     kSubframes);
+  const uint32_t tail =
+      std::min((trim_end + kSamplesPerSubframe / 2) / kSamplesPerSubframe,
+               kSubframes - lead);
+  if (!lead && !tail) {
+    return;
+  }
+  XELOGAPU("XmaContext {}: Frame trim {} {}: {} leading, {} trailing subframes",
+           id(), trim_start, trim_end, lead, tail);
+  if (tail) {
+    // Counted from the frame's first subframe, like the loop end limit, so
+    // it holds with the leading subframes skipped too.
+    const uint8_t limit = uint8_t((kSubframes - tail) << data->is_stereo);
+    loop_frame_output_limit_ = loop_frame_output_limit_
+                                   ? std::min(loop_frame_output_limit_, limit)
+                                   : limit;
+    if (!limit) {
+      current_frame_remaining_subframes_ = 0;
+    }
+  }
+  current_frame_remaining_subframes_ -= std::min(
+      uint8_t(lead << data->is_stereo), current_frame_remaining_subframes_);
+}
 
 void XmaContextNew::UpdateLoopStatus(XMA_CONTEXT_DATA* data) {
   if (data->loop_count == 0) {

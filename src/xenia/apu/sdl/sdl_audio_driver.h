@@ -11,6 +11,7 @@
 #define XENIA_APU_SDL_SDL_AUDIO_DRIVER_H_
 
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <queue>
 #include <stack>
@@ -85,6 +86,14 @@ class SDLAudioDriver : public AudioDriver {
   bool stats_in_underrun_ = false;
   size_t stats_depth_min_ = SIZE_MAX;
   size_t stats_depth_max_ = 0;
+
+  // XE_APU_DUMP=<path>: every frame handed to the device (underrun silence
+  // included, before mute and volume) appended to <path> (<path>.N for a
+  // later device) as raw interleaved little-endian float32 at
+  // frame_frequency_ x sdl_device_channels_, and one byte per frame to
+  // <path>.flags (1 = underrun). Diagnostic only.
+  FILE* dump_file_ = nullptr;
+  FILE* dump_flags_file_ = nullptr;
 };
 
 }  // namespace sdl
