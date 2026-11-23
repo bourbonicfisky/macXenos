@@ -1,0 +1,89 @@
+# macXenos built-in game patch: Samurai Shodown II (XBLA, 584108D0).
+# The main thread's per-frame 3D update of the background-music cue
+# (8217CAF0) keeps the cue pointer in a global, g_cue = 0x827718EC
+# (IXACT3Cue*, written by XACT when the arcade thread's music player 8217CCC0
+# calls Play with &g_cue). It checks g_cue for null once, calls
+# XACT3DApply (8217CB84), then reloads g_cue and calls through it with no
+# check (8217CBA0 GetState, 8217CBF0 SetVariable, 8217CC18 Play). XACT
+# nulls g_cue itself when it destroys a stopped cue, from whichever XACT call
+# processes the engine next, including XACT3DApply. When the arcade thread
+# stops or changes the music in that window, the reload reads 0 and the game
+# calls a null vtable slot: "Code fetch fault at 00000000", lr 8217CBB8, at
+# the blue "TIME HAS PASSED SINCE..." screen after the character select
+# (the emulator then pauses and the screen stays blue). It is a race in the
+# game's own code; here the arcade thread's frame starts ~50 us before the
+# main thread's XACT update every frame, so the stop lands in the window.
+# The patch re-checks g_cue before each of the three calls and returns from
+# 8217CAF0 (to 8217CCA0, its own "li r3,0" exit) when it is 0. The checks
+# live in the function's own error-print blocks (XACT3DCalculate failed,
+# XACT3DApply failed, cue play failed), whose debug prints are dropped:
+#   8217CB5C b 8217CB74 (skip the stub)
+#   8217CB60 lwz r3,0x18EC(r30) / cmplwi cr6,r3,0 / beq cr6,8217CCA0 / b 8217CBF4
+#   8217CB88 lwz r3,0x18EC(r30) / cmplwi cr6,r3,0 / beq cr6,8217CCA0 / b 8217CBA4
+#   8217CBF0 b 8217CB60
+#   8217CC18 b 8217CC30
+#   8217CC2C b 8217CCA0
+#   8217CC30 lwz r3,0x18EC(r30) / cmplwi cr6,r3,0 / beq cr6,8217CCA0 / b 8217CC1C
+# Evidence: xenia-mac-evidence/defects-20261122/samsho2/ (watch of g_cue with
+# timestamped probes: every clear is inside an XACT call, the crashing one
+# inside XACT3DApply 62 us after main's check). A file with this name in the
+# storage root's patches/ folder replaces this one (set is_enabled = false
+# there to turn it off).
+title_name = "Samurai Shodown II"
+title_id = "584108D0"
+hash = "F9CB97FDB98F1C8D"
+
+[[patch]]
+    name = "Fix music cue null race (crash after character select)"
+    desc = "8217CAF0 reloads the music cue pointer after XACT3DApply and calls through it without a null check; XACT clears that pointer when it destroys a stopped cue. Re-check it before each call and skip the rest of the update when it is 0."
+    author = "macXenos"
+    is_enabled = true
+
+    [[patch.be32]]
+        address = 0x8217CB5C
+        value = 0x48000018
+    [[patch.be32]]
+        address = 0x8217CB60
+        value = 0x807E18EC
+    [[patch.be32]]
+        address = 0x8217CB64
+        value = 0x2B030000
+    [[patch.be32]]
+        address = 0x8217CB68
+        value = 0x419A0138
+    [[patch.be32]]
+        address = 0x8217CB6C
+        value = 0x48000088
+    [[patch.be32]]
+        address = 0x8217CB88
+        value = 0x807E18EC
+    [[patch.be32]]
+        address = 0x8217CB8C
+        value = 0x2B030000
+    [[patch.be32]]
+        address = 0x8217CB90
+        value = 0x419A0110
+    [[patch.be32]]
+        address = 0x8217CB94
+        value = 0x48000010
+    [[patch.be32]]
+        address = 0x8217CBF0
+        value = 0x4BFFFF70
+    [[patch.be32]]
+        address = 0x8217CC18
+        value = 0x48000018
+    [[patch.be32]]
+        address = 0x8217CC2C
+        value = 0x48000074
+    [[patch.be32]]
+        address = 0x8217CC30
+        value = 0x807E18EC
+    [[patch.be32]]
+        address = 0x8217CC34
+        value = 0x2B030000
+    [[patch.be32]]
+        address = 0x8217CC38
+        value = 0x419A0068
+    [[patch.be32]]
+        address = 0x8217CC3C
+        value = 0x4BFFFFE0
