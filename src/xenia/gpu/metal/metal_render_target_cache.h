@@ -1275,7 +1275,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                        uint32_t end_tiles);
   // The same materialize as a fragment pass, for a single-sample target
   // created without ShaderWrite so Apple GPUs can keep it losslessly
-  // compressed (XE_METAL_RT_COMPRESSIBLE=1).
+  // compressed (XE_METAL_RT_COMPRESSIBLE, default on).
   bool EncodeCanonicalColorFragmentMaterialize(const void* command_buffer,
                                                RenderTarget* render_target,
                                                uint32_t start_tiles,

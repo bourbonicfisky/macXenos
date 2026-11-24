@@ -792,10 +792,10 @@ uint32_t MetalRenderTargetCache::GetFullRenderTargetTextureHeight(
 }
 
 namespace {
-// XE_METAL_RT_COMPRESSIBLE=1 (default off): single-sample colour render
-// targets of formats with no raw uint view are created without ShaderWrite,
-// which keeps Apple GPUs' lossless framebuffer compression. Their compute
-// writers then take render-pass paths: the canonical materialize
+// XE_METAL_RT_COMPRESSIBLE (default on; set =0 to roll back): single-sample
+// colour render targets of formats with no raw uint view are created without
+// ShaderWrite, which keeps Apple GPUs' lossless framebuffer compression. Their
+// compute writers then take render-pass paths: the canonical materialize
 // (EncodeCanonicalColorFragmentMaterialize) and the attachment clear (which
 // already checks the usage).
 bool RenderTargetCompressible(bool is_depth, bool single_sample,
@@ -803,7 +803,7 @@ bool RenderTargetCompressible(bool is_depth, bool single_sample,
                               bool sample_edram_enabled) {
   static const bool enabled = [] {
     const char* v = std::getenv("XE_METAL_RT_COMPRESSIBLE");
-    return v && v[0] == '1' && !v[1];
+    return !(v && v[0] == '0' && !v[1]);
   }();
   return enabled && sample_edram_enabled && !is_depth && single_sample &&
          !IsCanonicalColorRawViewFormat(color_format);
