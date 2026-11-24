@@ -2167,29 +2167,94 @@ inline uint2 xe_direct_slot(constant CanonicalResolveParams& p, uint2 pixel,
   guest_sample = (low.x << 1u) | low.y;
   return s >> shifts;
 }
-inline uint xe_direct_word_1x(texture2d<float, access::read> t,
-                              constant CanonicalResolveParams& p,
-                              uint rt_format, uint2 pixel, uint sample) {
+inline uint2 xe_direct_words_1x(texture2d<float, access::read> t,
+                                constant CanonicalResolveParams& p,
+                                uint rt_format, uint2 pixel, uint sample) {
   uint guest_sample;
   uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
-  return xe_pack_color32_working(t.read(px), rt_format);
+  return uint2(xe_pack_color32_working(t.read(px), rt_format), 0u);
 }
-inline uint xe_direct_word_ms(texture2d_ms<float, access::read> t,
-                              constant CanonicalResolveParams& p,
-                              uint rt_format, uint2 pixel, uint sample) {
+inline uint2 xe_direct_words_ms(texture2d_ms<float, access::read> t,
+                                constant CanonicalResolveParams& p,
+                                uint rt_format, uint2 pixel, uint sample) {
   uint guest_sample;
   uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
-  return xe_pack_color32_working(
+  return uint2(xe_pack_color32_working(
+                   t.read(px, xe_metal_sample_to_guest(p.surface.msaa,
+                                                       guest_sample)),
+                   rt_format),
+               0u);
+}
+inline uint2 xe_direct_words_64_1x(texture2d<float, access::read> t,
+                                   constant CanonicalResolveParams& p,
+                                   uint rt_format, uint2 pixel, uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
+  return xe_pack_color64(t.read(px), rt_format);
+}
+inline uint2 xe_direct_words_64_ms(texture2d_ms<float, access::read> t,
+                                   constant CanonicalResolveParams& p,
+                                   uint rt_format, uint2 pixel, uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
+  return xe_pack_color64(
       t.read(px, xe_metal_sample_to_guest(p.surface.msaa, guest_sample)),
       rt_format);
+}
+inline uint2 xe_direct_words_raw_1x(texture2d<uint, access::read> t,
+                                    constant CanonicalResolveParams& p,
+                                    uint rt_format, uint2 pixel, uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
+  return uint2(xe_pack_color32_raw(t.read(px), rt_format), 0u);
+}
+inline uint2 xe_direct_words_raw_ms(texture2d_ms<uint, access::read> t,
+                                    constant CanonicalResolveParams& p,
+                                    uint rt_format, uint2 pixel, uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
+  return uint2(xe_pack_color32_raw(
+                   t.read(px, xe_metal_sample_to_guest(p.surface.msaa,
+                                                       guest_sample)),
+                   rt_format),
+               0u);
+}
+inline uint2 xe_direct_words_64_raw_1x(texture2d<uint, access::read> t,
+                                       constant CanonicalResolveParams& p,
+                                       uint rt_format, uint2 pixel,
+                                       uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
+  return xe_pack_color64_raw(t.read(px), rt_format);
+}
+inline uint2 xe_direct_words_64_raw_ms(texture2d_ms<uint, access::read> t,
+                                       constant CanonicalResolveParams& p,
+                                       uint rt_format, uint2 pixel,
+                                       uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
+  return xe_pack_color64_raw(
+      t.read(px, xe_metal_sample_to_guest(p.surface.msaa, guest_sample)),
+      rt_format);
+}
+inline float4 xe_direct_unpack_words(uint2 words,
+                                     constant CanonicalResolveParams& p) {
+  return p.surface.fmt_log2 != 0u ? xe_unpack_color64(words, p.color_format)
+                                  : xe_unpack_color32(words.x, p.color_format);
+}
+inline float4 xe_resolve_fused_snapshot_value(float4 value,
+                                              uint snap_pack_1010102) {
+  if (snap_pack_1010102 != 0u) {
+    return xe_unpack_color32(xe_resolve_pack_1010102(value, 0u), 2u);
+  }
+  return value;
 }
 #define XE_DIRECT_COLOR_KERNELS(SUFFIX, TEX_T)                                 \
   inline float4 xe_direct_read_color_##SUFFIX(                                 \
       TEX_T t, constant CanonicalResolveParams& p, uint rt_format,             \
       uint2 pixel, uint sample) {                                              \
-    return xe_unpack_color32(                                                  \
-        xe_direct_word_##SUFFIX(t, p, rt_format, pixel, sample),               \
-        p.color_format);                                                       \
+    return xe_direct_unpack_words(                                             \
+        xe_direct_words_##SUFFIX(t, p, rt_format, pixel, sample), p);          \
   }                                                                            \
   inline float4 xe_direct_color_value_##SUFFIX(                                \
       TEX_T t, constant CanonicalResolveParams& p, uint rt_format,             \
@@ -2202,26 +2267,47 @@ inline uint xe_direct_word_ms(texture2d_ms<float, access::read> t,
         value = xe_direct_read_color_##SUFFIX(t, p, rt_format, source,         \
                                               p.sample_select);                \
         break;                                                                 \
-      case 4u: \
-        value = xe_resolve_sample_mean( \
-            xe_resolve_sample_term(xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 0u), p.color_format) + \
-            xe_resolve_sample_term(xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 1u), p.color_format), \
-            2.0, p.color_format); \
-        break; \
-      case 5u: \
-        value = xe_resolve_sample_mean( \
-            xe_resolve_sample_term(xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 2u), p.color_format) + \
-            xe_resolve_sample_term(xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 3u), p.color_format), \
-            2.0, p.color_format); \
-        break; \
-      case 6u: \
-        value = xe_resolve_sample_mean( \
-            xe_resolve_sample_term(xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 0u), p.color_format) + \
-            xe_resolve_sample_term(xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 1u), p.color_format) + \
-            xe_resolve_sample_term(xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 2u), p.color_format) + \
-            xe_resolve_sample_term(xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 3u), p.color_format), \
-            4.0, p.color_format); \
-        break; \
+      case 4u:                                                                 \
+        value = xe_resolve_sample_mean(                                        \
+            xe_resolve_sample_term(                                            \
+                xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 0u),    \
+                p.color_format) +                                              \
+                xe_resolve_sample_term(                                        \
+                    xe_direct_read_color_##SUFFIX(t, p, rt_format, source,     \
+                                                  1u),                         \
+                    p.color_format),                                           \
+            2.0, p.color_format);                                              \
+        break;                                                                 \
+      case 5u:                                                                 \
+        value = xe_resolve_sample_mean(                                        \
+            xe_resolve_sample_term(                                            \
+                xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 2u),    \
+                p.color_format) +                                              \
+                xe_resolve_sample_term(                                        \
+                    xe_direct_read_color_##SUFFIX(t, p, rt_format, source,     \
+                                                  3u),                         \
+                    p.color_format),                                           \
+            2.0, p.color_format);                                              \
+        break;                                                                 \
+      case 6u:                                                                 \
+        value = xe_resolve_sample_mean(                                        \
+            xe_resolve_sample_term(                                            \
+                xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 0u),    \
+                p.color_format) +                                              \
+                xe_resolve_sample_term(                                        \
+                    xe_direct_read_color_##SUFFIX(t, p, rt_format, source,     \
+                                                  1u),                         \
+                    p.color_format) +                                          \
+                xe_resolve_sample_term(                                        \
+                    xe_direct_read_color_##SUFFIX(t, p, rt_format, source,     \
+                                                  2u),                         \
+                    p.color_format) +                                          \
+                xe_resolve_sample_term(                                        \
+                    xe_direct_read_color_##SUFFIX(t, p, rt_format, source,     \
+                                                  3u),                         \
+                    p.color_format),                                           \
+            4.0, p.color_format);                                              \
+        break;                                                                 \
       default:                                                                 \
         value = xe_direct_read_color_##SUFFIX(t, p, rt_format, source, 0u);    \
         break;                                                                 \
@@ -2267,15 +2353,11 @@ inline uint xe_direct_word_ms(texture2d_ms<float, access::read> t,
       byte_offset = p.dest_base + off;                                         \
     }                                                                          \
     if (p.raw_copy != 0u) {                                                    \
+      uint2 rw = xe_direct_words_##SUFFIX(source_texture, p, rt_format,        \
+                                          source, min(p.sample_select, 3u));   \
       xe_resolve_store_raw(                                                    \
           destination, byte_offset,                                            \
-          xe_resolve_raw_swap(                                                 \
-              uint4(xe_direct_word_##SUFFIX(source_texture, p, rt_format,      \
-                                            source,                            \
-                                            min(p.sample_select, 3u)),         \
-                    0u, 0u, 0u),                                               \
-              p),                                                              \
-          p);                                                                  \
+          xe_resolve_raw_swap(uint4(rw.x, rw.y, 0u, 0u), p), p);               \
       return;                                                                  \
     }                                                                          \
     xe_resolve_store_value(                                                    \
@@ -2301,25 +2383,539 @@ inline uint xe_direct_word_ms(texture2d_ms<float, access::read> t,
         off + (1u << p.dest_bpp_log2) > p.dest_extent_bytes) {                 \
       return;                                                                  \
     }                                                                          \
-    uint2 words =                                                              \
-        p.raw_copy != 0u                                                       \
-            ? xe_resolve_guest_raw_words(                                      \
-                  xe_resolve_raw_swap(                                         \
-                      uint4(xe_direct_word_##SUFFIX(source_texture, p,         \
-                                                    rt_format, source,         \
-                                                    min(p.sample_select, 3u)), \
-                            0u, 0u, 0u),                                       \
-                      p),                                                      \
-                  p)                                                           \
-            : xe_resolve_guest_words(                                          \
-                  xe_direct_color_value_##SUFFIX(source_texture, p, rt_format, \
-                                                 source),                      \
-                  p);                                                          \
+    uint2 words;                                                               \
+    if (p.raw_copy != 0u) {                                                    \
+      uint2 rw = xe_direct_words_##SUFFIX(source_texture, p, rt_format,        \
+                                          source, min(p.sample_select, 3u));   \
+      words = xe_resolve_guest_raw_words(                                      \
+          xe_resolve_raw_swap(uint4(rw.x, rw.y, 0u, 0u), p), p);               \
+    } else {                                                                   \
+      words = xe_resolve_guest_words(                                          \
+          xe_direct_color_value_##SUFFIX(source_texture, p, rt_format,         \
+                                         source),                              \
+          p);                                                                  \
+    }                                                                          \
+    xe_resolve_store_words(destination, p.dest_base + off, words, p);          \
+    xe_resolve_forward_store(forward, f, texel, words);                        \
+  }                                                                            \
+  kernel void resolve_direct_color_fused_##SUFFIX(                             \
+      TEX_T source_texture [[texture(1)]],                                     \
+      constant CanonicalResolveParams& p [[buffer(1)]],                        \
+      constant uint2& origin [[buffer(2)]],                                    \
+      constant uint& rt_format [[buffer(3)]],                                  \
+      device uchar* destination [[buffer(4)]],                                 \
+      constant uint& snap_pack_1010102 [[buffer(6)]],                          \
+      texture2d_array<float, access::write> snapshot [[texture(0)]],           \
+      uint2 gid [[thread_position_in_grid]]) {                                 \
+    uint2 scale = xe_resolution_scale();                                       \
+    uint2 host_dest = origin + gid;                                            \
+    uint2 dest = host_dest / scale;                                            \
+    if (dest.x >= p.width || dest.y < p.dest_y ||                              \
+        dest.y - p.dest_y >= p.height) {                                       \
+      return;                                                                  \
+    }                                                                          \
+    uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);             \
+    float4 val =                                                               \
+        xe_direct_color_value_##SUFFIX(source_texture, p, rt_format, source);  \
+    snapshot.write(xe_resolve_fused_snapshot_value(val, snap_pack_1010102),    \
+                   host_dest, 0u);                                             \
+    uint2 sub = host_dest % scale;                                             \
+    uint2 rep = scale >> 1u;                                                   \
+    if (sub.x != rep.x || sub.y != rep.y) {                                    \
+      return;                                                                  \
+    }                                                                          \
+    uint2 guest = uint2(dest.x, dest.y - p.dest_y);                            \
+    uint2 texel = uint2(p.dest_offset_x + guest.x, p.dest_offset_y + guest.y); \
+    uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned,       \
+                                 p.dest_bpp_log2);                             \
+    uint bpp = 1u << p.dest_bpp_log2;                                          \
+    if (p.dest_extent_bytes != 0u && off + bpp > p.dest_extent_bytes) {        \
+      return;                                                                  \
+    }                                                                          \
+    if (p.raw_copy != 0u) {                                                    \
+      uint2 rw = xe_direct_words_##SUFFIX(source_texture, p, rt_format,        \
+                                          source, min(p.sample_select, 3u));   \
+      xe_resolve_store_raw(                                                    \
+          destination, p.dest_base + off,                                      \
+          xe_resolve_raw_swap(uint4(rw.x, rw.y, 0u, 0u), p), p);               \
+      return;                                                                  \
+    }                                                                          \
+    xe_resolve_store_value(destination, p.dest_base + off, val, p);            \
+  }                                                                            \
+  kernel void resolve_direct_color_fused_fwd_##SUFFIX(                         \
+      TEX_T source_texture [[texture(1)]],                                     \
+      constant CanonicalResolveParams& p [[buffer(1)]],                        \
+      constant uint2& origin [[buffer(2)]],                                    \
+      constant uint& rt_format [[buffer(3)]],                                  \
+      device uchar* destination [[buffer(4)]],                                 \
+      constant XeResolveForward& f [[buffer(5)]],                              \
+      constant uint& snap_pack_1010102 [[buffer(6)]],                          \
+      texture2d_array<float, access::write> snapshot [[texture(0)]],           \
+      texture2d<uint, access::write> forward [[texture(2)]],                   \
+      uint2 gid [[thread_position_in_grid]]) {                                 \
+    uint2 scale = xe_resolution_scale();                                       \
+    uint2 host_dest = origin + gid;                                            \
+    uint2 dest = host_dest / scale;                                            \
+    if (dest.x >= p.width || dest.y < p.dest_y ||                              \
+        dest.y - p.dest_y >= p.height) {                                       \
+      return;                                                                  \
+    }                                                                          \
+    uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);             \
+    float4 val =                                                               \
+        xe_direct_color_value_##SUFFIX(source_texture, p, rt_format, source);  \
+    snapshot.write(xe_resolve_fused_snapshot_value(val, snap_pack_1010102),    \
+                   host_dest, 0u);                                             \
+    uint2 sub = host_dest % scale;                                             \
+    uint2 rep = scale >> 1u;                                                   \
+    if (sub.x != rep.x || sub.y != rep.y) {                                    \
+      return;                                                                  \
+    }                                                                          \
+    uint2 guest = uint2(dest.x, dest.y - p.dest_y);                            \
+    uint2 texel = uint2(p.dest_offset_x + guest.x, p.dest_offset_y + guest.y); \
+    uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned,       \
+                                 p.dest_bpp_log2);                             \
+    if (p.dest_extent_bytes != 0u &&                                           \
+        off + (1u << p.dest_bpp_log2) > p.dest_extent_bytes) {                 \
+      return;                                                                  \
+    }                                                                          \
+    uint2 words;                                                               \
+    if (p.raw_copy != 0u) {                                                    \
+      uint2 rw = xe_direct_words_##SUFFIX(source_texture, p, rt_format,        \
+                                          source, min(p.sample_select, 3u));   \
+      words = xe_resolve_guest_raw_words(                                      \
+          xe_resolve_raw_swap(uint4(rw.x, rw.y, 0u, 0u), p), p);               \
+    } else {                                                                   \
+      words = xe_resolve_guest_words(val, p);                                  \
+    }                                                                          \
     xe_resolve_store_words(destination, p.dest_base + off, words, p);          \
     xe_resolve_forward_store(forward, f, texel, words);                        \
   }
 XE_DIRECT_COLOR_KERNELS(1x, texture2d<float XE_COMMA access::read>)
 XE_DIRECT_COLOR_KERNELS(ms, texture2d_ms<float XE_COMMA access::read>)
+XE_DIRECT_COLOR_KERNELS(64_1x, texture2d<float XE_COMMA access::read>)
+XE_DIRECT_COLOR_KERNELS(64_ms, texture2d_ms<float XE_COMMA access::read>)
+XE_DIRECT_COLOR_KERNELS(raw_1x, texture2d<uint XE_COMMA access::read>)
+XE_DIRECT_COLOR_KERNELS(raw_ms, texture2d_ms<uint XE_COMMA access::read>)
+XE_DIRECT_COLOR_KERNELS(64_raw_1x, texture2d<uint XE_COMMA access::read>)
+XE_DIRECT_COLOR_KERNELS(64_raw_ms, texture2d_ms<uint XE_COMMA access::read>)
+// Fused canonical color resolve (snapshot + guest-tiled scatter [+ forward])
+// in a single compute dispatch over the scaled snapshot grid.
+kernel void resolve_canonical_color_fused(
+    device const uint* canonical [[buffer(0)]],
+    constant CanonicalResolveParams& p [[buffer(1)]],
+    constant uint2& origin [[buffer(2)]],
+    device uchar* destination [[buffer(4)]],
+    constant uint& snap_pack_1010102 [[buffer(6)]],
+    texture2d_array<float, access::write> snapshot [[texture(0)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  uint2 scale = xe_resolution_scale();
+  uint2 host_dest = origin + gid;
+  uint2 dest = host_dest / scale;
+  if (dest.x >= p.width || dest.y < p.dest_y ||
+      dest.y - p.dest_y >= p.height) {
+    return;
+  }
+  uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);
+  float4 val = xe_resolve_color_value(canonical, p, source);
+  snapshot.write(xe_resolve_fused_snapshot_value(val, snap_pack_1010102),
+                 host_dest, 0u);
+  uint2 sub = host_dest % scale;
+  uint2 rep = scale >> 1u;
+  if (sub.x != rep.x || sub.y != rep.y) {
+    return;
+  }
+  uint2 guest = uint2(dest.x, dest.y - p.dest_y);
+  uint2 texel = uint2(p.dest_offset_x + guest.x, p.dest_offset_y + guest.y);
+  uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned,
+                               p.dest_bpp_log2);
+  uint bpp = 1u << p.dest_bpp_log2;
+  if (p.dest_extent_bytes != 0u && off + bpp > p.dest_extent_bytes) {
+    return;
+  }
+  if (p.raw_copy != 0u) {
+    xe_resolve_store_raw(destination, p.dest_base + off,
+                         xe_resolve_read_raw(canonical, p, source), p);
+    return;
+  }
+  xe_resolve_store_value(destination, p.dest_base + off, val, p);
+}
+kernel void resolve_canonical_color_fused_fwd(
+    device const uint* canonical [[buffer(0)]],
+    constant CanonicalResolveParams& p [[buffer(1)]],
+    constant uint2& origin [[buffer(2)]],
+    device uchar* destination [[buffer(4)]],
+    constant XeResolveForward& f [[buffer(5)]],
+    constant uint& snap_pack_1010102 [[buffer(6)]],
+    texture2d_array<float, access::write> snapshot [[texture(0)]],
+    texture2d<uint, access::write> forward [[texture(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  uint2 scale = xe_resolution_scale();
+  uint2 host_dest = origin + gid;
+  uint2 dest = host_dest / scale;
+  if (dest.x >= p.width || dest.y < p.dest_y ||
+      dest.y - p.dest_y >= p.height) {
+    return;
+  }
+  uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);
+  float4 val = xe_resolve_color_value(canonical, p, source);
+  snapshot.write(xe_resolve_fused_snapshot_value(val, snap_pack_1010102),
+                 host_dest, 0u);
+  uint2 sub = host_dest % scale;
+  uint2 rep = scale >> 1u;
+  if (sub.x != rep.x || sub.y != rep.y) {
+    return;
+  }
+  uint2 guest = uint2(dest.x, dest.y - p.dest_y);
+  uint2 texel = uint2(p.dest_offset_x + guest.x, p.dest_offset_y + guest.y);
+  uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned,
+                               p.dest_bpp_log2);
+  if (p.dest_extent_bytes != 0u &&
+      off + (1u << p.dest_bpp_log2) > p.dest_extent_bytes) {
+    return;
+  }
+  uint2 words = p.raw_copy != 0u
+                    ? xe_resolve_guest_raw_words(
+                          xe_resolve_read_raw(canonical, p, source), p)
+                    : xe_resolve_guest_words(val, p);
+  xe_resolve_store_words(destination, p.dest_base + off, words, p);
+  xe_resolve_forward_store(forward, f, texel, words);
+}
+// Fused canonical depth resolve (R32F snapshot + guest-tiled raw D24S8 scatter
+// [+ forward]) in a single compute dispatch.
+kernel void resolve_canonical_depth_fused(
+    device const uint* canonical [[buffer(0)]],
+    constant CanonicalResolveParams& p [[buffer(1)]],
+    constant uint2& origin [[buffer(2)]],
+    device uchar* destination [[buffer(4)]],
+    texture2d_array<float, access::write> snapshot [[texture(0)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  uint2 scale = xe_resolution_scale();
+  uint2 host_dest = origin + gid;
+  uint2 dest = host_dest / scale;
+  if (dest.x >= p.width || dest.y < p.dest_y ||
+      dest.y - p.dest_y >= p.height) {
+    return;
+  }
+  uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);
+  snapshot.write(float4(xe_resolve_snapshot_depth(canonical, p, source), 0.0,
+                        0.0, 0.0),
+                 host_dest, 0u);
+  uint2 sub = host_dest % scale;
+  uint2 rep = scale >> 1u;
+  if (sub.x != rep.x || sub.y != rep.y) {
+    return;
+  }
+  uint2 guest = uint2(dest.x, dest.y - p.dest_y);
+  uint2 texel = uint2(p.dest_offset_x + guest.x, p.dest_offset_y + guest.y);
+  uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned, 2u);
+  if (p.dest_extent_bytes != 0u && off + 4u > p.dest_extent_bytes) {
+    return;
+  }
+  uint idx = xe_edram_offset_bytes(source.x, source.y, p.surface.base,
+                                   p.surface.pitch, p.surface.msaa,
+                                   p.surface.is_depth, 0u, p.sample_select) >>
+             2u;
+  uint word = canonical[idx % p.surface.words];
+  *reinterpret_cast<device uint*>(destination + p.dest_base + off) =
+      xe_resolve_endian32(word, p.dest_endian);
+}
+kernel void resolve_canonical_depth_fused_fwd(
+    device const uint* canonical [[buffer(0)]],
+    constant CanonicalResolveParams& p [[buffer(1)]],
+    constant uint2& origin [[buffer(2)]],
+    device uchar* destination [[buffer(4)]],
+    constant XeResolveForward& f [[buffer(5)]],
+    texture2d_array<float, access::write> snapshot [[texture(0)]],
+    texture2d<uint, access::write> forward [[texture(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  uint2 scale = xe_resolution_scale();
+  uint2 host_dest = origin + gid;
+  uint2 dest = host_dest / scale;
+  if (dest.x >= p.width || dest.y < p.dest_y ||
+      dest.y - p.dest_y >= p.height) {
+    return;
+  }
+  uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);
+  snapshot.write(float4(xe_resolve_snapshot_depth(canonical, p, source), 0.0,
+                        0.0, 0.0),
+                 host_dest, 0u);
+  uint2 sub = host_dest % scale;
+  uint2 rep = scale >> 1u;
+  if (sub.x != rep.x || sub.y != rep.y) {
+    return;
+  }
+  uint2 guest = uint2(dest.x, dest.y - p.dest_y);
+  uint2 texel = uint2(p.dest_offset_x + guest.x, p.dest_offset_y + guest.y);
+  uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned, 2u);
+  if (p.dest_extent_bytes != 0u && off + 4u > p.dest_extent_bytes) {
+    return;
+  }
+  uint idx = xe_edram_offset_bytes(source.x, source.y, p.surface.base,
+                                   p.surface.pitch, p.surface.msaa,
+                                   p.surface.is_depth, 0u, p.sample_select) >>
+             2u;
+  uint word = canonical[idx % p.surface.words];
+  uint guest_word = xe_resolve_endian32(word, p.dest_endian);
+  *reinterpret_cast<device uint*>(destination + p.dest_base + off) = guest_word;
+  xe_resolve_forward_store(forward, f, texel, uint2(guest_word, 0u));
+}
+// Direct depth resolves (XE_METAL_DIRECT_DEPTH_RESOLVE): read the authoritative
+// Depth32Float_Stencil8 attachment directly instead of packing depth+stencil
+// into canonical EDRAM first. Mirrors pack_depth* + resolve_canonical_depth*
+// bit-for-bit (including xe_resolve_snapshot_depth diagonal sample adjustment
+// at draw resolution scales).
+inline float xe_direct_depth_sample_1x(depth2d<float, access::read> dtex,
+                                       constant CanonicalResolveParams& p,
+                                       int2 pixel, uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, uint2(pixel), sample, guest_sample);
+  uint d24 = xe_host_to_depth_d24(dtex.read(px), p.surface.is_depth);
+  return xe_depth_word_to_guest(d24 << 8u, p.surface.is_depth);
+}
+inline float xe_direct_depth_sample_ms(depth2d_ms<float, access::read> dtex,
+                                       constant CanonicalResolveParams& p,
+                                       int2 pixel, uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, uint2(pixel), sample, guest_sample);
+  uint ms = xe_metal_sample_to_guest(p.surface.msaa, guest_sample);
+  uint d24 = xe_host_to_depth_d24(dtex.read(px, ms), p.surface.is_depth);
+  return xe_depth_word_to_guest(d24 << 8u, p.surface.is_depth);
+}
+inline uint xe_direct_depth_word_1x(depth2d<float, access::read> dtex,
+                                    texture2d<uint, access::read> stex,
+                                    constant CanonicalResolveParams& p,
+                                    uint2 pixel, uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
+  uint d24 = xe_host_to_depth_d24(dtex.read(px), p.surface.is_depth);
+  uint s = stex.read(px).r & 0xFFu;
+  return xe_pack_depth_stencil(d24, s);
+}
+inline uint xe_direct_depth_word_ms(depth2d_ms<float, access::read> dtex,
+                                    texture2d_ms<uint, access::read> stex,
+                                    constant CanonicalResolveParams& p,
+                                    uint2 pixel, uint sample) {
+  uint guest_sample;
+  uint2 px = xe_direct_slot(p, pixel, sample, guest_sample);
+  uint ms = xe_metal_sample_to_guest(p.surface.msaa, guest_sample);
+  uint d24 = xe_host_to_depth_d24(dtex.read(px, ms), p.surface.is_depth);
+  uint s = stex.read(px, ms).r & 0xFFu;
+  return xe_pack_depth_stencil(d24, s);
+}
+#define XE_DIRECT_DEPTH_KERNELS(SUFFIX, DTEX_T, STEX_T)                        \
+  inline float xe_direct_depth_pair_at_##SUFFIX(                               \
+      DTEX_T dtex, constant CanonicalResolveParams& p, int2 pixel, float m,    \
+      float a, float u) {                                                      \
+    uint k = p.sample_select;                                                  \
+    float depth_k = xe_direct_depth_sample_##SUFFIX(dtex, p, pixel, k);        \
+    float depth_opposite =                                                     \
+        xe_direct_depth_sample_##SUFFIX(dtex, p, pixel, k ^ 1u);               \
+    return depth_k + (u - (m + a)) * (depth_k - depth_opposite) / (2.0 * a);   \
+  }                                                                            \
+  inline float xe_direct_snapshot_depth_##SUFFIX(                              \
+      DTEX_T dtex, constant CanonicalResolveParams& p, uint2 source) {         \
+    uint k = p.sample_select;                                                  \
+    uint2 scale = xe_resolution_scale();                                       \
+    if (XE_SCALED_MSAA_DEPTH == 0 || scale.x <= 1u || scale.x != scale.y ||    \
+        p.surface.msaa == 0u || k >= (p.surface.msaa == 1u ? 2u : 4u)) {       \
+      return xe_direct_depth_sample_##SUFFIX(dtex, p, int2(source), k);        \
+    }                                                                          \
+    float2 offset = xe_guest_sample_offset(p.surface.msaa, k);                 \
+    float a = abs(offset.x);                                                   \
+    int2 dir = int2(sign(offset));                                             \
+    float u = float(scale.x) * a;                                              \
+    float lo_mk = floor(u - a), lo_mj = floor(u + a);                          \
+    bool lo_is_k = lo_mk + a >= lo_mj - a;                                     \
+    float lo = lo_is_k ? lo_mk + a : lo_mj - a;                                \
+    float lo_m = lo_is_k ? lo_mk : lo_mj;                                      \
+    float hi_mk = ceil(u - a), hi_mj = ceil(u + a);                            \
+    bool hi_is_k = hi_mk + a <= hi_mj - a;                                     \
+    float hi = hi_is_k ? hi_mk + a : hi_mj - a;                                \
+    float hi_m = hi_is_k ? hi_mk : hi_mj;                                      \
+    int2 lo_pixel = int2(source) + int(lo_m) * dir;                            \
+    int2 hi_pixel = int2(source) + int(hi_m) * dir;                            \
+    int2 rect_begin = int2(0, int(p.source_y * scale.y));                      \
+    int2 rect_end =                                                            \
+        int2(uint2(p.source_x + p.width, p.source_y + p.height) * scale);      \
+    if (any(min(lo_pixel, hi_pixel) < rect_begin) ||                           \
+        any(max(lo_pixel, hi_pixel) >= rect_end)) {                            \
+      return max(xe_direct_depth_pair_at_##SUFFIX(dtex, p, int2(source), 0.0,  \
+                                                  a, u),                       \
+                 0.0);                                                         \
+    }                                                                          \
+    if (hi <= lo) {                                                            \
+      return xe_direct_depth_sample_##SUFFIX(dtex, p, lo_pixel,                \
+                                             lo_is_k ? k : k ^ 1u);            \
+    }                                                                          \
+    float between = mix(                                                       \
+        xe_direct_depth_sample_##SUFFIX(dtex, p, lo_pixel,                     \
+                                        lo_is_k ? k : k ^ 1u),                 \
+        xe_direct_depth_sample_##SUFFIX(dtex, p, hi_pixel,                     \
+                                        hi_is_k ? k : k ^ 1u),                 \
+        (u - lo) / (hi - lo));                                                 \
+    if (p.depth_pass_direction == 0u) {                                        \
+      return between;                                                          \
+    }                                                                          \
+    float from_lo =                                                            \
+        xe_direct_depth_pair_at_##SUFFIX(dtex, p, lo_pixel, lo_m, a, u);       \
+    float from_hi =                                                            \
+        xe_direct_depth_pair_at_##SUFFIX(dtex, p, hi_pixel, hi_m, a, u);       \
+    return max(p.depth_pass_direction == 1u                                    \
+                   ? min(between, min(from_lo, from_hi))                       \
+                   : max(between, max(from_lo, from_hi)),                      \
+               0.0);                                                           \
+  }                                                                            \
+  kernel void resolve_direct_depth_cs_##SUFFIX(                                \
+      DTEX_T depth_tex [[texture(1)]],                                         \
+      constant CanonicalResolveParams& p [[buffer(1)]],                        \
+      constant uint2& origin [[buffer(2)]],                                    \
+      texture2d_array<float, access::write> snapshot [[texture(0)]],           \
+      uint2 gid [[thread_position_in_grid]]) {                                 \
+    uint2 host_dest = origin + gid;                                            \
+    uint2 dest = host_dest / xe_resolution_scale();                            \
+    if (dest.x >= p.width || dest.y < p.dest_y ||                              \
+        dest.y - p.dest_y >= p.height) {                                       \
+      return;                                                                  \
+    }                                                                          \
+    snapshot.write(                                                            \
+        float4(xe_direct_snapshot_depth_##SUFFIX(                              \
+                   depth_tex, p,                                               \
+                   xe_resolve_snapshot_source(p, host_dest, dest)),            \
+               0.0, 0.0, 0.0),                                                 \
+        host_dest, 0u);                                                        \
+  }                                                                            \
+  kernel void resolve_direct_depth_raw_##SUFFIX(                               \
+      DTEX_T depth_tex [[texture(0)]],                                         \
+      STEX_T stencil_tex [[texture(1)]],                                       \
+      device uint* destination [[buffer(1)]],                                  \
+      constant CanonicalResolveParams& p [[buffer(2)]],                        \
+      uint2 gid [[thread_position_in_grid]]) {                                 \
+    if (gid.x >= p.width || gid.y >= p.height) {                               \
+      return;                                                                  \
+    }                                                                          \
+    uint2 source =                                                             \
+        xe_resolve_host_pixel(uint2(p.source_x + gid.x, p.source_y + gid.y));  \
+    uint word = xe_direct_depth_word_##SUFFIX(depth_tex, stencil_tex, p,       \
+                                              source, p.sample_select);        \
+    if (p.scatter_enable != 0u) {                                              \
+      uint off = xe_tiled2d_offset(p.dest_offset_x + gid.x,                    \
+                                   p.dest_offset_y + gid.y,                    \
+                                   p.dest_pitch_aligned, 2u);                  \
+      if (p.dest_extent_bytes != 0u && off + 4u > p.dest_extent_bytes) {       \
+        return;                                                                \
+      }                                                                        \
+      device uchar* bytes = reinterpret_cast<device uchar*>(destination);      \
+      *reinterpret_cast<device uint*>(bytes + p.dest_base + off) =             \
+          xe_resolve_endian32(word, p.dest_endian);                            \
+      return;                                                                  \
+    }                                                                          \
+    destination[gid.y * p.width + gid.x] = word;                               \
+  }                                                                            \
+  kernel void resolve_direct_depth_raw_fwd_##SUFFIX(                           \
+      DTEX_T depth_tex [[texture(0)]],                                         \
+      STEX_T stencil_tex [[texture(1)]],                                       \
+      device uint* destination [[buffer(1)]],                                  \
+      constant CanonicalResolveParams& p [[buffer(2)]],                        \
+      constant XeResolveForward& f [[buffer(5)]],                              \
+      texture2d<uint, access::write> forward [[texture(2)]],                   \
+      uint2 gid [[thread_position_in_grid]]) {                                 \
+    if (gid.x >= p.width || gid.y >= p.height) {                               \
+      return;                                                                  \
+    }                                                                          \
+    uint2 source =                                                             \
+        xe_resolve_host_pixel(uint2(p.source_x + gid.x, p.source_y + gid.y));  \
+    uint word = xe_direct_depth_word_##SUFFIX(depth_tex, stencil_tex, p,       \
+                                              source, p.sample_select);        \
+    uint2 texel = uint2(p.dest_offset_x + gid.x, p.dest_offset_y + gid.y);     \
+    uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned, 2u);  \
+    if (p.dest_extent_bytes != 0u && off + 4u > p.dest_extent_bytes) {         \
+      return;                                                                  \
+    }                                                                          \
+    uint guest = xe_resolve_endian32(word, p.dest_endian);                     \
+    device uchar* bytes = reinterpret_cast<device uchar*>(destination);        \
+    *reinterpret_cast<device uint*>(bytes + p.dest_base + off) = guest;        \
+    xe_resolve_forward_store(forward, f, texel, uint2(guest, 0u));             \
+  }                                                                            \
+  kernel void resolve_direct_depth_fused_##SUFFIX(                             \
+      DTEX_T depth_tex [[texture(1)]],                                         \
+      STEX_T stencil_tex [[texture(3)]],                                       \
+      constant CanonicalResolveParams& p [[buffer(1)]],                        \
+      constant uint2& origin [[buffer(2)]],                                    \
+      device uchar* destination [[buffer(4)]],                                 \
+      texture2d_array<float, access::write> snapshot [[texture(0)]],           \
+      uint2 gid [[thread_position_in_grid]]) {                                 \
+    uint2 scale = xe_resolution_scale();                                       \
+    uint2 host_dest = origin + gid;                                            \
+    uint2 dest = host_dest / scale;                                            \
+    if (dest.x >= p.width || dest.y < p.dest_y ||                              \
+        dest.y - p.dest_y >= p.height) {                                       \
+      return;                                                                  \
+    }                                                                          \
+    uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);             \
+    snapshot.write(float4(xe_direct_snapshot_depth_##SUFFIX(depth_tex, p,      \
+                                                            source),           \
+                          0.0, 0.0, 0.0),                                      \
+                   host_dest, 0u);                                             \
+    uint2 sub = host_dest % scale;                                             \
+    uint2 rep = scale >> 1u;                                                   \
+    if (sub.x != rep.x || sub.y != rep.y) {                                    \
+      return;                                                                  \
+    }                                                                          \
+    uint2 guest = uint2(dest.x, dest.y - p.dest_y);                            \
+    uint2 texel = uint2(p.dest_offset_x + guest.x, p.dest_offset_y + guest.y); \
+    uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned, 2u);  \
+    if (p.dest_extent_bytes != 0u && off + 4u > p.dest_extent_bytes) {         \
+      return;                                                                  \
+    }                                                                          \
+    uint word = xe_direct_depth_word_##SUFFIX(depth_tex, stencil_tex, p,       \
+                                              source, p.sample_select);        \
+    *reinterpret_cast<device uint*>(destination + p.dest_base + off) =         \
+        xe_resolve_endian32(word, p.dest_endian);                              \
+  }                                                                            \
+  kernel void resolve_direct_depth_fused_fwd_##SUFFIX(                         \
+      DTEX_T depth_tex [[texture(1)]],                                         \
+      STEX_T stencil_tex [[texture(3)]],                                       \
+      constant CanonicalResolveParams& p [[buffer(1)]],                        \
+      constant uint2& origin [[buffer(2)]],                                    \
+      device uchar* destination [[buffer(4)]],                                 \
+      constant XeResolveForward& f [[buffer(5)]],                              \
+      texture2d_array<float, access::write> snapshot [[texture(0)]],           \
+      texture2d<uint, access::write> forward [[texture(2)]],                   \
+      uint2 gid [[thread_position_in_grid]]) {                                 \
+    uint2 scale = xe_resolution_scale();                                       \
+    uint2 host_dest = origin + gid;                                            \
+    uint2 dest = host_dest / scale;                                            \
+    if (dest.x >= p.width || dest.y < p.dest_y ||                              \
+        dest.y - p.dest_y >= p.height) {                                       \
+      return;                                                                  \
+    }                                                                          \
+    uint2 source = xe_resolve_snapshot_source(p, host_dest, dest);             \
+    snapshot.write(float4(xe_direct_snapshot_depth_##SUFFIX(depth_tex, p,      \
+                                                            source),           \
+                          0.0, 0.0, 0.0),                                      \
+                   host_dest, 0u);                                             \
+    uint2 sub = host_dest % scale;                                             \
+    uint2 rep = scale >> 1u;                                                   \
+    if (sub.x != rep.x || sub.y != rep.y) {                                    \
+      return;                                                                  \
+    }                                                                          \
+    uint2 guest = uint2(dest.x, dest.y - p.dest_y);                            \
+    uint2 texel = uint2(p.dest_offset_x + guest.x, p.dest_offset_y + guest.y); \
+    uint off = xe_tiled2d_offset(texel.x, texel.y, p.dest_pitch_aligned, 2u);  \
+    if (p.dest_extent_bytes != 0u && off + 4u > p.dest_extent_bytes) {         \
+      return;                                                                  \
+    }                                                                          \
+    uint word = xe_direct_depth_word_##SUFFIX(depth_tex, stencil_tex, p,       \
+                                              source, p.sample_select);        \
+    uint guest_word = xe_resolve_endian32(word, p.dest_endian);                \
+    *reinterpret_cast<device uint*>(destination + p.dest_base + off) =         \
+        guest_word;                                                            \
+    xe_resolve_forward_store(forward, f, texel, uint2(guest_word, 0u));        \
+  }
+XE_DIRECT_DEPTH_KERNELS(1x, depth2d<float XE_COMMA access::read>,
+                        texture2d<uint XE_COMMA access::read>)
+XE_DIRECT_DEPTH_KERNELS(ms, depth2d_ms<float XE_COMMA access::read>,
+                        texture2d_ms<uint XE_COMMA access::read>)
 // Canonical clear scatter. One gid is one host pixel and one physical MSAA
 // sample; it writes the clear word(s) straight into the surface's own sample
 // layout (including depth's 40-column swap via surface.is_depth), so a cleared

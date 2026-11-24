@@ -48,6 +48,7 @@ static_assert(MTLPixelFormatRGBA16Float == xe::gpu::metal::kMtlPixelFormatRGBA16
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/gpu/metal/metal_edram_authority.h"
 #include "xenia/gpu/metal/metal_load_shader_pipelines.h"
 #include "xenia/gpu/metal/metal_shared_memory.h"
 #include "xenia/gpu/metal/metal_texture_cache.h"
@@ -2093,8 +2094,19 @@ bool MetalSharedTextureCache::FindResolveForward(
               : std::string());
     }
   };
-  if (!ResolveForwardEnabled() || draw_resolution_scale_x() != 1 ||
-      draw_resolution_scale_y() != 1 || (bpp_log2 != 2 && bpp_log2 != 3)) {
+  // At a draw resolution scale the forwarding kernels store the same words
+  // they write to guest memory (the representative host pixel of each guest
+  // pixel), so the 1x texture they write is exactly what a reload would make.
+  // Without it every scaled resolve into a cached texture reloaded it from
+  // memory: a load and a pass break each, though most of those bindings
+  // sample the scaled snapshot. XE_METAL_RESOLVE_FORWARD_SCALED=0 keeps
+  // scaled sessions reloading.
+  static const bool s_forward_scaled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_RESOLVE_FORWARD_SCALED"), true);
+  const bool scaled =
+      draw_resolution_scale_x() != 1 || draw_resolution_scale_y() != 1;
+  if (!ResolveForwardEnabled() || (scaled && !s_forward_scaled) ||
+      (bpp_log2 != 2 && bpp_log2 != 3)) {
     note("disabled", nullptr);
     return false;
   }

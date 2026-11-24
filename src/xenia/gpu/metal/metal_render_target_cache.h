@@ -306,7 +306,7 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                uint32_t source_y, uint32_t width,
                                uint32_t height, uint32_t sample_select,
                                const void* snapshot);
-  void EndDirectColorResolve() { direct_color_source_ = nullptr; }
+  void EndDirectColorResolve();
   // XE_METAL_DIRECT_COLOR_VERIFY: run the pack-first resolve of the same
   // request with the direct source set aside, then put it back.
   bool IsDirectColorResolveActive() const {
@@ -318,6 +318,21 @@ class MetalRenderTargetCache final : public RenderTargetCache {
     return source;
   }
   void ResumeDirectColorResolve(void* source) { direct_color_source_ = source; }
+  // Direct depth resolve (default on; XE_METAL_DIRECT_DEPTH_RESOLVE=0 rolls
+  // back): between Begin returning true and End, depth resolves read the
+  // authoritative Depth32Float_Stencil8 attachment directly instead of packing
+  // depth+stencil into canonical EDRAM first.
+  bool BeginDirectDepthResolve(uint32_t base_tiles, uint32_t pitch_tiles,
+                               uint32_t msaa_samples, uint32_t format,
+                               uint32_t span_base, uint32_t span_row_length,
+                               uint32_t span_rows, uint32_t span_pitch,
+                               uint32_t source_x, uint32_t source_y,
+                               uint32_t width, uint32_t height,
+                               uint32_t sample_select, const void* snapshot);
+  void EndDirectDepthResolve();
+  bool IsDirectDepthResolveActive() const {
+    return direct_depth_source_ != nullptr;
+  }
   // Resolve forwarding: a texture of the shared texture cache that a scatter
   // resolve also writes (xe_resolve_forward_store), with the load's
   // conversion (kind 1 RGBA8Unorm, 2 RGBA16Float, 3 R32Float) and the
@@ -367,6 +382,27 @@ class MetalRenderTargetCache final : public RenderTargetCache {
       // RB_COPY_DEST_INFO copy_dest_number: fixed-point destinations pack
       // as unsigned/signed fraction or integer accordingly.
       uint32_t dest_number = 0, ResolveForward* forward = nullptr);
+  // Fused resolve (XE_METAL_RESOLVE_FUSED=0 rolls back): writes both the
+  // scaled snapshot texture and the 1x guest-tiled shared memory destination
+  // (plus optional resolve-forward texture) in a single compute dispatch.
+  bool ResolveCanonicalColorFused(
+      const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
+      uint32_t msaa_samples, uint32_t format, bool is_64bpp,
+      uint32_t source_x, uint32_t source_y, uint32_t sample_select,
+      bool dest_swap, float exp_bias_scale, uint32_t dest_format,
+      uint32_t dest_bpp_log2, uint32_t dest_endian, bool raw_copy,
+      void* dest_snapshot, uint64_t dest_pixel_format, uint32_t dest_y_offset,
+      void* destination_buffer, uint32_t width, uint32_t height,
+      const CanonicalScatterDest& scatter, uint32_t dest_number = 0,
+      ResolveForward* forward = nullptr);
+  bool ResolveCanonicalDepthFused(
+      const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
+      uint32_t msaa_samples, uint32_t format, uint32_t source_x,
+      uint32_t source_y, uint32_t sample_select, void* dest_snapshot,
+      uint32_t dest_y_offset, uint32_t depth_pass_direction,
+      void* destination_buffer, uint32_t width, uint32_t height,
+      uint32_t dest_endian, const CanonicalScatterDest& scatter,
+      ResolveForward* forward = nullptr);
   bool PerformCanonicalResolveClear(
       const void* command_buffer, uint32_t span_base,
       uint32_t row_length_used, uint32_t rows, uint32_t span_pitch,
@@ -1186,18 +1222,38 @@ class MetalRenderTargetCache final : public RenderTargetCache {
   void* canonical_color_snapshot_cs_pipeline_ = nullptr;
   void* canonical_depth_snapshot_cs_pipeline_ = nullptr;
   // Direct colour resolve: the source attachment and texture while a scope
-  // is open, and the 1x / multisample kernels.
+  // is open, and the 8 variant kernels (index = (raw<<2) | (is64<<1) | ms).
   void* direct_color_source_ = nullptr;   // MetalRenderTarget*
-  void* direct_color_texture_ = nullptr;  // id<MTLTexture>, unretained
+  void* direct_color_texture_ = nullptr;  // id<MTLTexture>, retained if owned
+  bool direct_color_texture_owned_ = false;
   bool direct_color_ms_ = false;
+  uint32_t direct_color_variant_ = 0;  // 0..7
   uint32_t direct_color_rt_format_ = 0;
-  void* direct_color_cs_pipelines_[2] = {};
-  void* direct_color_packed_pipelines_[2] = {};
+  void* direct_color_cs_pipelines_[8] = {};
+  void* direct_color_packed_pipelines_[8] = {};
   void* canonical_color_packed_resolve_pipeline_ = nullptr;
   // Resolve forwarding variants of the scatter kernels.
-  void* direct_color_packed_fwd_pipelines_[2] = {};
+  void* direct_color_packed_fwd_pipelines_[8] = {};
   void* canonical_color_packed_fwd_pipeline_ = nullptr;
   void* canonical_depth_raw_fwd_pipeline_ = nullptr;
+  // Fused snapshot + scatter (+ forward) resolve pipelines.
+  void* direct_color_fused_pipelines_[8] = {};
+  void* direct_color_fused_fwd_pipelines_[8] = {};
+  void* canonical_color_fused_pipeline_ = nullptr;
+  void* canonical_color_fused_fwd_pipeline_ = nullptr;
+  void* canonical_depth_fused_pipeline_ = nullptr;
+  void* canonical_depth_fused_fwd_pipeline_ = nullptr;
+  // Direct depth resolve: authoritative depth attachment + lazy stencil view.
+  void* direct_depth_source_ = nullptr;   // MetalRenderTarget*
+  void* direct_depth_texture_ = nullptr;  // id<MTLTexture>, unretained
+  void* direct_depth_stencil_ = nullptr;  // id<MTLTexture>, retained
+  bool direct_depth_ms_ = false;
+  void* direct_depth_cs_pipelines_[2] = {};
+  void* direct_depth_raw_pipelines_[2] = {};
+  void* direct_depth_raw_fwd_pipelines_[2] = {};
+  void* direct_depth_fused_pipelines_[2] = {};
+  void* direct_depth_fused_fwd_pipelines_[2] = {};
+  void* EnsureDirectDepthStencilView();
   void* canonical_resolve_clear_pipeline_ = nullptr;
   void* canonical_color_msaa_pack_pipeline_ = nullptr;
   void* canonical_color64_msaa_pack_pipeline_ = nullptr;
@@ -1217,6 +1273,13 @@ class MetalRenderTargetCache final : public RenderTargetCache {
                                        RenderTarget* render_target,
                                        uint32_t start_tiles,
                                        uint32_t end_tiles);
+  // The same materialize as a fragment pass, for a single-sample target
+  // created without ShaderWrite so Apple GPUs can keep it losslessly
+  // compressed (XE_METAL_RT_COMPRESSIBLE=1).
+  bool EncodeCanonicalColorFragmentMaterialize(const void* command_buffer,
+                                               RenderTarget* render_target,
+                                               uint32_t start_tiles,
+                                               uint32_t end_tiles);
   bool EncodeCanonicalColorPack(const void* command_buffer,
                                 RenderTarget* render_target,
                                 uint32_t start_tiles, uint32_t end_tiles);

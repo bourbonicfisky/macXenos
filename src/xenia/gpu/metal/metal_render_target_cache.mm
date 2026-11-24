@@ -190,6 +190,37 @@ NSUInteger GetCanonicalRangeTextureRowStart(
       scale_y);
   return std::min<NSUInteger>(row_start, work_height);
 }
+// Tight materialize render passes (XE_METAL_MATERIALIZE_TIGHT_PASS=0 rolls
+// back): bound pass.renderTargetWidth/Height to [0, work_height) so Apple TBDR
+// never loads/stores rows below the materialized range, switch loadAction to
+// DontCare when [start_tiles, end_tiles) covers every pixel in [0, work_height)
+// without discard, and fold a full-span single two-source depth reconcile into
+// the base draw.
+bool MaterializeTightPassEnabled() {
+  static const bool s_enabled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_MATERIALIZE_TIGHT_PASS"), true);
+  return s_enabled;
+}
+bool CanonicalRangeCoversWorkArea(uint32_t base_tiles, uint32_t pitch_tiles,
+                                  uint32_t msaa_samples, uint32_t start_tiles,
+                                  uint32_t end_tiles, NSUInteger work_height,
+                                  uint32_t scale_y) {
+  if (!pitch_tiles || !work_height || start_tiles > base_tiles) {
+    return false;
+  }
+  uint32_t x_shift = 0, y_shift = 0;
+  GetMsaaShifts(msaa_samples, x_shift, y_shift);
+  (void)x_shift;
+  const uint64_t tile_row_height =
+      uint64_t(xenos::kEdramTileHeightSamples >> y_shift) * scale_y;
+  if (!tile_row_height) {
+    return false;
+  }
+  const uint64_t tile_rows =
+      (uint64_t(work_height) + tile_row_height - 1u) / tile_row_height;
+  return uint64_t(end_tiles) >=
+         uint64_t(base_tiles) + tile_rows * uint64_t(pitch_tiles);
+}
 // Compile options defining the scaled EDRAM tile geometry for the canonical
 // EDRAM MSL (kEdramMsl's XE_EDRAM_TILE_WIDTH/HEIGHT_SAMPLES). At 1x they equal
 // the source's own defaults, so the generated code is unchanged.
@@ -605,13 +636,33 @@ void MetalRenderTargetCache::Shutdown() {
     (void)released;
   }
   attachment_clear_pipelines_.clear();
+  EndDirectColorResolve();
+  EndDirectDepthResolve();
   release_compute_pipeline(attachment_clear_cs_pipeline_);
   release_compute_pipeline(canonical_depth_raw_resolve_pipeline_);
+  release_compute_pipeline(canonical_color_snapshot_cs_pipeline_);
+  release_compute_pipeline(canonical_depth_snapshot_cs_pipeline_);
   release_compute_pipeline(canonical_color_packed_resolve_pipeline_);
   release_compute_pipeline(canonical_depth_raw_fwd_pipeline_);
   release_compute_pipeline(canonical_color_packed_fwd_pipeline_);
-  release_compute_pipeline(direct_color_packed_fwd_pipelines_[0]);
-  release_compute_pipeline(direct_color_packed_fwd_pipelines_[1]);
+  release_compute_pipeline(canonical_color_fused_pipeline_);
+  release_compute_pipeline(canonical_color_fused_fwd_pipeline_);
+  release_compute_pipeline(canonical_depth_fused_pipeline_);
+  release_compute_pipeline(canonical_depth_fused_fwd_pipeline_);
+  for (uint32_t i = 0; i < 8u; ++i) {
+    release_compute_pipeline(direct_color_cs_pipelines_[i]);
+    release_compute_pipeline(direct_color_packed_pipelines_[i]);
+    release_compute_pipeline(direct_color_packed_fwd_pipelines_[i]);
+    release_compute_pipeline(direct_color_fused_pipelines_[i]);
+    release_compute_pipeline(direct_color_fused_fwd_pipelines_[i]);
+  }
+  for (uint32_t i = 0; i < 2u; ++i) {
+    release_compute_pipeline(direct_depth_cs_pipelines_[i]);
+    release_compute_pipeline(direct_depth_raw_pipelines_[i]);
+    release_compute_pipeline(direct_depth_raw_fwd_pipelines_[i]);
+    release_compute_pipeline(direct_depth_fused_pipelines_[i]);
+    release_compute_pipeline(direct_depth_fused_fwd_pipelines_[i]);
+  }
   release_compute_pipeline(canonical_resolve_clear_pipeline_);
   if (canonical_color_msaa_pack_pipeline_) {
     id<MTLComputePipelineState> released =
@@ -740,6 +791,25 @@ uint32_t MetalRenderTargetCache::GetFullRenderTargetTextureHeight(
          draw_resolution_scale_y();
 }
 
+namespace {
+// XE_METAL_RT_COMPRESSIBLE=1 (default off): single-sample colour render
+// targets of formats with no raw uint view are created without ShaderWrite,
+// which keeps Apple GPUs' lossless framebuffer compression. Their compute
+// writers then take render-pass paths: the canonical materialize
+// (EncodeCanonicalColorFragmentMaterialize) and the attachment clear (which
+// already checks the usage).
+bool RenderTargetCompressible(bool is_depth, bool single_sample,
+                              xenos::ColorRenderTargetFormat color_format,
+                              bool sample_edram_enabled) {
+  static const bool enabled = [] {
+    const char* v = std::getenv("XE_METAL_RT_COMPRESSIBLE");
+    return v && v[0] == '1' && !v[1];
+  }();
+  return enabled && sample_edram_enabled && !is_depth && single_sample &&
+         !IsCanonicalColorRawViewFormat(color_format);
+}
+}  // namespace
+
 void* MetalRenderTargetCache::NewRenderTargetTexture(RenderTargetKey key,
                                                      uint64_t pixel_format,
                                                      uint32_t height) {
@@ -754,7 +824,10 @@ void* MetalRenderTargetCache::NewRenderTargetTexture(RenderTargetKey key,
   // Canonical color materialization also writes single-sample color targets
   // from compute, so their declared usage must include ShaderWrite.
   desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-  if (!key.is_depth) {
+  if (!key.is_depth &&
+      !RenderTargetCompressible(
+          key.is_depth != 0, key.msaa_samples == xenos::MsaaSamples::k1X,
+          key.GetColorFormat(), sample_edram_enabled_)) {
     desc.usage |= MTLTextureUsageShaderWrite;
   }
   if (key.is_depth ||
@@ -3753,33 +3826,47 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
         two_source, cvars::depth_float24_round,
         5120u * draw_resolution_scale_x() * draw_resolution_scale_y());
   }
-  MTLRenderPassDescriptor* pass =
-      [MTLRenderPassDescriptor renderPassDescriptor];
-  pass.depthAttachment.texture = texture;
-  pass.depthAttachment.loadAction = MTLLoadActionLoad;
-  pass.depthAttachment.storeAction = MTLStoreActionStore;
-  pass.stencilAttachment.texture = texture;
-  pass.stencilAttachment.loadAction = MTLLoadActionLoad;
-  pass.stencilAttachment.storeAction = MTLStoreActionStore;
-  id<MTLRenderCommandEncoder> encoder =
-      [command renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
-  encoder.label = @"rtcache:canonical-depth-materialize-range";
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
       texture.height, draw_resolution_scale_y());
   if (!work_height) {
-    [encoder endEncoding];
     return false;
   }
   const NSUInteger row_start = GetCanonicalRangeTextureRowStart(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), start_tiles, work_height,
       texture.height, draw_resolution_scale_y());
-  [encoder setScissorRect:MTLScissorRect{0, row_start, texture.width,
-                                         work_height - row_start}];
   const bool stencil_export =
       CanonicalStencilExportEnabled() && pipelines->mat_depth_sten_range;
+  const bool tight_pass = MaterializeTightPassEnabled();
+  const bool full_cover =
+      tight_pass &&
+      CanonicalRangeCoversWorkArea(target->key().base_tiles,
+                                   target->key().GetPitchTiles(),
+                                   uint32_t(target->key().msaa_samples),
+                                   start_tiles, end_tiles, work_height,
+                                   draw_resolution_scale_y());
+  MTLRenderPassDescriptor* pass =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  if (tight_pass) {
+    pass.renderTargetWidth = texture.width;
+    pass.renderTargetHeight = work_height;
+  }
+  pass.depthAttachment.texture = texture;
+  pass.depthAttachment.loadAction =
+      full_cover ? MTLLoadActionDontCare : MTLLoadActionLoad;
+  pass.depthAttachment.storeAction = MTLStoreActionStore;
+  pass.stencilAttachment.texture = texture;
+  pass.stencilAttachment.loadAction =
+      (full_cover && stencil_export) ? MTLLoadActionDontCare
+                                     : MTLLoadActionLoad;
+  pass.stencilAttachment.storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> encoder =
+      [command renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
+  encoder.label = @"rtcache:canonical-depth-materialize-range";
+  [encoder setScissorRect:MTLScissorRect{0, row_start, texture.width,
+                                         work_height - row_start}];
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
                                       stencil_export
                                           ? pipelines->mat_depth_sten_range
@@ -3790,10 +3877,16 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
   [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
+  const bool single_two_source =
+      tight_pass && two_source.size() == 1 &&
+      two_source[0].start_tiles <= start_tiles &&
+      two_source[0].end_tiles >= end_tiles;
   {
-    // Base materialize is ALWAYS the pure guest-word path; reconciliation is
-    // applied only by the per-intersection draws below.
-    uint32_t hl_mode = 0u;
+    // Base materialize is ALWAYS the pure guest-word path unless a single
+    // two-source record covers the entire range, in which case folding its
+    // hl_mode here avoids drawing the full-screen triangle twice.
+    uint32_t hl_mode =
+        single_two_source ? HostLaneMode(/*materialize=*/true) : 0u;
     [encoder setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
     [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
                                    (__bridge void*)texture.device)
@@ -3804,20 +3897,22 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
   // Per-intersection reconcile draws: rp narrowed to the EXACT two-source
   // intersection (the fs discards outside rp), lane freshly holding the
   // selected source's provenance. Overwrites the base draw's depth there.
-  for (const MetalTwoSourceRecord& ts : two_source) {
-    RangeParams ts_range{ts.start_tiles, ts.end_tiles};
-    uint32_t ts_mode = HostLaneMode(/*materialize=*/true);
-    [encoder setFragmentBytes:&ts_range length:sizeof(ts_range) atIndex:2];
-    [encoder setFragmentBytes:&ts_mode length:sizeof(ts_mode) atIndex:3];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                vertexStart:0
-                vertexCount:3];
+  if (!single_two_source) {
+    for (const MetalTwoSourceRecord& ts : two_source) {
+      RangeParams ts_range{ts.start_tiles, ts.end_tiles};
+      uint32_t ts_mode = HostLaneMode(/*materialize=*/true);
+      [encoder setFragmentBytes:&ts_range length:sizeof(ts_range) atIndex:2];
+      [encoder setFragmentBytes:&ts_mode length:sizeof(ts_mode) atIndex:3];
+      [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                  vertexStart:0
+                  vertexCount:3];
+    }
   }
   if (stencil_export) {
     [encoder endEncoding];
     return true;
   }
-  if (!two_source.empty()) {
+  if (!two_source.empty() && !single_two_source) {
     // Restore the full-range rp for the stencil bit-plane passes.
     [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
   }
@@ -3984,37 +4079,51 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
         two_source, cvars::depth_float24_round,
         5120u * draw_resolution_scale_x() * draw_resolution_scale_y());
   }
-  MTLRenderPassDescriptor* pass =
-      [MTLRenderPassDescriptor renderPassDescriptor];
-  pass.depthAttachment.texture = texture;
-  pass.depthAttachment.loadAction = MTLLoadActionLoad;
-  pass.depthAttachment.storeAction = MTLStoreActionStore;
-  pass.stencilAttachment.texture = texture;
-  pass.stencilAttachment.loadAction = MTLLoadActionLoad;
-  pass.stencilAttachment.storeAction = MTLStoreActionStore;
-  id<MTLRenderCommandEncoder> encoder =
-      [command renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
-  encoder.label = @"rtcache:canonical-depth-materialize-msaa-range";
   NSUInteger work_height = GetCanonicalRangeTextureHeight(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
       texture.height, draw_resolution_scale_y());
   if (!work_height) {
-    [encoder endEncoding];
     return false;
   }
   const NSUInteger row_start = GetCanonicalRangeTextureRowStart(
       target->key().base_tiles, target->key().GetPitchTiles(),
       uint32_t(target->key().msaa_samples), start_tiles, work_height,
       texture.height, draw_resolution_scale_y());
+  const bool stencil_export =
+      CanonicalStencilExportEnabled() && pipelines->mat_depth_sten_range;
+  const bool tight_pass = MaterializeTightPassEnabled();
+  const bool full_cover =
+      tight_pass &&
+      CanonicalRangeCoversWorkArea(target->key().base_tiles,
+                                   target->key().GetPitchTiles(),
+                                   uint32_t(target->key().msaa_samples),
+                                   start_tiles, end_tiles, work_height,
+                                   draw_resolution_scale_y());
+  MTLRenderPassDescriptor* pass =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  if (tight_pass) {
+    pass.renderTargetWidth = texture.width;
+    pass.renderTargetHeight = work_height;
+  }
+  pass.depthAttachment.texture = texture;
+  pass.depthAttachment.loadAction =
+      full_cover ? MTLLoadActionDontCare : MTLLoadActionLoad;
+  pass.depthAttachment.storeAction = MTLStoreActionStore;
+  pass.stencilAttachment.texture = texture;
+  pass.stencilAttachment.loadAction =
+      (full_cover && stencil_export) ? MTLLoadActionDontCare
+                                     : MTLLoadActionLoad;
+  pass.stencilAttachment.storeAction = MTLStoreActionStore;
+  id<MTLRenderCommandEncoder> encoder =
+      [command renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
+  encoder.label = @"rtcache:canonical-depth-materialize-msaa-range";
   [encoder setScissorRect:MTLScissorRect{0, row_start, texture.width,
                                          work_height - row_start}];
 
   // With stencil export the first pass writes every depth sample and its
   // complete stencil byte. Otherwise it replaces stencil with zero and eight
   // masked REPLACE passes reconstruct the byte per sample.
-  const bool stencil_export =
-      CanonicalStencilExportEnabled() && pipelines->mat_depth_sten_range;
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)(
                                       stencil_export
                                           ? pipelines->mat_depth_sten_range
@@ -4025,8 +4134,13 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
   [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
   [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
   [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
+  const bool single_two_source =
+      tight_pass && two_source.size() == 1 &&
+      two_source[0].start_tiles <= start_tiles &&
+      two_source[0].end_tiles >= end_tiles;
   {
-    uint32_t hl_mode = 0u;
+    uint32_t hl_mode =
+        single_two_source ? HostLaneMode(/*materialize=*/true) : 0u;
     [encoder setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
     [encoder setFragmentBuffer:(__bridge id<MTLBuffer>)EnsureHostLaneBuffer(
                                    (__bridge void*)texture.device)
@@ -4034,20 +4148,22 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
                        atIndex:4];
   }
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-  for (const MetalTwoSourceRecord& ts : two_source) {
-    RangeParams ts_range{ts.start_tiles, ts.end_tiles};
-    uint32_t ts_mode = HostLaneMode(/*materialize=*/true);
-    [encoder setFragmentBytes:&ts_range length:sizeof(ts_range) atIndex:2];
-    [encoder setFragmentBytes:&ts_mode length:sizeof(ts_mode) atIndex:3];
-    [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                vertexStart:0
-                vertexCount:3];
+  if (!single_two_source) {
+    for (const MetalTwoSourceRecord& ts : two_source) {
+      RangeParams ts_range{ts.start_tiles, ts.end_tiles};
+      uint32_t ts_mode = HostLaneMode(/*materialize=*/true);
+      [encoder setFragmentBytes:&ts_range length:sizeof(ts_range) atIndex:2];
+      [encoder setFragmentBytes:&ts_mode length:sizeof(ts_mode) atIndex:3];
+      [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                  vertexStart:0
+                  vertexCount:3];
+    }
   }
   if (stencil_export) {
     [encoder endEncoding];
     return true;
   }
-  if (!two_source.empty()) {
+  if (!two_source.empty() && !single_two_source) {
     [encoder setFragmentBytes:&range length:sizeof(range) atIndex:2];
   }
   [encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
@@ -6249,22 +6365,30 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
         uint32_t scatter_unused[7];
       } padded{params, {}};
       const uint32_t origin[2] = {dest_x_offset * sx, dest_y_offset * sy};
-      const bool direct = !is_depth && direct_color_source_;
+      const bool direct_color = !is_depth && direct_color_source_;
+      const bool direct_depth = is_depth && direct_depth_source_;
       id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
-      compute.label = direct     ? @"rtcache:direct-color-resolve-cs"
-                      : is_depth ? @"rtcache:canonical-depth-resolve-cs"
-                                 : @"rtcache:canonical-color-resolve-cs";
+      compute.label = direct_color ? @"rtcache:direct-color-resolve-cs"
+                      : direct_depth ? @"rtcache:direct-depth-resolve-cs"
+                      : is_depth     ? @"rtcache:canonical-depth-resolve-cs"
+                                     : @"rtcache:canonical-color-resolve-cs";
       id<MTLComputePipelineState> cs =
           (__bridge id<MTLComputePipelineState>)(
-              direct ? direct_color_cs_pipelines_[direct_color_ms_ ? 1 : 0]
-                     : cs_slot);
+              direct_color
+                  ? direct_color_cs_pipelines_[direct_color_variant_]
+                  : (direct_depth
+                         ? direct_depth_cs_pipelines_[direct_depth_ms_ ? 1 : 0]
+                         : cs_slot));
       [compute setComputePipelineState:cs];
-      if (direct) {
+      if (direct_color) {
         [compute setTexture:(__bridge id<MTLTexture>)direct_color_texture_
                     atIndex:1];
         [compute setBytes:&direct_color_rt_format_
                    length:sizeof(direct_color_rt_format_)
                   atIndex:3];
+      } else if (direct_depth) {
+        [compute setTexture:(__bridge id<MTLTexture>)direct_depth_texture_
+                    atIndex:1];
       } else {
         [compute setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
                     offset:0
@@ -6283,7 +6407,8 @@ bool MetalRenderTargetCache::ResolveCanonicalToSnapshot(
       return true;
     }
   }
-  if (!is_depth && direct_color_source_) {
+  if ((!is_depth && direct_color_source_) ||
+      (is_depth && direct_depth_source_)) {
     // Canonical was not packed for a direct resolve; the render pass would
     // read stale words.
     return false;
@@ -6422,23 +6547,47 @@ bool MetalRenderTargetCache::ResolveCanonicalDepthToBuffer(
   static_assert(sizeof(ResolveParams) == 29u * sizeof(uint32_t));
   id<MTLCommandBuffer> command =
       (__bridge id<MTLCommandBuffer>)command_buffer;
+  const bool direct = direct_depth_source_ != nullptr;
+  id<MTLTexture> direct_stencil = nil;
+  if (direct) {
+    direct_stencil = (__bridge id<MTLTexture>)EnsureDirectDepthStencilView();
+    if (!direct_stencil) {
+      return false;
+    }
+  }
   id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-  encoder.label = scatter ? @"rtcache:canonical-depth-raw-scatter"
-                          : @"rtcache:canonical-depth-raw-resolve";
+  encoder.label = direct
+                      ? (scatter ? @"rtcache:direct-depth-raw-scatter"
+                                 : @"rtcache:direct-depth-raw-resolve")
+                      : (scatter ? @"rtcache:canonical-depth-raw-scatter"
+                                 : @"rtcache:canonical-depth-raw-resolve");
   id<MTLComputePipelineState> pipeline =
-      (__bridge id<MTLComputePipelineState>)
-          canonical_depth_raw_resolve_pipeline_;
-  if (scatter && forward &&
-      EnsureResolveForwardPipeline(canonical_depth_raw_fwd_pipeline_,
-                                   "resolve_canonical_depth_raw_fwd")) {
-    pipeline =
-        (__bridge id<MTLComputePipelineState>)canonical_depth_raw_fwd_pipeline_;
-    BindResolveForward((__bridge void*)encoder, *forward);
+      (__bridge id<MTLComputePipelineState>)(
+          direct ? direct_depth_raw_pipelines_[direct_depth_ms_ ? 1 : 0]
+                 : canonical_depth_raw_resolve_pipeline_);
+  if (scatter && forward) {
+    void*& fwd_slot =
+        direct ? direct_depth_raw_fwd_pipelines_[direct_depth_ms_ ? 1 : 0]
+               : canonical_depth_raw_fwd_pipeline_;
+    const char* fwd_name =
+        direct ? (direct_depth_ms_ ? "resolve_direct_depth_raw_fwd_ms"
+                                   : "resolve_direct_depth_raw_fwd_1x")
+               : "resolve_canonical_depth_raw_fwd";
+    if (EnsureResolveForwardPipeline(fwd_slot, fwd_name)) {
+      pipeline = (__bridge id<MTLComputePipelineState>)fwd_slot;
+      BindResolveForward((__bridge void*)encoder, *forward);
+    }
   }
   [encoder setComputePipelineState:pipeline];
-  [encoder setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
-              offset:0
-             atIndex:0];
+  if (direct) {
+    [encoder setTexture:(__bridge id<MTLTexture>)direct_depth_texture_
+                atIndex:0];
+    [encoder setTexture:direct_stencil atIndex:1];
+  } else {
+    [encoder setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
+                offset:0
+               atIndex:0];
+  }
   [encoder setBuffer:(__bridge id<MTLBuffer>)destination_buffer
               offset:0
              atIndex:1];
@@ -6543,17 +6692,25 @@ bool MetalRenderTargetCache::ResolveCanonicalColorToBuffer(
                          : @"rtcache:canonical-color-packed-resolve";
   id<MTLComputePipelineState> pipeline =
       (__bridge id<MTLComputePipelineState>)(
-          direct ? direct_color_packed_pipelines_[direct_color_ms_ ? 1 : 0]
+          direct ? direct_color_packed_pipelines_[direct_color_variant_]
                  : canonical_color_packed_resolve_pipeline_);
   if (scatter && forward && (dest_bpp_log2 == 2u || dest_bpp_log2 == 3u)) {
+    static constexpr const char* kDirectFwdNames[8] = {
+        "resolve_direct_color_packed_fwd_1x",
+        "resolve_direct_color_packed_fwd_ms",
+        "resolve_direct_color_packed_fwd_64_1x",
+        "resolve_direct_color_packed_fwd_64_ms",
+        "resolve_direct_color_packed_fwd_raw_1x",
+        "resolve_direct_color_packed_fwd_raw_ms",
+        "resolve_direct_color_packed_fwd_64_raw_1x",
+        "resolve_direct_color_packed_fwd_64_raw_ms",
+    };
     void*& fwd_slot =
-        direct ? direct_color_packed_fwd_pipelines_[direct_color_ms_ ? 1 : 0]
+        direct ? direct_color_packed_fwd_pipelines_[direct_color_variant_]
                : canonical_color_packed_fwd_pipeline_;
     if (EnsureResolveForwardPipeline(
-            fwd_slot,
-            direct ? (direct_color_ms_ ? "resolve_direct_color_packed_fwd_ms"
-                                       : "resolve_direct_color_packed_fwd_1x")
-                   : "resolve_canonical_color_packed_fwd")) {
+            fwd_slot, direct ? kDirectFwdNames[direct_color_variant_]
+                             : "resolve_canonical_color_packed_fwd")) {
       pipeline = (__bridge id<MTLComputePipelineState>)fwd_slot;
       BindResolveForward((__bridge void*)encoder, *forward);
     }
@@ -6610,7 +6767,31 @@ bool MetalRenderTargetCache::PerformCanonicalResolveClear(
     }
     canonical_resolve_clear_pipeline_ = (__bridge_retained void*)pipeline;
   }
-  if (!PrepareCanonicalEdramForResolve(span_base, row_length_used, rows,
+  // When the clear rectangle covers whole tiles matching the span exactly,
+  // resolve_canonical_clear overwrites every word of every span tile, so
+  // packing dirty attachments beforehand moves bytes that are immediately
+  // discarded. XE_METAL_RESOLVE_CLEAR_SKIP_PACK=0 restores the pre-clear pack.
+  static const bool s_skip_whole_pack = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_RESOLVE_CLEAR_SKIP_PACK"), true);
+  const uint32_t clear_tile_w =
+      (is_64bpp ? (xenos::kEdramTileWidthSamples >> 1u)
+                : xenos::kEdramTileWidthSamples) >>
+      uint32_t(msaa_samples >= uint32_t(xenos::MsaaSamples::k4X));
+  const uint32_t clear_tile_h =
+      xenos::kEdramTileHeightSamples >>
+      uint32_t(msaa_samples >= uint32_t(xenos::MsaaSamples::k2X));
+  const bool overwrites_all_span_tiles =
+      s_skip_whole_pack && clear_tile_w && clear_tile_h &&
+      (source_x % clear_tile_w) == 0 && (width % clear_tile_w) == 0 &&
+      (source_y % clear_tile_h) == 0 && (height % clear_tile_h) == 0 &&
+      (width / clear_tile_w) == row_length_used &&
+      (height / clear_tile_h) == rows &&
+      span_pitch == surface_pitch_tiles &&
+      span_base == ((base_tiles + (source_y / clear_tile_h) * surface_pitch_tiles +
+                     (source_x / clear_tile_w)) &
+                    (xenos::kEdramTileCount - 1u));
+  if (!overwrites_all_span_tiles &&
+      !PrepareCanonicalEdramForResolve(span_base, row_length_used, rows,
                                        span_pitch)) {
     return false;
   }
@@ -7479,18 +7660,34 @@ void* MetalRenderTargetCache::EnsureAssemblySnapshot(uint32_t base,
       width, height, pixel_format);
 }
 
+void MetalRenderTargetCache::EndDirectColorResolve() {
+  direct_color_source_ = nullptr;
+  if (direct_color_texture_owned_ && direct_color_texture_) {
+    id<MTLTexture> released =
+        (__bridge_transfer id<MTLTexture>)direct_color_texture_;
+    (void)released;
+  }
+  direct_color_texture_ = nullptr;
+  direct_color_texture_owned_ = false;
+}
+
 bool MetalRenderTargetCache::BeginDirectColorResolve(
     uint32_t base_tiles, uint32_t pitch_tiles, uint32_t msaa_samples,
     uint32_t format, bool is_64bpp, uint32_t span_base,
     uint32_t span_row_length, uint32_t span_rows, uint32_t span_pitch,
     uint32_t source_x, uint32_t source_y, uint32_t width, uint32_t height,
     uint32_t sample_select, const void* snapshot) {
-  direct_color_source_ = nullptr;
-  direct_color_texture_ = nullptr;
+  EndDirectColorResolve();
   // Default on (reduce-edram-pass-traffic Lever 4);
   // XE_METAL_DIRECT_COLOR_RESOLVE=0 restores the pack-first resolve.
   static const bool s_enabled = ParseMetalEnvironmentFlag(
       std::getenv("XE_METAL_DIRECT_COLOR_RESOLVE"), true);
+  // Extended direct colour resolve (default on;
+  // XE_METAL_DIRECT_COLOR_RESOLVE_EXTENDED=0 rolls back): look up the
+  // authoritative attachment from canonical_authority_ (even when unbound
+  // since its draws) and support 64bpp and raw-view float formats.
+  static const bool s_extended = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_DIRECT_COLOR_RESOLVE_EXTENDED"), true);
   // Engagement census, logged at the first 16 and every 1024 attempts.
   static uint64_t s_attempts = 0, s_counts[6] = {};
   auto note = [&](uint32_t reason) {
@@ -7514,19 +7711,6 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
       std::getenv("XE_METAL_DIRECT_COLOR_RESOLVE_SCALED"), true);
   const bool scaled =
       draw_resolution_scale_x() != 1 || draw_resolution_scale_y() != 1;
-  if (!sample_edram_raster_enabled_ || !canonical_edram_ || is_64bpp ||
-      (scaled && !s_scaled) ||
-      !span_row_length || !span_rows || !width || !height ||
-      (snapshot && !(((__bridge id<MTLTexture>)snapshot).usage &
-                     MTLTextureUsageShaderWrite)) ||
-      IsCanonicalColorRawViewFormat(xenos::ColorRenderTargetFormat(format)) ||
-      !EnsureCanonicalMaterializePipeline()) {
-    note(1);
-    return false;
-  }
-  // The canonical path packs with the attachment's own format and reads the
-  // stored words as the resolve's storage format (8888 gamma stores 8888
-  // bytes), so formats match by storage format.
   auto storage_of = [](uint32_t f) {
     xenos::ColorRenderTargetFormat storage =
         xenos::GetStorageColorFormat(xenos::ColorRenderTargetFormat(f));
@@ -7534,27 +7718,67 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
                ? xenos::ColorRenderTargetFormat::k_8_8_8_8
                : storage;
   };
+  const xenos::ColorRenderTargetFormat resolve_storage = storage_of(format);
+  if (!sample_edram_raster_enabled_ || !canonical_edram_ ||
+      (!s_extended && is_64bpp) || (scaled && !s_scaled) ||
+      !span_row_length || !span_rows || !width || !height ||
+      (snapshot && !(((__bridge id<MTLTexture>)snapshot).usage &
+                     MTLTextureUsageShaderWrite)) ||
+      (!s_extended && IsCanonicalColorRawViewFormat(
+                          xenos::ColorRenderTargetFormat(format))) ||
+      !IsCanonicalColorFormatSupported(resolve_storage) ||
+      !EnsureCanonicalMaterializePipeline()) {
+    note(1);
+    return false;
+  }
   RenderTarget* render_target = nullptr;
   RenderTarget* const* used = last_update_used_render_targets();
-  for (uint32_t slot = 1; slot <= xenos::kMaxColorRenderTargets; ++slot) {
-    RenderTarget* candidate = used[slot];
+  auto candidate_matches = [&](RenderTarget* candidate) {
     if (!candidate) {
-      continue;
+      return false;
     }
     const RenderTargetKey& key = candidate->key();
-    if (!key.is_depth && key.base_tiles == base_tiles &&
-        key.GetPitchTiles() == pitch_tiles &&
-        uint32_t(key.msaa_samples) == msaa_samples &&
-        storage_of(uint32_t(key.GetColorFormat())) == storage_of(format) &&
-        !IsCanonicalColorRawViewFormat(key.GetColorFormat()) &&
-        !key.Is64bpp()) {
-      render_target = candidate;
-      break;
+    if (key.is_depth || key.base_tiles != base_tiles ||
+        key.GetPitchTiles() != pitch_tiles ||
+        uint32_t(key.msaa_samples) != msaa_samples ||
+        key.Is64bpp() != is_64bpp ||
+        !IsCanonicalColorFormatSupported(key.GetColorFormat())) {
+      return false;
+    }
+    if (!s_extended) {
+      return storage_of(uint32_t(key.GetColorFormat())) == resolve_storage &&
+             !IsCanonicalColorRawViewFormat(key.GetColorFormat()) &&
+             !key.Is64bpp();
+    }
+    return true;
+  };
+  if (s_extended && span_base < xenos::kEdramTileCount) {
+    const MetalEdramAuthorityTracker::TileState& first_state =
+        canonical_authority_.tile(span_base);
+    MetalEdramAuthorityTracker::AttachmentId auth_id = 0;
+    if (first_state.location ==
+        MetalEdramAuthorityTracker::Location::kAttachment) {
+      auth_id = first_state.authority_attachment;
+    } else if (first_state.location ==
+               MetalEdramAuthorityTracker::Location::kCanonical) {
+      auth_id = first_state.clean_attachment;
+    }
+    if (auth_id) {
+      RenderTarget* candidate = FindCanonicalAttachment(auth_id);
+      if (candidate_matches(candidate)) {
+        render_target = candidate;
+      }
     }
   }
-  if (!render_target ||
-      !IsCanonicalColorFormatSupported(
-          render_target->key().GetColorFormat())) {
+  if (!render_target) {
+    for (uint32_t slot = 1; slot <= xenos::kMaxColorRenderTargets; ++slot) {
+      if (candidate_matches(used[slot])) {
+        render_target = used[slot];
+        break;
+      }
+    }
+  }
+  if (!render_target) {
     static uint32_t s_mismatch_logs = 0;
     if (s_mismatch_logs++ < 12) {
       std::string bound;
@@ -7576,10 +7800,10 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
   }
   auto* target = static_cast<MetalRenderTarget*>(render_target);
   const bool ms = msaa_samples != uint32_t(xenos::MsaaSamples::k1X);
-  id<MTLTexture> texture =
+  id<MTLTexture> storage_texture =
       ms ? (__bridge id<MTLTexture>)target->msaa_texture()
          : (__bridge id<MTLTexture>)target->texture();
-  if (!texture ||
+  if (!storage_texture ||
       (ms && target->sample_count() != 2u && target->sample_count() != 4u)) {
     note(2);
     return false;
@@ -7624,9 +7848,9 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
   }
   // Host pixels: guest pixels times the draw resolution scale.
   if ((uint64_t(source_x) + width) * draw_resolution_scale_x() + x_extra >
-          texture.width ||
+          storage_texture.width ||
       (uint64_t(source_y) + height) * draw_resolution_scale_y() + y_extra >
-          texture.height) {
+          storage_texture.height) {
     note(3);
     return false;
   }
@@ -7654,42 +7878,53 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
       }
     }
   }
-  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
-  id<MTLLibrary> library =
-      (__bridge id<MTLLibrary>)canonical_materialize_library_;
-  auto ensure = [&](void*& slot, NSString* name) {
-    if (slot) {
-      return true;
-    }
-    id<MTLFunction> function = [library newFunctionWithName:name];
-    NSError* error = nil;
-    id<MTLComputePipelineState> pipeline =
-        function
-            ? [device newComputePipelineStateWithFunction:function error:&error]
-            : nil;
-    if (!pipeline) {
-      XELOGE("MetalRenderTargetCache: direct colour resolve pipeline {} "
-             "failed: {}",
-             name.UTF8String,
-             error ? error.localizedDescription.UTF8String : "?");
-      return false;
-    }
-    slot = (__bridge_retained void*)pipeline;
-    return true;
+  const xenos::ColorRenderTargetFormat rt_color_format =
+      render_target->key().GetColorFormat();
+  const bool raw_view = IsCanonicalColorRawViewFormat(rt_color_format);
+  const uint32_t variant = (uint32_t(raw_view) << 2u) |
+                           (uint32_t(render_target->key().Is64bpp()) << 1u) |
+                           uint32_t(ms);
+  static constexpr const char* kDirectCsNames[8] = {
+      "resolve_direct_color_cs_1x",      "resolve_direct_color_cs_ms",
+      "resolve_direct_color_cs_64_1x",   "resolve_direct_color_cs_64_ms",
+      "resolve_direct_color_cs_raw_1x",  "resolve_direct_color_cs_raw_ms",
+      "resolve_direct_color_cs_64_raw_1x",
+      "resolve_direct_color_cs_64_raw_ms",
   };
-  if (!ensure(direct_color_cs_pipelines_[ms ? 1 : 0],
-              ms ? @"resolve_direct_color_cs_ms"
-                 : @"resolve_direct_color_cs_1x") ||
-      !ensure(direct_color_packed_pipelines_[ms ? 1 : 0],
-              ms ? @"resolve_direct_color_packed_ms"
-                 : @"resolve_direct_color_packed_1x")) {
+  static constexpr const char* kDirectPackedNames[8] = {
+      "resolve_direct_color_packed_1x",
+      "resolve_direct_color_packed_ms",
+      "resolve_direct_color_packed_64_1x",
+      "resolve_direct_color_packed_64_ms",
+      "resolve_direct_color_packed_raw_1x",
+      "resolve_direct_color_packed_raw_ms",
+      "resolve_direct_color_packed_64_raw_1x",
+      "resolve_direct_color_packed_64_raw_ms",
+  };
+  if (!EnsureResolveForwardPipeline(direct_color_cs_pipelines_[variant],
+                                    kDirectCsNames[variant]) ||
+      !EnsureResolveForwardPipeline(direct_color_packed_pipelines_[variant],
+                                    kDirectPackedNames[variant])) {
     note(5);
     return false;
   }
+  if (raw_view) {
+    id<MTLTexture> sync_view =
+        GetCanonicalColorSyncTexture(storage_texture, rt_color_format);
+    if (!sync_view) {
+      note(2);
+      return false;
+    }
+    direct_color_texture_ = (__bridge_retained void*)sync_view;
+    direct_color_texture_owned_ = true;
+  } else {
+    direct_color_texture_ = (__bridge void*)storage_texture;
+    direct_color_texture_owned_ = false;
+  }
   direct_color_source_ = target;
-  direct_color_texture_ = (__bridge void*)texture;
   direct_color_ms_ = ms;
-  direct_color_rt_format_ = uint32_t(render_target->key().GetColorFormat());
+  direct_color_variant_ = variant;
+  direct_color_rt_format_ = uint32_t(rt_color_format);
   if (std::getenv("XE_METAL_CANONICAL_SYNC_LOG")) {
     XELOGW("MetalCanonicalSync direct-resolve fmt={} msaa={} base={} pitch={} "
            "span=[{},+{}x{} step {}] src=({},{}) {}x{} (canonical not packed)",
@@ -7698,6 +7933,450 @@ bool MetalRenderTargetCache::BeginDirectColorResolve(
            source_y, width, height);
   }
   note(0);
+  return true;
+}
+
+void MetalRenderTargetCache::EndDirectDepthResolve() {
+  direct_depth_source_ = nullptr;
+  direct_depth_texture_ = nullptr;
+  if (direct_depth_stencil_) {
+    id<MTLTexture> released =
+        (__bridge_transfer id<MTLTexture>)direct_depth_stencil_;
+    (void)released;
+    direct_depth_stencil_ = nullptr;
+  }
+}
+
+void* MetalRenderTargetCache::EnsureDirectDepthStencilView() {
+  if (direct_depth_stencil_) {
+    return direct_depth_stencil_;
+  }
+  if (!direct_depth_texture_) {
+    return nullptr;
+  }
+  id<MTLTexture> depth_tex = (__bridge id<MTLTexture>)direct_depth_texture_;
+  id<MTLTexture> stencil =
+      [depth_tex newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+  if (!stencil) {
+    return nullptr;
+  }
+  direct_depth_stencil_ = (__bridge_retained void*)stencil;
+  return direct_depth_stencil_;
+}
+
+bool MetalRenderTargetCache::BeginDirectDepthResolve(
+    uint32_t base_tiles, uint32_t pitch_tiles, uint32_t msaa_samples,
+    uint32_t format, uint32_t span_base, uint32_t span_row_length,
+    uint32_t span_rows, uint32_t span_pitch, uint32_t source_x,
+    uint32_t source_y, uint32_t width, uint32_t height, uint32_t sample_select,
+    const void* snapshot) {
+  EndDirectDepthResolve();
+  static const bool s_enabled = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_DIRECT_DEPTH_RESOLVE"), true);
+  static uint64_t s_attempts = 0, s_counts[6] = {};
+  auto note = [&](uint32_t reason) {
+    ++s_counts[reason];
+    if ((++s_attempts & 1023) == 0 || s_attempts <= 16) {
+      XELOGI("MetalDirectDepthResolve: attempts={} taken={} not-eligible={} "
+             "no-attachment={} out-of-texture={} tracker={} pipeline={}",
+             s_attempts, s_counts[0], s_counts[1], s_counts[2], s_counts[3],
+             s_counts[4], s_counts[5]);
+    }
+  };
+  if (!s_enabled) {
+    return false;
+  }
+  id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+  if (!sample_edram_raster_enabled_ || !canonical_edram_ || !device ||
+      MsaaStencilExtract(device) || sample_select >= 4u || !span_row_length ||
+      !span_rows || !width || !height || span_base >= xenos::kEdramTileCount ||
+      (snapshot && !(((__bridge id<MTLTexture>)snapshot).usage &
+                     MTLTextureUsageShaderWrite)) ||
+      !EnsureCanonicalMaterializePipeline()) {
+    note(1);
+    return false;
+  }
+  auto newest = [&](uint32_t t) -> MetalEdramAuthorityTracker::AttachmentId {
+    const MetalEdramAuthorityTracker::TileState& state =
+        canonical_authority_.tile(t);
+    if (state.location == MetalEdramAuthorityTracker::Location::kAttachment) {
+      return state.authority_attachment;
+    }
+    if (state.location == MetalEdramAuthorityTracker::Location::kCanonical) {
+      return state.clean_attachment;
+    }
+    return 0;
+  };
+  const MetalEdramAuthorityTracker::AttachmentId attachment = newest(span_base);
+  if (!attachment) {
+    note(2);
+    return false;
+  }
+  RenderTarget* render_target = FindCanonicalAttachment(attachment);
+  if (!render_target) {
+    note(2);
+    return false;
+  }
+  const RenderTargetKey& key = render_target->key();
+  if (!key.is_depth || key.base_tiles != base_tiles ||
+      key.GetPitchTiles() != pitch_tiles ||
+      uint32_t(key.msaa_samples) != msaa_samples ||
+      uint32_t(key.GetDepthFormat()) != format) {
+    note(2);
+    return false;
+  }
+  auto* target = static_cast<MetalRenderTarget*>(render_target);
+  const bool ms = msaa_samples != uint32_t(xenos::MsaaSamples::k1X);
+  id<MTLTexture> texture =
+      ms ? (__bridge id<MTLTexture>)target->msaa_texture()
+         : (__bridge id<MTLTexture>)target->texture();
+  if (!texture ||
+      (ms && target->sample_count() != 2u && target->sample_count() != 4u)) {
+    note(2);
+    return false;
+  }
+  const uint32_t x_shift =
+      msaa_samples >= uint32_t(xenos::MsaaSamples::k4X) ? 1u : 0u;
+  const uint32_t y_shift =
+      msaa_samples >= uint32_t(xenos::MsaaSamples::k2X) ? 1u : 0u;
+  const uint32_t x_extra = x_shift ? 0u : ((sample_select >> 1u) & 1u);
+  const uint32_t y_extra = y_shift ? 0u : (sample_select & 1u);
+  if ((uint64_t(source_x) + width) * draw_resolution_scale_x() + x_extra >
+          texture.width ||
+      (uint64_t(source_y) + height) * draw_resolution_scale_y() + y_extra >
+          texture.height) {
+    note(3);
+    return false;
+  }
+  for (uint32_t row = 0; row < span_rows; ++row) {
+    const uint32_t row_start = span_base + row * span_pitch;
+    for (uint32_t t = row_start; t < row_start + span_row_length; ++t) {
+      if (t >= xenos::kEdramTileCount || newest(t) != attachment) {
+        note(4);
+        return false;
+      }
+    }
+  }
+  if (!EnsureResolveForwardPipeline(
+          direct_depth_cs_pipelines_[ms ? 1 : 0],
+          ms ? "resolve_direct_depth_cs_ms" : "resolve_direct_depth_cs_1x") ||
+      !EnsureResolveForwardPipeline(
+          direct_depth_raw_pipelines_[ms ? 1 : 0],
+          ms ? "resolve_direct_depth_raw_ms"
+             : "resolve_direct_depth_raw_1x")) {
+    note(5);
+    return false;
+  }
+  direct_depth_source_ = target;
+  direct_depth_texture_ = (__bridge void*)texture;
+  direct_depth_ms_ = ms;
+  note(0);
+  return true;
+}
+
+bool MetalRenderTargetCache::ResolveCanonicalColorFused(
+    const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
+    uint32_t msaa_samples, uint32_t format, bool is_64bpp, uint32_t source_x,
+    uint32_t source_y, uint32_t sample_select, bool dest_swap,
+    float exp_bias_scale, uint32_t dest_format, uint32_t dest_bpp_log2,
+    uint32_t dest_endian, bool raw_copy, void* dest_snapshot,
+    uint64_t dest_pixel_format, uint32_t dest_y_offset,
+    void* destination_buffer, uint32_t width, uint32_t height,
+    const CanonicalScatterDest& scatter, uint32_t dest_number,
+    ResolveForward* forward) {
+  static const bool s_fused = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_RESOLVE_FUSED"), true);
+  if (!s_fused || !SnapshotComputeEnabled() || !sample_edram_raster_enabled_ ||
+      !canonical_edram_ || !command_buffer || !dest_snapshot ||
+      !destination_buffer || !width || !height || dest_bpp_log2 > 4u ||
+      !EnsureCanonicalMaterializePipeline()) {
+    return false;
+  }
+  id<MTLTexture> snapshot = (__bridge id<MTLTexture>)dest_snapshot;
+  if (!(snapshot.usage & MTLTextureUsageShaderWrite)) {
+    return false;
+  }
+  const uint32_t sx = draw_resolution_scale_x();
+  const uint32_t sy = draw_resolution_scale_y();
+  if (uint64_t(width) * sx > snapshot.width ||
+      (uint64_t(dest_y_offset) + height) * sy > snapshot.height) {
+    return false;
+  }
+  // Ensure snapshot and buffer agree on xe_resolve_color_finish() swizzle when
+  // dest_swap is set (both non-red-only, or both red-only without A8 special).
+  const bool snap_red_only =
+      raw_copy && dest_pixel_format == uint64_t(MTLPixelFormatR32Float);
+  const bool buf_red_only = dest_bpp_log2 == 0u;
+  if (dest_swap && (snap_red_only != buf_red_only ||
+                    (buf_red_only && dest_format == 2u))) {
+    return false;
+  }
+  xenos::ColorRenderTargetFormat storage_format =
+      xenos::GetStorageColorFormat(xenos::ColorRenderTargetFormat(format));
+  if (storage_format == xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) {
+    storage_format = xenos::ColorRenderTargetFormat::k_8_8_8_8;
+  }
+  if (!IsCanonicalColorFormatSupported(storage_format)) {
+    return false;
+  }
+  const bool direct = direct_color_source_ != nullptr;
+  const bool use_forward =
+      forward != nullptr && (dest_bpp_log2 == 2u || dest_bpp_log2 == 3u);
+  static constexpr const char* kDirectFusedNames[8] = {
+      "resolve_direct_color_fused_1x",
+      "resolve_direct_color_fused_ms",
+      "resolve_direct_color_fused_64_1x",
+      "resolve_direct_color_fused_64_ms",
+      "resolve_direct_color_fused_raw_1x",
+      "resolve_direct_color_fused_raw_ms",
+      "resolve_direct_color_fused_64_raw_1x",
+      "resolve_direct_color_fused_64_raw_ms",
+  };
+  static constexpr const char* kDirectFusedFwdNames[8] = {
+      "resolve_direct_color_fused_fwd_1x",
+      "resolve_direct_color_fused_fwd_ms",
+      "resolve_direct_color_fused_fwd_64_1x",
+      "resolve_direct_color_fused_fwd_64_ms",
+      "resolve_direct_color_fused_fwd_raw_1x",
+      "resolve_direct_color_fused_fwd_raw_ms",
+      "resolve_direct_color_fused_fwd_64_raw_1x",
+      "resolve_direct_color_fused_fwd_64_raw_ms",
+  };
+  void*& slot =
+      direct ? (use_forward
+                    ? direct_color_fused_fwd_pipelines_[direct_color_variant_]
+                    : direct_color_fused_pipelines_[direct_color_variant_])
+             : (use_forward ? canonical_color_fused_fwd_pipeline_
+                            : canonical_color_fused_pipeline_);
+  const char* name =
+      direct ? (use_forward ? kDirectFusedFwdNames[direct_color_variant_]
+                            : kDirectFusedNames[direct_color_variant_])
+             : (use_forward ? "resolve_canonical_color_fused_fwd"
+                            : "resolve_canonical_color_fused");
+  if (!EnsureResolveForwardPipeline(slot, name)) {
+    return false;
+  }
+  EdramSurfaceParams surface{
+      base_tiles, pitch_tiles, msaa_samples, 0u, uint32_t(is_64bpp),
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
+  struct ResolveParams {
+    EdramSurfaceParams surface;
+    uint32_t source_x, source_y, dest_y, sample_select;
+    uint32_t color_format;
+    uint32_t dest_swap;
+    uint32_t dest_red_only;
+    float exp_bias_scale;
+    uint32_t width, height;
+    uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
+    uint32_t scatter_enable;
+    uint32_t dest_base, dest_pitch_aligned;
+    uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
+    uint32_t dest_number;
+    uint32_t dest_int_bits;
+    uint32_t depth_pass_direction;
+  } params{surface,
+           source_x,
+           source_y,
+           dest_y_offset,
+           sample_select,
+           uint32_t(storage_format),
+           uint32_t(dest_swap),
+           uint32_t(buf_red_only),
+           exp_bias_scale,
+           width,
+           height,
+           dest_format,
+           dest_bpp_log2,
+           dest_endian,
+           uint32_t(raw_copy),
+           1u,
+           scatter.dest_base,
+           scatter.dest_pitch_aligned,
+           scatter.dest_offset_x,
+           scatter.dest_offset_y,
+           scatter.dest_extent_bytes,
+           dest_number,
+           0u,
+           0u};
+  static_assert(sizeof(ResolveParams) == 29u * sizeof(uint32_t));
+  static const bool s_scaled_packed_color = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_SCALED_PACKED_COLOR"), true);
+  const uint32_t snap_pack_1010102 =
+      (s_scaled_packed_color && (sx > 1 || sy > 1) &&
+       dest_pixel_format == uint64_t(MTLPixelFormatRGB10A2Unorm))
+          ? 1u
+          : 0u;
+  const uint32_t origin[2] = {0u, dest_y_offset * sy};
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLComputePipelineState> cs = (__bridge id<MTLComputePipelineState>)slot;
+  id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
+  compute.label = direct ? @"rtcache:direct-color-resolve-fused"
+                         : @"rtcache:canonical-color-resolve-fused";
+  [compute setComputePipelineState:cs];
+  if (direct) {
+    [compute setTexture:(__bridge id<MTLTexture>)direct_color_texture_
+                atIndex:1];
+    [compute setBytes:&direct_color_rt_format_
+               length:sizeof(direct_color_rt_format_)
+              atIndex:3];
+  } else {
+    [compute setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
+                offset:0
+               atIndex:0];
+  }
+  [compute setBytes:&params length:sizeof(params) atIndex:1];
+  [compute setBytes:origin length:sizeof(origin) atIndex:2];
+  [compute setBuffer:(__bridge id<MTLBuffer>)destination_buffer
+              offset:0
+             atIndex:4];
+  [compute setBytes:&snap_pack_1010102
+             length:sizeof(snap_pack_1010102)
+            atIndex:6];
+  [compute setTexture:snapshot atIndex:0];
+  if (use_forward) {
+    BindResolveForward((__bridge void*)compute, *forward);
+  }
+  MTLSize threads = MTLSizeMake(width * sx, height * sy, 1);
+  NSUInteger tw = cs.threadExecutionWidth;
+  NSUInteger th =
+      std::max<NSUInteger>(1, cs.maxTotalThreadsPerThreadgroup / tw);
+  [compute dispatchThreads:threads
+      threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+  [compute endEncoding];
+  return true;
+}
+
+bool MetalRenderTargetCache::ResolveCanonicalDepthFused(
+    const void* command_buffer, uint32_t base_tiles, uint32_t pitch_tiles,
+    uint32_t msaa_samples, uint32_t format, uint32_t source_x,
+    uint32_t source_y, uint32_t sample_select, void* dest_snapshot,
+    uint32_t dest_y_offset, uint32_t depth_pass_direction,
+    void* destination_buffer, uint32_t width, uint32_t height,
+    uint32_t dest_endian, const CanonicalScatterDest& scatter,
+    ResolveForward* forward) {
+  static const bool s_fused = ParseMetalEnvironmentFlag(
+      std::getenv("XE_METAL_RESOLVE_FUSED"), true);
+  if (!s_fused || !SnapshotComputeEnabled() || !sample_edram_raster_enabled_ ||
+      !canonical_edram_ || !command_buffer || !dest_snapshot ||
+      !destination_buffer || !width || !height ||
+      !EnsureCanonicalMaterializePipeline()) {
+    return false;
+  }
+  id<MTLTexture> snapshot = (__bridge id<MTLTexture>)dest_snapshot;
+  if (!(snapshot.usage & MTLTextureUsageShaderWrite)) {
+    return false;
+  }
+  const uint32_t sx = draw_resolution_scale_x();
+  const uint32_t sy = draw_resolution_scale_y();
+  if (uint64_t(width) * sx > snapshot.width ||
+      (uint64_t(dest_y_offset) + height) * sy > snapshot.height) {
+    return false;
+  }
+  const bool direct = direct_depth_source_ != nullptr;
+  const bool ms = direct_depth_ms_;
+  const bool use_forward = forward != nullptr;
+  id<MTLTexture> direct_stencil = nil;
+  if (direct) {
+    direct_stencil = (__bridge id<MTLTexture>)EnsureDirectDepthStencilView();
+    if (!direct_stencil) {
+      return false;
+    }
+  }
+  void*& slot =
+      direct
+          ? (use_forward ? direct_depth_fused_fwd_pipelines_[ms ? 1 : 0]
+                         : direct_depth_fused_pipelines_[ms ? 1 : 0])
+          : (use_forward ? canonical_depth_fused_fwd_pipeline_
+                         : canonical_depth_fused_pipeline_);
+  const char* name =
+      direct
+          ? (use_forward ? (ms ? "resolve_direct_depth_fused_fwd_ms"
+                               : "resolve_direct_depth_fused_fwd_1x")
+                         : (ms ? "resolve_direct_depth_fused_ms"
+                               : "resolve_direct_depth_fused_1x"))
+          : (use_forward ? "resolve_canonical_depth_fused_fwd"
+                         : "resolve_canonical_depth_fused");
+  if (!EnsureResolveForwardPipeline(slot, name)) {
+    return false;
+  }
+  EdramSurfaceParams surface{
+      base_tiles, pitch_tiles, msaa_samples,
+      format == uint32_t(xenos::DepthRenderTargetFormat::kD24FS8) ? 2u : 1u,
+      0u, canonical_edram_size() / uint32_t(sizeof(uint32_t))};
+  struct ResolveParams {
+    EdramSurfaceParams surface;
+    uint32_t source_x, source_y, dest_y, sample_select;
+    uint32_t color_format;
+    uint32_t dest_swap;
+    uint32_t dest_red_only;
+    float exp_bias_scale;
+    uint32_t width, height;
+    uint32_t dest_format, dest_bpp_log2, dest_endian, raw_copy;
+    uint32_t scatter_enable;
+    uint32_t dest_base, dest_pitch_aligned;
+    uint32_t dest_offset_x, dest_offset_y, dest_extent_bytes;
+    uint32_t dest_number;
+    uint32_t dest_int_bits;
+    uint32_t depth_pass_direction;
+  } params{surface,
+           source_x,
+           source_y,
+           dest_y_offset,
+           sample_select,
+           0u,
+           0u,
+           0u,
+           1.0f,
+           width,
+           height,
+           0u,
+           2u,
+           dest_endian,
+           1u,
+           1u,
+           scatter.dest_base,
+           scatter.dest_pitch_aligned,
+           scatter.dest_offset_x,
+           scatter.dest_offset_y,
+           scatter.dest_extent_bytes,
+           0u,
+           0u,
+           depth_pass_direction};
+  static_assert(sizeof(ResolveParams) == 29u * sizeof(uint32_t));
+  const uint32_t origin[2] = {0u, dest_y_offset * sy};
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLComputePipelineState> cs = (__bridge id<MTLComputePipelineState>)slot;
+  id<MTLComputeCommandEncoder> compute = [command computeCommandEncoder];
+  compute.label = direct ? @"rtcache:direct-depth-resolve-fused"
+                         : @"rtcache:canonical-depth-resolve-fused";
+  [compute setComputePipelineState:cs];
+  if (direct) {
+    [compute setTexture:(__bridge id<MTLTexture>)direct_depth_texture_
+                atIndex:1];
+    [compute setTexture:direct_stencil atIndex:3];
+  } else {
+    [compute setBuffer:(__bridge id<MTLBuffer>)canonical_edram_
+                offset:0
+               atIndex:0];
+  }
+  [compute setBytes:&params length:sizeof(params) atIndex:1];
+  [compute setBytes:origin length:sizeof(origin) atIndex:2];
+  [compute setBuffer:(__bridge id<MTLBuffer>)destination_buffer
+              offset:0
+             atIndex:4];
+  [compute setTexture:snapshot atIndex:0];
+  if (use_forward) {
+    BindResolveForward((__bridge void*)compute, *forward);
+  }
+  MTLSize threads = MTLSizeMake(width * sx, height * sy, 1);
+  NSUInteger tw = cs.threadExecutionWidth;
+  NSUInteger th =
+      std::max<NSUInteger>(1, cs.maxTotalThreadsPerThreadgroup / tw);
+  [compute dispatchThreads:threads
+      threadsPerThreadgroup:MTLSizeMake(tw, th, 1)];
+  [compute endEncoding];
   return true;
 }
 
@@ -8265,6 +8944,12 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMaterialize(
   if (!IsCanonicalColorFormatSupported(color_format)) {
     return false;
   }
+  if (!(((__bridge id<MTLTexture>)target->texture()).usage &
+        MTLTextureUsageShaderWrite)) {
+    return EncodeCanonicalColorFragmentMaterialize(command_buffer,
+                                                   render_target, start_tiles,
+                                                   end_tiles);
+  }
   id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
   id<MTLTexture> texture = GetCanonicalColorSyncTexture(
       (__bridge id<MTLTexture>)target->texture(), color_format);
@@ -8396,6 +9081,98 @@ bool MetalRenderTargetCache::EncodeCanonicalColorPack(
   return true;
 }
 
+bool MetalRenderTargetCache::EncodeCanonicalColorFragmentMaterialize(
+    const void* command_buffer, RenderTarget* render_target,
+    uint32_t start_tiles, uint32_t end_tiles) {
+  auto* target = static_cast<MetalRenderTarget*>(render_target);
+  const xenos::ColorRenderTargetFormat color_format =
+      target->key().GetColorFormat();
+  if (IsCanonicalColorRawViewFormat(color_format) ||
+      target->key().msaa_samples != xenos::MsaaSamples::k1X) {
+    return false;
+  }
+  id<MTLTexture> texture = (__bridge id<MTLTexture>)target->texture();
+  const bool is_64bpp = target->key().Is64bpp();
+  const uint64_t key = uint64_t(texture.pixelFormat) | (uint64_t(1) << 32u) |
+                       (uint64_t(is_64bpp) << 63u);
+  id<MTLRenderPipelineState> pipeline = nil;
+  auto found = canonical_color_msaa_materialize_pipelines_.find(key);
+  if (found != canonical_color_msaa_materialize_pipelines_.end()) {
+    pipeline = (__bridge id<MTLRenderPipelineState>)found->second;
+  } else {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)device_;
+    id<MTLLibrary> library =
+        (__bridge id<MTLLibrary>)canonical_materialize_library_;
+    MTLRenderPipelineDescriptor* descriptor =
+        [[MTLRenderPipelineDescriptor alloc] init];
+    descriptor.vertexFunction = [library newFunctionWithName:@"xe_color_vs"];
+    descriptor.fragmentFunction = [library
+        newFunctionWithName:is_64bpp ? @"materialize_color64_ms_range_fs"
+                                     : @"materialize_color_ms_range_fs"];
+    descriptor.colorAttachments[0].pixelFormat = texture.pixelFormat;
+    descriptor.rasterSampleCount = 1;
+    NSError* error = nil;
+    pipeline = [device newRenderPipelineStateWithDescriptor:descriptor
+                                                      error:&error];
+    if (!pipeline) {
+      XELOGE("MetalRenderTargetCache: single-sample fragment materialize "
+             "pipeline failed: {}",
+             error ? error.localizedDescription.UTF8String : "?");
+      return false;
+    }
+    canonical_color_msaa_materialize_pipelines_.emplace(
+        key, (__bridge_retained void*)pipeline);
+  }
+  id<MTLCommandBuffer> command =
+      (__bridge id<MTLCommandBuffer>)command_buffer;
+  id<MTLBuffer> canonical = (__bridge id<MTLBuffer>)canonical_edram_;
+  uint32_t format = uint32_t(color_format);
+  EdramSurfaceParams params{
+      target->key().base_tiles, target->key().GetPitchTiles(), 0u, 0u,
+      uint32_t(is_64bpp),
+      canonical_edram_size() / uint32_t(sizeof(uint32_t))};
+  struct RangeParams {
+    uint32_t start_tiles, end_tiles;
+  } range{start_tiles, end_tiles};
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      target->key().base_tiles, target->key().GetPitchTiles(), 0u, start_tiles,
+      end_tiles, texture.height, draw_resolution_scale_y());
+  if (!work_height) {
+    return false;
+  }
+  const NSUInteger row_start = GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(), 0u, start_tiles,
+      work_height, texture.height, draw_resolution_scale_y());
+  const bool full_cover =
+      MaterializeTightPassEnabled() &&
+      CanonicalRangeCoversWorkArea(target->key().base_tiles,
+                                   target->key().GetPitchTiles(), 0u,
+                                   start_tiles, end_tiles, work_height,
+                                   draw_resolution_scale_y());
+  MTLRenderPassDescriptor* pass =
+      [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = texture;
+  pass.colorAttachments[0].loadAction =
+      full_cover ? MTLLoadActionDontCare : MTLLoadActionLoad;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  pass.renderTargetWidth = texture.width;
+  pass.renderTargetHeight = work_height;
+  id<MTLRenderCommandEncoder> encoder =
+      [command renderCommandEncoderWithDescriptor:pass];
+  encoder.label = is_64bpp ? @"rtcache:canonical-color64-materialize-range-fs"
+                           : @"rtcache:canonical-color-materialize-range-fs";
+  [encoder setScissorRect:MTLScissorRect{0, row_start, texture.width,
+                                         work_height - row_start}];
+  [encoder setRenderPipelineState:pipeline];
+  [encoder setFragmentBuffer:canonical offset:0 atIndex:0];
+  [encoder setFragmentBytes:&params length:sizeof(params) atIndex:1];
+  [encoder setFragmentBytes:&format length:sizeof(format) atIndex:2];
+  [encoder setFragmentBytes:&range length:sizeof(range) atIndex:3];
+  [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  [encoder endEncoding];
+  return true;
+}
+
 bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
     const void* command_buffer, RenderTarget* render_target,
     uint32_t start_tiles, uint32_t end_tiles) {
@@ -8434,10 +9211,34 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
   struct RangeParams {
     uint32_t start_tiles, end_tiles;
   } range{start_tiles, end_tiles};
+  NSUInteger work_height = GetCanonicalRangeTextureHeight(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
+      texture.height, draw_resolution_scale_y());
+  if (!work_height) {
+    return false;
+  }
+  const NSUInteger row_start = GetCanonicalRangeTextureRowStart(
+      target->key().base_tiles, target->key().GetPitchTiles(),
+      uint32_t(target->key().msaa_samples), start_tiles, work_height,
+      texture.height, draw_resolution_scale_y());
+  const bool tight_pass = MaterializeTightPassEnabled();
+  const bool full_cover =
+      tight_pass &&
+      CanonicalRangeCoversWorkArea(target->key().base_tiles,
+                                   target->key().GetPitchTiles(),
+                                   uint32_t(target->key().msaa_samples),
+                                   start_tiles, end_tiles, work_height,
+                                   draw_resolution_scale_y());
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
+  if (tight_pass) {
+    pass.renderTargetWidth = texture.width;
+    pass.renderTargetHeight = work_height;
+  }
   pass.colorAttachments[0].texture = texture;
-  pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+  pass.colorAttachments[0].loadAction =
+      full_cover ? MTLLoadActionDontCare : MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
   id<MTLRenderCommandEncoder> encoder =
       [command renderCommandEncoderWithDescriptor:metal::MetalApplyXenosSamplePositions(pass)];
@@ -8451,18 +9252,6 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
           : (is_64bpp
                  ? @"rtcache:canonical-color64-materialize-msaa-range"
                  : @"rtcache:canonical-color-materialize-msaa-range");
-  NSUInteger work_height = GetCanonicalRangeTextureHeight(
-      target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), start_tiles, end_tiles,
-      texture.height, draw_resolution_scale_y());
-  if (!work_height) {
-    [encoder endEncoding];
-    return false;
-  }
-  const NSUInteger row_start = GetCanonicalRangeTextureRowStart(
-      target->key().base_tiles, target->key().GetPitchTiles(),
-      uint32_t(target->key().msaa_samples), start_tiles, work_height,
-      texture.height, draw_resolution_scale_y());
   [encoder setScissorRect:MTLScissorRect{0, row_start, texture.width,
                                          work_height - row_start}];
   [encoder setRenderPipelineState:pipeline];
