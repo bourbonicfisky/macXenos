@@ -11,7 +11,11 @@ Mac didn't run the game in this round. The M4 mini column is partial for now:
 its run stopped part-way and will be completed. A few rows no Mac measured in
 this round keep figures from earlier builds and are marked "(earlier build)".
 Games added on November 22 were measured on one Mac only (the M4 mini, the M4
-Pro, the M1 Max or the M5 Max), with a 1.1 development build.
+Pro, the M1 Max or the M5 Max), with a 1.1 development build. On November 23–24,
+80 titles were re-measured at 1x across all three of M4 mini, M4 Pro, and M1 Max
+on `release/1.1` (all 7 Metal scaling levers enabled, including lossless RT
+compression); those rows reflect the 1.1 results (see
+`docs/dev/scaling_1_1_benchmarks_20261124.md` for 2x and 3x scaling figures).
 The M5 Max column is from an M5 Max Mac Studio, in runs between November 14
 and 16 (most of them with the 1.0.1 release candidate) that are still filling
 the column in.
@@ -41,7 +45,7 @@ smoother.
 | 007: Quantum of Solace | First level | – | 30 | – | 30 |  |
 | 2010 FIFA World Cup South Africa | Quick Match, USA v Mexico, CPU vs CPU | – | 60 | – | – |  |
 | 2014 FIFA World Cup Brazil | Kick Off, Brazil v Argentina at the Maracanã | – | 60 | – | – | Runs 30 when the test ends on a Brazil set piece waiting for the player; open play holds 60 |
-| 50 Cent: Blood on the Sand | Mission 1, the opening street | – | – | 118 | 128 | Doesn't cap its own frame rate (see below) |
+| 50 Cent: Blood on the Sand | Mission 1, the opening street | 101 | 179 | 101 | 128 | Doesn't cap its own frame rate (see below) |
 | Ace Combat 6: Fires of Liberation | Mission 1, the take-off sequence | – | – | 30 | 30 |  |
 | Ace Combat: Assault Horizon | Mission 1, over Miami | – | – | 30 | 30 |  |
 | Adventure Time: Explore the Dungeon Because I Don't Know! | New game, the Candy Kingdom hub | – | 60 | – | – |  |
@@ -49,20 +53,20 @@ smoother.
 | AFL Live | Single match, CPU vs CPU at the MCG | – | 124 | – | – | Doesn't cap its own frame rate (see below) |
 | AFL Live 2 | Single match, CPU vs CPU (random teams and venue) | – | 30 | – | – |  |
 | Afro Samurai | Village tutorial fight | – | – | 30 | 30 |  |
-| Alan Wake | Opening nightmare on the mountain road | – | – | 30 | 30 |  |
-| Assassin's Creed | The Animus tutorial crowd | – | 30 | 30 | – |  |
-| Assassin's Creed II | Story mode opening | – | 30 | 30 | 30 |  |
-| Assassin's Creed III | Opening, Desmond at the cave entrance | – | 60 | 60 | 60 | This scene runs at 60 |
+| Alan Wake | Opening nightmare on the mountain road | 30 | 30 | 30 | 30 |  |
+| Assassin's Creed | The Animus tutorial crowd | 30 | 30 | 30 | – |  |
+| Assassin's Creed II | Story mode opening | 30 | 30 | 30 | 30 |  |
+| Assassin's Creed III | Opening, Desmond at the cave entrance | 60 | 60 | 60 | 60 | This scene runs at 60 |
 | Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 | 30 | 30 | 30 | Occasionally freezes at the boot logo or after the menu loads |
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 | 30 | 30 | 30 |  |
-| Batman: Arkham Origins | Blackgate rooftop | – | 30 | 30 | 30 |  |
-| Battlefield 3 | Semper Fidelis, the pause menu over the train fight | – | 30 | – | – | Tested on Easy, ending on the pause menu because the idle player dies quickly |
+| Batman: Arkham Origins | Blackgate rooftop | 30 | 30 | 30 | 30 |  |
+| Battlefield 3 | Semper Fidelis, the pause menu over the train fight | 30 | 30 | 30 | – | Tested on Easy, ending on the pause menu because the idle player dies quickly |
 | Battlefield: Bad Company | First level | – | – | 30 | – |  |
-| Bayonetta | Prologue, the clock tower fight | – | – | 60 | 60 |  |
+| Bayonetta | Prologue, the clock tower fight | 60 | 60 | 60 | 60 |  |
 | Beautiful Katamari | Rolling practice | – | 60 | – | 60 |  |
 | Bionic Commando | First level | – | – | 60 | 60 |  |
 | BioShock | The plane crash, first control | 30 | 30 | 30 | 30 |  |
-| BioShock 2 | Adonis Luxury Resort | – | 30 | – | 30 |  |
+| BioShock 2 | Adonis Luxury Resort | 30 | 30 | 30 | 30 |  |
 | Birds of Steel | Takeoff tutorial, the fighter on the island airstrip | – | – | 60 | – |  |
 | Black College Football: The Xperience | Play Now, the opening coin toss | – | 30 | – | – |  |
 | Blades of Time | Chapter 1, the first fight on the stone stairs | 30 | – | – | – |  |
@@ -73,24 +77,24 @@ smoother.
 | Blazing Angels: Squadrons of WWII | Campaign mission 1, the biplane on the airfield | – | – | 60 | – |  |
 | Blitz: The League | Quick Play, the pause menu over the line of scrimmage | – | – | – | 60 |  |
 | Blitz: The League II | Pause menu over the opening kickoff | – | – | 43 | 60 | Can stop during start-up (rare). Not measured on the M4 Macs in this round: their tests didn't reach this scene |
-| Blood Bowl | One-off match, the kick-off on the pitch | – | – | 102 | – | Doesn't cap its own frame rate (see below) |
+| Blood Bowl | One-off match, the kick-off on the pitch | 132 | 132 | 97 | – | Doesn't cap its own frame rate (see below) |
 | Blood Drive | Tournament, the first event among the zombies | – | – | 30 | – |  |
 | Bloodbath | Training, a free-for-all against bots | – | – | 30 | – |  |
 | Blue Dragon | Shu on the village path after the opening | – | – | – | 30 |  |
-| Blur | Career, the first race at the Barcelona Oval | – | – | – | 30 |  |
+| Blur | Career, the first race at the Barcelona Oval | 30 | 30 | 30 | 30 |  |
 | Brothers in Arms: Hell's Highway | First chapter, the hospital | – | – | 30 | 30 |  |
 | Bully: Scholarship Edition | Bullworth campus entrance | 60 | 60 | 60 | 60 |  |
-| Burnout Paradise | Driving in Paradise City | – | 59 | 60 | 60 |  |
+| Burnout Paradise | Driving in Paradise City | 60 | 58 | 41 | 60 |  |
 | Burnout Revenge | First World Tour event | – | 60 | 60 | 60 |  |
 | Cabela's Big Game Hunter 2010 | First hunt, the forest trail | – | – | 30 | 30 |  |
 | Call of Duty 2 | First mission | 60 | 60 | 60 | 60 |  |
 | Call of Duty 3 | Saint-Lô, the training yard | – | 60 | – | 60 |  |
-| Call of Duty 4: Modern Warfare | First mission, the hangar | – | 60 | 60 | 60 |  |
-| Call of Duty: Black Ops | Operation 40, the bar in Havana | – | 60 | – | 60 |  |
+| Call of Duty 4: Modern Warfare | First mission, the hangar | 60 | 60 | 60 | 60 |  |
+| Call of Duty: Black Ops | Operation 40, the bar in Havana | 60 | 60 | 60 | 60 |  |
 | Call of Duty: Black Ops II | First mission, Pyrrhic Victory | 60 | 60 | 60 | 60 | The main menu background sometimes renders almost white |
 | Call of Duty: Ghosts | Local play, Team Deathmatch on Prison Break | 60 | 60 | 60 | 60 | Needs a profile that has played the game once (its brightness and margin screens done) |
-| Call of Duty: Modern Warfare 2 | First mission, the shooting range | – | – | 60 | 60 |  |
-| Call of Duty: Modern Warfare 3 | First mission, Black Tuesday | – | 60 | – | 60 |  |
+| Call of Duty: Modern Warfare 2 | First mission, the shooting range | 60 | 60 | 60 | 60 |  |
+| Call of Duty: Modern Warfare 3 | First mission, Black Tuesday | 60 | 60 | 60 | 60 |  |
 | Call of Juarez: Bound in Blood | Chapter 1, the trenches | – | – | 60 | 60 |  |
 | Capcom Digital Collection | 1942: Joint Strike, mission 1, picked from the launcher | – | – | 60 | – | Tested as the trial of 1942: Joint Strike |
 | Captain America: Super Soldier | The trench at first control | 60 | 60 | 60 | 60 | Occasionally starts to a black screen (one start in four in testing); starting the game again gets past it |
@@ -120,35 +124,35 @@ smoother.
 | Create | The first-run tutorial stage | – | 30 | – | – |  |
 | Cross Channel: In Memory of All People | New game, the first story line | – | – | 60 | – | Japanese release |
 | Crysis 2 | First mission | 31 | 31 | 31 | 31 |  |
-| Crysis 3 | First mission, inside the Liberty Dome | – | 31 | 31 | – |  |
+| Crysis 3 | First mission, inside the Liberty Dome | 31 | 31 | 31 | – |  |
 | CSI: Deadly Intent | Case 1, the first conversation at the crime scene | – | 60 | – | – |  |
 | CSI: Fatal Conspiracy | Episode 1, the first crime scene | – | 60 | – | – |  |
-| Dante's Inferno | First control in the Citadel of Acre | – | – | – | 60 |  |
+| Dante's Inferno | First control in the Citadel of Acre | 60 | 60 | 60 | 60 |  |
 | Dark | First control in the night club | – | 175 | – | – | Doesn't cap its own frame rate (see below). The club scene renders almost black |
 | Dark Messiah of Might and Magic: Elements | Prologue, first control on the canyon ledge | – | 30 | – | – |  |
 | Dark Sector | First control on the Lasria rooftop | – | – | – | 60 |  |
-| Dark Souls | Undead Asylum | – | 30 | 30 | – |  |
-| Dark Souls II | Things Betwixt, the first glade | – | 60 | 60 | 60 |  |
-| Darkest of Days | Little Bighorn, first control on the hillside | – | 205 | – | – | Doesn't cap its own frame rate (see below) |
+| Dark Souls | Undead Asylum | 30 | 30 | 30 | – |  |
+| Dark Souls II | Things Betwixt, the first glade | 60 | 60 | 60 | 60 |  |
+| Darkest of Days | Little Bighorn, first control on the hillside | 158 | 241 | 149 | – | Doesn't cap its own frame rate (see below) |
 | The Darkness | The opening car ride, the tunnel chase | – | – | – | 30 |  |
 | The Darkness II | The opening restaurant scene | – | – | – | 32 |  |
-| Darksiders | The pause menu over the ruined city at first control | – | – | 120 | 120 | Doesn't cap its own frame rate (see below) |
+| Darksiders | The pause menu over the ruined city at first control | 133 | 224 | 96 | 120 | Doesn't cap its own frame rate (see below) |
 | Darksiders II | First control in the frozen Veil | – | – | 85 | 38 | Holds about 30-35 with the game's adaptive vsync; the 85 is from before a built-in game patch, when some starts ran uncapped |
 | Dead or Alive 4 | Fight (watch mode) | 60 | 60 | 60 | 60 |  |
 | Dead or Alive 5 | Training fight | 60 | 60 | 60 | 60 |  |
 | Dead or Alive Xtreme 2 | New Zack Island, the Day 1 map | – | 30 | – | – |  |
-| Dead Rising | 72 Hour Mode, the mall heliport | – | – | – | 30 | Once stayed on a loading screen after the roof-landing cutscene was skipped |
+| Dead Rising | 72 Hour Mode, the mall heliport | 30 | 30 | 30 | 30 | Once stayed on a loading screen after the roof-landing cutscene was skipped |
 | Dead Rising 2: Off the Record | The opening arena match | – | – | – | 30 |  |
-| Dead Space | Opening cutscene, the Kellion's cockpit | – | 30 | 30 | 30 |  |
-| Dead Space 2 | The pause menu over the opening hospital scene | – | – | – | 30 |  |
+| Dead Space | Opening cutscene, the Kellion's cockpit | 30 | 30 | 30 | 30 |  |
+| Dead Space 2 | The pause menu over the opening hospital scene | 30 | 30 | 30 | 30 |  |
 | Dead Space 3 | Prologue, first control in the blizzard | 30 | – | – | – |  |
 | Dead to Rights: Retribution | Prologue | 30 | 30 | 30 | – |  |
 | Def Jam: Icon | Exhibition fight | – | – | 30 | 30 |  |
-| Deus Ex: Human Revolution | Sarif Industries, Megan's lab | – | – | 30 | 30 |  |
-| Devil May Cry 4 | Prologue | 30 | 30 | 30 | 30 |  |
-| Diablo III | First area, the night road | – | – | 60 | 60 |  |
-| Dishonored | New game opening | – | 30 | 30 | – |  |
-| Doom 3: BFG Edition | Mars City hangar | – | 60 | 60 | 60 |  |
+| Deus Ex: Human Revolution | Sarif Industries, Megan's lab | 30 | 30 | 30 | 30 |  |
+| Devil May Cry 4 | Prologue | 30 | 60 | 30 | 30 |  |
+| Diablo III | First area, the night road | 60 | 60 | 60 | 60 |  |
+| Dishonored | New game opening | 30 | 30 | 30 | – |  |
+| Doom 3: BFG Edition | Mars City hangar | 60 | 60 | 60 | 60 |  |
 | Dragon Age II | Prologue battle | 30 | 30 | 30 | 30 |  |
 | Dragon Age: Origins | Human Noble origin, Castle Highever | 30 | 30 | 30 | 30 |  |
 | Dragon Age: Origins - Awakening | The road to Vigil's Keep | 30 | 30 | 30 | 30 |  |
@@ -158,16 +162,16 @@ smoother.
 | Earth Defense Force 2025 | Mission 1, the city crossing | – | – | – | 50 | Runs below its 60 limit in this scene, which draws far more than most |
 | Earth Defense Force: Insect Armageddon | Chapter 1, the pause menu over the helicopter ride | – | – | – | 30 |  |
 | Eat Lead: The Return of Matt Hazard | Chapter 1, the warehouse yard | – | – | 30 | – |  |
-| The Elder Scrolls IV: Oblivion | Imperial Prison cell | – | – | 30 | 30 |  |
+| The Elder Scrolls IV: Oblivion | Imperial Prison cell | 30 | 30 | 30 | 30 |  |
 | The Elder Scrolls V: Skyrim | Opening cart ride to Helgen | 30 | 30 | 30 | 30 | Sometimes crashes or stops responding in play; being worked on |
 | Enchanted Arms | Opening battle | – | 30 | – | 30 |  |
 | Eragon | First level, the forest clearing | – | 60 | – | – |  |
-| F.E.A.R. | Instant Action, Distribution | – | 30 | 30 | 30 |  |
+| F.E.A.R. | Instant Action, Distribution | 30 | 30 | 30 | 30 |  |
 | F1 2011 | Time Trial, Melbourne | – | – | 30 | 30 |  |
-| Fable II | Childhood, Bowerstone at night | – | 30 | 29 | 30 |  |
+| Fable II | Childhood, Bowerstone at night | 30 | 30 | 29 | 30 |  |
 | Fable III | New game, the Prince's bedroom | 30 | 30 | 30 | – |  |
-| Fallout: New Vegas | Doc Mitchell's house | – | 30 | – | 30 |  |
-| Far Cry 2 | Opening taxi ride | – | 30 | 30 | 30 |  |
+| Fallout: New Vegas | Doc Mitchell's house | 30 | 30 | 30 | 30 |  |
+| Far Cry 2 | Opening taxi ride | 30 | 30 | 30 | 30 |  |
 | Far Cry 3 | Opening (the cage) | 30 | 30 | 30 | 30 | At 2x internal resolution a magenta band can smear down from the top of the picture |
 | Far Cry 4 | Opening, dinner with Pagan Min | 30 | 30 | 30 | – |  |
 | FIFA 14 | Kick Off match, CPU vs CPU | – | – | 60 | 60 |  |
@@ -177,7 +181,7 @@ smoother.
 | Fight Night Round 4 | Fight Now, Ali vs Tyson, round 1 | 60 | 60 | 60 | 60 | Boxers' skin can show a foil-like sparkle for a whole session |
 | Final Fantasy XIII | The Hanging Edge, after the first battle | 30 | 30 | 30 | – | After a Game Over and Retry in the first battle, Lightning's skin and the walkway can render wrongly |
 | Fist of the North Star: Ken's Rage | Legend Mode, first chapter fight | – | 30 | – | 30 |  |
-| Forza Horizon | Opening drive | – | 30 | 30 | 30 |  |
+| Forza Horizon | Opening drive | 30 | 30 | 30 | 30 |  |
 | Forza Horizon 2 | Drive to the Festival | 30 | 30 | 30 | 30 |  |
 | Forza Motorsport 2 | Exhibition race, on the grid | 60 | 60 | 60 | 60 | Some menu text is missing letters |
 | Forza Motorsport 3 | The opening race, the Audi R8 on the start straight | 60 | – | – | – |  |
@@ -187,19 +191,19 @@ smoother.
 | Gears of War | Campaign, Ashes | 30 | 30 | 30 | 30 |  |
 | Gears of War 2 | Campaign, Act I | 30 | 30 | 30 | 30 |  |
 | Gears of War 3 | Campaign prologue | 30 | 30 | 30 | 30 |  |
-| Gears of War: Judgment | Survival, Estate | – | 30 | 30 | 30 |  |
+| Gears of War: Judgment | Survival, Estate | 30 | 30 | 30 | 30 |  |
 | Ghost Recon Advanced Warfighter | Training mission, first street | 60 | – | – | 60 | Not measured on the M4 Pro and M1 Max in this round: their tests didn't reach this scene |
 | The Godfather II | Havana rooftop party | – | 30 | – | 30 |  |
 | GoldenEye 007: Reloaded | First mission | – | 60 | – | 60 |  |
-| Grand Theft Auto IV | Opening drive | – | 60 | 60 | 60 | Now holds the console's 60 refresh rate (54-55 in October) |
-| Grand Theft Auto V | Prologue, first control in the bank | – | 30 | – | – | Runs from Disc 2; Disc 1 is read from the image beside it |
+| Grand Theft Auto IV | Opening drive | 60 | 60 | 60 | 60 | Now holds the console's 60 refresh rate (54-55 in October) |
+| Grand Theft Auto V | Prologue, first control in the bank | 30 | 30 | 30 | – | Runs from Disc 2; Disc 1 is read from the image beside it |
 | Guitar Hero II | Practice, a full song | – | – | 60 | 60 |  |
 | Half-Life 2 (The Orange Box) | Main menu over its live map | 30 | 30 | 30 | 30 | Starting the first chapter can stop at the loading screen |
 | Halo 3 | Campaign, Arrival | 30 | 30 | 30 | 30 |  |
-| Halo 3: ODST | Campaign, Prepare to Drop | 29 | 28 | 30 | 30 |  |
+| Halo 3: ODST | Campaign, Prepare to Drop | 30 | 28 | 30 | 30 |  |
 | Halo 4 | Main menu | 30 | 30 | 30 | 30 |  |
 | Halo 4 (campaign) | Mission Dawn, the cryo bay | 30 | 30 | 30 | 30 | Cortana's face is black in the opening cutscene |
-| Halo: Reach | Campaign, Winter Contingency | – | 30 | 30 | 30 |  |
+| Halo: Reach | Campaign, Winter Contingency | 30 | 30 | 30 | 30 |  |
 | Harry Potter and the Order of the Phoenix | Opening tutorial | – | – | 30 | 30 |  |
 | Hitman: Absolution | Prologue, the grounds of Diana's estate | – | 30 | – | 30 |  |
 | Hitman: Blood Money | Training mission, the pier | – | 30 | – | 30 |  |
@@ -207,18 +211,18 @@ smoother.
 | Infinite Undiscovery | Opening scene in the dungeon | – | – | 30 | 30 |  |
 | Iron Man | First mission, Escape | – | 60 | – | 60 |  |
 | JASF: Jane's Advanced Strike Fighters | Campaign mission 1, the jet on the runway | – | – | 30 | – |  |
-| Juiced 2: Hot Import Nights | Career start, the driver intro before the first challenge | 104 | – | – | – | Doesn't cap its own frame rate (see below) |
+| Juiced 2: Hot Import Nights | Career start, the driver intro before the first challenge | 108 | 135 | 83 | – | Doesn't cap its own frame rate (see below) |
 | Jumper: Griffin's Story | The courtyard fight tutorial | – | – | 60 | 60 |  |
 | Jurassic Park: The Game | Episode 1 opening | – | – | 60 | 60 |  |
 | Jurassic: The Hunted | First level, the jungle path | 30 | 30 | 30 | 30 | In the opening walk, a vertical seam in the lighting runs down the right of the picture |
-| Just Cause 2 | Open world | 27 | 28 | 30 | 30 |  |
+| Just Cause 2 | Open world | 28 | 27 | 30 | 30 |  |
 | Kameo: Elements of Power | Thorn's Castle | – | – | 30 | 30 |  |
 | Kane & Lynch 2: Dog Days | Shanghai opening | – | 60 | – | 60 |  |
 | Kane & Lynch: Dead Men | The breakout, beside the van | – | – | 30 | 30 |  |
 | The King of Fighters XII | Arcade fight | – | – | 60 | 60 |  |
 | Kingdoms of Amalur: Reckoning | First control in the Well of Souls | – | – | – | 30 |  |
 | Knights Contract | New game, the prologue in the plague village | – | – | 30 | – |  |
-| L.A. Noire | Upon Reflection, the patrol car | – | 30 | 30 | 30 |  |
+| L.A. Noire | Upon Reflection, the patrol car | 30 | 30 | 30 | 30 |  |
 | The Legend of Spyro: Dawn of the Dragon | First control in the arena, the Basic moves tutorial | – | – | 60 | – |  |
 | LEGO Batman: The Videogame | Episode 1-1, Gotham street | – | 60 | – | 60 |  |
 | LEGO Indiana Jones 2: The Adventure Continues | The college hub | 60 | 60 | 60 | 60 |  |
@@ -230,22 +234,22 @@ smoother.
 | Madden NFL 15 | Play Now, CPU vs CPU | – | – | 60 | 60 |  |
 | Madden NFL 17 | Play Now, CPU vs CPU | 60 | 60 | 60 | 60 |  |
 | Madden NFL 25 | Play Now, CPU vs CPU | 60 | 60 | 60 | 60 |  |
-| Mafia II | Story opening | 120 | 164 | 118 | 180 | Doesn't cap its own frame rate (see below). Rarely crashes in play |
+| Mafia II | Story opening | 143 | 163 | 101 | 180 | Doesn't cap its own frame rate (see below). Rarely crashes in play |
 | Major League Baseball 2K13 | Demo game, CPU vs CPU | – | – | 56 | 59 | Dips to about 30 in some camera shots |
 | Major League Baseball 2K7 | Demo game, CPU vs CPU | – | 60 | – | 60 | Dips to 30 in the busiest camera shots |
 | Marvel: Ultimate Alliance | First mission, the Helicarrier deck | 31 | 31 | 31 | 31 |  |
 | Marvel: Ultimate Alliance 2 | First mission, the bridge fight in Latveria | – | – | 30 | 30 |  |
 | Mass Effect | First conversation | 30 | 30 | 30 | 30 |  |
-| Mass Effect 3 | Prologue, the Reapers reach Earth | – | – | 30 | – |  |
-| Max Payne 3 | Chapter 1, the bullet-time tutorial | – | – | 33 | – |  |
+| Mass Effect 3 | Prologue, the Reapers reach Earth | 30 | 30 | 30 | – |  |
+| Max Payne 3 | Chapter 1, the bullet-time tutorial | 33 | 33 | 33 | – |  |
 | Medal of Honor: Warfighter | First mission, the harbour in Karachi | 30 | 30 | 30 | 30 | Can crash about 25 seconds into the first mission |
 | Mercenaries 2: World in Flames | New game, the speedboat off the coast | – | 60 | – | 60 |  |
 | Metal Gear Solid HD Collection | Metal Gear Solid 3, Virtuous Mission, the jungle at first control | – | 60 | – | 60 | Disc 1 of the collection |
 | Metal Gear Solid V: Ground Zeroes | Camp Omega, the cliff at first control | – | – | 57 | 60 | Some textures show wrong colours or coloured noise, Snake's suit among them. Not yet measured on the M4 Macs: their tests stop short of this scene |
-| Metal Gear Solid V: The Phantom Pain | Prologue, the hospital ward at first control | 60 | – | – | – | Runs from Disc 2; Disc 1 is read from the image beside it |
+| Metal Gear Solid V: The Phantom Pain | Prologue, the hospital ward at first control | 60 | 58 | 60 | – | Runs from Disc 2; Disc 1 is read from the image beside it |
 | Metro 2033 | Prologue, first control | – | – | 29 | 30 |  |
 | Midnight Club: Los Angeles | Free roam | – | – | 30 | 30 |  |
-| Mirror's Edge | Story, first chapter | – | 30 | 30 | 30 |  |
+| Mirror's Edge | Story, first chapter | 30 | 30 | 30 | 30 |  |
 | Mortal Kombat vs. DC Universe | Practice mode | – | 60 | – | 60 |  |
 | Mortal Kombat: Komplete Edition | Practice mode | – | 60 | – | 60 |  |
 | MotoGP 08 | Quick Race, Losail at night, on the grid | – | – | 30 | 30 |  |
@@ -260,7 +264,7 @@ smoother.
 | NBA Street Homecourt | Venice Beach game | 60 | 60 | 60 | 60 | Can stall on the EA SPORTS BIG logo at start-up |
 | NCAA Football 14 | Exhibition, the opening coin toss | – | 30 | – | – |  |
 | Need for Speed: Carbon | Quick Race, the grid of a circuit race | – | – | – | 60 |  |
-| Need for Speed: Most Wanted | Quick Race, Ironwood Estates, on the start line | – | – | 60 | 60 |  |
+| Need for Speed: Most Wanted | Quick Race, Ironwood Estates, on the start line | 60 | 60 | 60 | 60 |  |
 | Need for Speed: ProStreet | Race Day, Portland, on the grid | – | – | 60 | 60 |  |
 | Need for Speed: The Run | Stage 1, the car-crusher escape | 30 | 30 | 30 | 30 | Sometimes stops in this opening scene |
 | NHL 10 | Play Now, CPU vs CPU | – | – | 60 | 60 |  |
@@ -275,12 +279,12 @@ smoother.
 | Pinball Hall of Fame: The Williams Collection | Medieval Madness table, first ball | – | 60 | – | 60 |  |
 | Portal 2 | Relaxation Vault | – | 30 | 30 | 30 |  |
 | Prince of Persia: The Forgotten Sands | Opening | 30 | 30 | 30 | 30 |  |
-| Project Gotham Racing 3 | Street race in Tokyo, on the grid | – | 30 | 30 | 30 |  |
+| Project Gotham Racing 3 | Street race in Tokyo, on the grid | 30 | 30 | 30 | 30 |  |
 | Project Sylpheed: Arc of Deception | Stage 1, the asteroid field | – | – | 60 | – |  |
 | Pure | Tutorial ride | – | – | 30 | 30 |  |
 | Quantum Theory | First control in the Tower | 30 | 30 | 30 | 30 |  |
 | Rage | Campaign opening | – | 60 | 60 | 60 |  |
-| Rayman Legends | Teensies in Trouble | – | 60 | 60 | 60 |  |
+| Rayman Legends | Teensies in Trouble | 60 | 60 | 60 | 60 |  |
 | Rayman Origins | Opening clearing | – | 60 | – | 60 |  |
 | Red Dead Redemption | Opening cutscene | 30 | 30 | 30 | 30 | Disc 1 of the Game of the Year Edition |
 | Red Dead Redemption: Undead Nightmare | Opening cinematic | – | 30 | – | 30 | Disc 2 of the Game of the Year Edition |
@@ -293,8 +297,8 @@ smoother.
 | Rockstar Games Presents Table Tennis | Training, the serve drill | – | 60 | – | 60 |  |
 | Rogue Warrior | First level, the night forest | 30 | 30 | 30 | 30 |  |
 | Saints Row | Campaign opening, outside the church | 29 | 28 | 30 | 30 |  |
-| Saints Row 2 | First mission, the prison infirmary | – | 29 | – | 30 |  |
-| Saints Row IV | Opening mission, the bunker tunnel | 57 | 95 | 48 | 119 | Doesn't cap its own frame rate (see below) |
+| Saints Row 2 | First mission, the prison infirmary | 29 | 28 | 30 | 30 |  |
+| Saints Row IV | Opening mission, the bunker tunnel | 63 | 111 | 40 | 119 | Doesn't cap its own frame rate (see below) |
 | Shadowrun | Training, chapter 1 | 30 | 30 | 30 | 30 |  |
 | Sid Meier's Civilization Revolution | Play Now, the first turn | – | – | 45 | 60 |  |
 | Silent Hill: Homecoming | Opening nightmare, the operating room | 28 | 28 | 29 | 29 | The gurney mattress shows a blocky green and magenta texture |
@@ -314,7 +318,7 @@ smoother.
 | Star Trek: Legacy | Skirmish battle | – | 60 | – | 60 |  |
 | Stranglehold | Hong Kong marketplace | 30 | 30 | 32 | 32 | Runs a little above its 30 limit, not yet explained |
 | Surf's Up | Championship, the first surf run | 30 | 30 | – | – | (earlier build). The M1 Max test stops short of this scene |
-| Tales of Vesperia | Zaphias, the Lower Quarter | – | 30 | – | – |  |
+| Tales of Vesperia | Zaphias, the Lower Quarter | 30 | 30 | 30 | – |  |
 | Tekken Tag Tournament 2 | Practice mode | 60 | 60 | 60 | 60 | VS screens show one name over all four portraits. Can stop during a load (rare) |
 | Test Drive Unlimited | O'ahu, the first rental car | – | – | 30 | – |  |
 | Tetris Evolution | Marathon game | – | 60 | – | 60 |  |
@@ -327,7 +331,7 @@ smoother.
 | Tomb Raider: Legend | Bolivia, the jungle path | – | 30 | – | 30 |  |
 | Tony Hawk's American Wasteland | Free Skate, Hollywood | – | – | 60 | 60 |  |
 | Tony Hawk's Project 8 | Free Skate, first level | 60 | 60 | 60 | 60 |  |
-| Ultra Street Fighter IV | Arcade fight | – | 60 | 60 | 60 | Rarely crashes while starting |
+| Ultra Street Fighter IV | Arcade fight | 60 | 60 | 60 | 60 | Rarely crashes while starting |
 | Vanquish | Chapter 1, the opening tutorial aboard the ship | 21 | – | – | – | Runs at about 21, below its 30 limit |
 | Virtua Tennis 4 | Exhibition match, first serve | – | 60 | – | 60 |  |
 | Viva Piñata | Garden | 30 | 30 | 30 | 30 |  |
