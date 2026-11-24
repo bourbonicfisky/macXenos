@@ -1174,17 +1174,20 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
       length_used_tiles_at_32bpp += right_tiles_at_32bpp - pitch_tiles_at_32bpp;
     }
   }
-  // Without a window offset, a draw whose scissor starts below the first row
+  // Without a window offset in the EDRAM bases, a draw whose rasterized
+  // scissor (after applying PA_SC_WINDOW_OFFSET) starts below the first row
   // of tiles touches nothing above it either. Start the ranges at the
   // scissor's tile row (whole rows only) and clamp the length from there, so
   // targets based one tile height apart (Kingdoms of Amalur's lower tile, rows
-  // 384-719 of targets 384 tiles apart) own the rows they draw instead of the
-  // ones above the scissor.
+  // 384-719 of targets 384 tiles apart, with zero window offset) own the rows
+  // they draw instead of the ones above the scissor, while titles whose
+  // negative window offset stays in the viewport (Test Drive Unlimited's -352
+  // lower tile) still have that offset applied to match EstimateMaxY.
   uint32_t scissor_start_tiles_at_32bpp = 0;
   if (!window_offset_tiles && !interlock_barrier_only &&
       draw_extent_y_scale_ == 1 && AreScissorRangeStartsSupported()) {
     draw_util::Scissor scissor;
-    draw_util::GetScissor(regs, scissor, true, true);
+    draw_util::GetScissor(regs, scissor, true, false);
     scissor_start_tiles_at_32bpp =
         (scissor.offset[1]
          << uint32_t(msaa_samples >= xenos::MsaaSamples::k2X)) /
