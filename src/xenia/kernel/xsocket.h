@@ -129,7 +129,7 @@ class XSocket : public XObject {
   int SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_IN* to,
              uint32_t to_len);
 
-  uint32_t GetLastWSAError() const;
+  static uint32_t GetLastWSAError();
 
   struct packet {
     // These values are in network byte order.

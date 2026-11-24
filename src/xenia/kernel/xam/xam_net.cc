@@ -29,8 +29,10 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <climits>
 #endif
 
 DEFINE_bool(xnet_resolve_own_address, true,
@@ -1056,6 +1058,7 @@ dword_result_t NetDll_accept_entry(dword_t caller, dword_t socket_handle,
 
     return new_socket->handle();
   } else {
+    XThread::SetLastError(socket->GetLastWSAError());
     return -1;
   }
 }
@@ -1067,11 +1070,14 @@ struct x_fd_set {
 };
 
 struct host_set {
-  uint32_t count;
+  uint32_t count = 0;
   object_ref<XSocket> sockets[64];
 
-  void Load(const x_fd_set* guest_set) {
-    assert_true(guest_set->fd_count < 64);
+  // Returns 0 on success, or a Winsock error code on invalid input.
+  uint32_t Load(const x_fd_set* guest_set) {
+    if (guest_set->fd_count > 64) {
+      return uint32_t(X_WSAError::X_WSAEINVAL);
+    }
     this->count = guest_set->fd_count;
     for (uint32_t i = 0; i < this->count; ++i) {
       auto socket_handle = static_cast<X_HANDLE>(guest_set->fd_array[i]);
@@ -1082,9 +1088,12 @@ struct host_set {
       // Convert from Xenia -> native
       auto socket =
           kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
-      assert_not_null(socket);
+      if (!socket) {
+        return uint32_t(X_WSAError::X_WSAENOTSOCK);
+      }
       this->sockets[i] = socket;
     }
+    return 0;
   }
 
   void Store(x_fd_set* guest_set) {
@@ -1095,20 +1104,52 @@ struct host_set {
     }
   }
 
-  void Store(fd_set* native_set) {
+  void Store(fd_set* native_set, int* max_fd) {
     FD_ZERO(native_set);
     for (uint32_t i = 0; i < this->count; ++i) {
-      FD_SET(this->sockets[i]->native_handle(), native_set);
+      auto fd = this->sockets[i]->native_handle();
+#ifdef XE_PLATFORM_WIN32
+      FD_SET(fd, native_set);
+#else
+      int native_fd = static_cast<int>(fd);
+      if (native_fd < 0 || native_fd >= FD_SETSIZE) {
+        continue;
+      }
+      if (native_fd > *max_fd) {
+        *max_fd = native_fd;
+      }
+      FD_SET(native_fd, native_set);
+#endif
     }
+  }
+
+  bool HasFdAtOrAboveSetSize() const {
+#ifndef XE_PLATFORM_WIN32
+    for (uint32_t i = 0; i < this->count; ++i) {
+      int native_fd = static_cast<int>(this->sockets[i]->native_handle());
+      if (native_fd >= FD_SETSIZE) {
+        return true;
+      }
+    }
+#endif
+    return false;
   }
 
   void UpdateFrom(fd_set* native_set) {
     uint32_t new_count = 0;
     for (uint32_t i = 0; i < this->count; ++i) {
       auto socket = this->sockets[i];
+#ifdef XE_PLATFORM_WIN32
       if (FD_ISSET(socket->native_handle(), native_set)) {
         this->sockets[new_count++] = socket;
       }
+#else
+      int native_fd = static_cast<int>(socket->native_handle());
+      if (native_fd >= 0 && native_fd < FD_SETSIZE &&
+          FD_ISSET(native_fd, native_set)) {
+        this->sockets[new_count++] = socket;
+      }
+#endif
     }
     this->count = new_count;
   }
@@ -1119,37 +1160,142 @@ int_result_t NetDll_select_entry(dword_t caller, dword_t nfds,
                                  pointer_t<x_fd_set> writefds,
                                  pointer_t<x_fd_set> exceptfds,
                                  lpvoid_t timeout_ptr) {
-  host_set host_readfds = {0};
-  fd_set native_readfds = {0};
+  host_set host_readfds;
   if (readfds) {
-    host_readfds.Load(readfds);
-    host_readfds.Store(&native_readfds);
+    if (uint32_t err = host_readfds.Load(readfds)) {
+      XThread::SetLastError(err);
+      return -1;
+    }
   }
-  host_set host_writefds = {0};
-  fd_set native_writefds = {0};
+  host_set host_writefds;
   if (writefds) {
-    host_writefds.Load(writefds);
-    host_writefds.Store(&native_writefds);
+    if (uint32_t err = host_writefds.Load(writefds)) {
+      XThread::SetLastError(err);
+      return -1;
+    }
   }
-  host_set host_exceptfds = {0};
-  fd_set native_exceptfds = {0};
+  host_set host_exceptfds;
   if (exceptfds) {
-    host_exceptfds.Load(exceptfds);
-    host_exceptfds.Store(&native_exceptfds);
+    if (uint32_t err = host_exceptfds.Load(exceptfds)) {
+      XThread::SetLastError(err);
+      return -1;
+    }
   }
   timeval* timeout_in = nullptr;
-  timeval timeout;
+  timeval timeout = {};
   if (timeout_ptr) {
-    timeout = {static_cast<int32_t>(timeout_ptr.as_array<int32_t>()[0]),
-               static_cast<int32_t>(timeout_ptr.as_array<int32_t>()[1])};
-    Clock::ScaleGuestDurationTimeval(
-        reinterpret_cast<int32_t*>(&timeout.tv_sec),
-        reinterpret_cast<int32_t*>(&timeout.tv_usec));
+    int32_t tv_sec = static_cast<int32_t>(timeout_ptr.as_array<int32_t>()[0]);
+    int32_t tv_usec = static_cast<int32_t>(timeout_ptr.as_array<int32_t>()[1]);
+    Clock::ScaleGuestDurationTimeval(&tv_sec, &tv_usec);
+    timeout.tv_sec = tv_sec;
+    timeout.tv_usec = tv_usec;
     timeout_in = &timeout;
   }
-  int ret = select(nfds, readfds ? &native_readfds : nullptr,
+
+#ifndef XE_PLATFORM_WIN32
+  // POSIX select() requires nfds = max(native_fd) + 1 (Winsock ignores nfds,
+  // and Xbox 360 titles pass guest_handle + 1 such as 0x08F5 > FD_SETSIZE,
+  // which makes Darwin select() fail immediately with EINVAL). Fall back to
+  // poll() if any native descriptor reaches FD_SETSIZE so FD_SET never
+  // overflows.
+  if (host_readfds.HasFdAtOrAboveSetSize() ||
+      host_writefds.HasFdAtOrAboveSetSize() ||
+      host_exceptfds.HasFdAtOrAboveSetSize()) {
+    pollfd pfds[64 * 3];
+    nfds_t pfd_count = 0;
+    const nfds_t read_base = pfd_count;
+    for (uint32_t i = 0; i < host_readfds.count; ++i) {
+      pfds[pfd_count++] = {
+          static_cast<int>(host_readfds.sockets[i]->native_handle()), POLLIN,
+          0};
+    }
+    const nfds_t write_base = pfd_count;
+    for (uint32_t i = 0; i < host_writefds.count; ++i) {
+      pfds[pfd_count++] = {
+          static_cast<int>(host_writefds.sockets[i]->native_handle()), POLLOUT,
+          0};
+    }
+    const nfds_t except_base = pfd_count;
+    for (uint32_t i = 0; i < host_exceptfds.count; ++i) {
+      pfds[pfd_count++] = {
+          static_cast<int>(host_exceptfds.sockets[i]->native_handle()), POLLPRI,
+          0};
+    }
+    int timeout_ms = -1;
+    if (timeout_in) {
+      if (timeout.tv_sec < 0 || timeout.tv_usec < 0) {
+        XThread::SetLastError(uint32_t(X_WSAError::X_WSAEINVAL));
+        return -1;
+      }
+      if (timeout.tv_sec == 0 && timeout.tv_usec == 0) {
+        timeout_ms = 0;
+      } else {
+        int64_t ms = int64_t(timeout.tv_sec) * 1000 +
+                     (int64_t(timeout.tv_usec) + 999) / 1000;
+        timeout_ms =
+            static_cast<int>(std::clamp<int64_t>(ms, 1, INT_MAX));
+      }
+    }
+    int poll_ret = poll(pfds, pfd_count, timeout_ms);
+    if (poll_ret < 0) {
+      XThread::SetLastError(XSocket::GetLastWSAError());
+      return -1;
+    }
+    auto filter_poll = [&](host_set& set, nfds_t base, short mask) {
+      uint32_t new_count = 0;
+      for (uint32_t i = 0; i < set.count; ++i) {
+        if (pfds[base + i].revents & mask) {
+          set.sockets[new_count++] = set.sockets[i];
+        }
+      }
+      set.count = new_count;
+    };
+    int ready_total = 0;
+    if (readfds) {
+      filter_poll(host_readfds, read_base, POLLIN | POLLHUP | POLLERR);
+      host_readfds.Store(readfds);
+      ready_total += static_cast<int>(host_readfds.count);
+    }
+    if (writefds) {
+      filter_poll(host_writefds, write_base, POLLOUT | POLLERR);
+      host_writefds.Store(writefds);
+      ready_total += static_cast<int>(host_writefds.count);
+    }
+    if (exceptfds) {
+      filter_poll(host_exceptfds, except_base, POLLPRI | POLLERR);
+      host_exceptfds.Store(exceptfds);
+      ready_total += static_cast<int>(host_exceptfds.count);
+    }
+    return ready_total;
+  }
+#endif
+
+  int max_fd = -1;
+  fd_set native_readfds = {0};
+  if (readfds) {
+    host_readfds.Store(&native_readfds, &max_fd);
+  }
+  fd_set native_writefds = {0};
+  if (writefds) {
+    host_writefds.Store(&native_writefds, &max_fd);
+  }
+  fd_set native_exceptfds = {0};
+  if (exceptfds) {
+    host_exceptfds.Store(&native_exceptfds, &max_fd);
+  }
+
+#ifdef XE_PLATFORM_WIN32
+  int native_nfds = static_cast<int>(nfds);
+#else
+  int native_nfds = max_fd + 1;
+#endif
+  int ret = select(native_nfds, readfds ? &native_readfds : nullptr,
                    writefds ? &native_writefds : nullptr,
                    exceptfds ? &native_exceptfds : nullptr, timeout_in);
+  if (ret < 0) {
+    XThread::SetLastError(XSocket::GetLastWSAError());
+    return -1;
+  }
   if (readfds) {
     host_readfds.UpdateFrom(&native_readfds);
     host_readfds.Store(readfds);
@@ -1163,7 +1309,6 @@ int_result_t NetDll_select_entry(dword_t caller, dword_t nfds,
     host_exceptfds.Store(exceptfds);
   }
 
-  // TODO(gibbed): modify ret to be what's actually copied to the guest fd_sets?
   return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_select, kNetworking, kImplemented);
@@ -1178,7 +1323,11 @@ dword_result_t NetDll_recv_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  return socket->Recv(buf_ptr, buf_len, flags);
+  int ret = socket->Recv(buf_ptr, buf_len, flags);
+  if (ret == -1) {
+    XThread::SetLastError(socket->GetLastWSAError());
+  }
+  return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_recv, kNetworking, kImplemented);
 
@@ -1230,7 +1379,11 @@ dword_result_t NetDll_send_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  return socket->Send(buf_ptr, buf_len, flags);
+  int ret = socket->Send(buf_ptr, buf_len, flags);
+  if (ret == -1) {
+    XThread::SetLastError(socket->GetLastWSAError());
+  }
+  return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_send, kNetworking, kImplemented);
 
@@ -1248,6 +1401,9 @@ dword_result_t NetDll_sendto_entry(dword_t caller, dword_t socket_handle,
 
   N_XSOCKADDR_IN native_to(to_ptr);
   int ret = socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
+  if (ret == -1) {
+    XThread::SetLastError(socket->GetLastWSAError());
+  }
   return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_sendto, kNetworking, kImplemented);

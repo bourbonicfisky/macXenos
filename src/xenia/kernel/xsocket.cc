@@ -488,7 +488,7 @@ X_STATUS XSocket::GetSockName(uint8_t* buf, int* buf_len) {
   return X_STATUS_SUCCESS;
 }
 
-uint32_t XSocket::GetLastWSAError() const {
+uint32_t XSocket::GetLastWSAError() {
 #ifdef XE_PLATFORM_WIN32
   return WSAGetLastError();
 #else
