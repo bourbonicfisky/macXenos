@@ -113,6 +113,7 @@ class XSocket : public XObject {
   X_STATUS SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
                      uint32_t optlen);
   X_STATUS IOControl(uint32_t cmd, uint8_t* arg_ptr);
+  X_STATUS EventSelect(uint32_t event_handle, uint32_t network_events);
 
   X_STATUS Connect(N_XSOCKADDR* name, int name_len);
   X_STATUS Bind(N_XSOCKADDR_IN* name, int name_len);
@@ -157,6 +158,8 @@ class XSocket : public XObject {
   uint16_t bound_port_ = 0;
 
   bool broadcast_socket_ = false;
+  uint32_t event_select_handle_ = X_INVALID_HANDLE_VALUE;
+  uint32_t event_select_mask_ = 0;
 
   std::unique_ptr<xe::threading::Event> event_;
   std::mutex incoming_packet_mutex_;

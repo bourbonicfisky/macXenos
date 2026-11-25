@@ -10,6 +10,8 @@
 #ifndef XENIA_KERNEL_KERNEL_H_
 #define XENIA_KERNEL_KERNEL_H_
 
+#include <atomic>
+
 #include "xenia/base/byte_order.h"
 #include "xenia/base/memory.h"
 #include "xenia/xbox.h"
@@ -104,6 +106,22 @@ inline uint32_t XOverlappedGetCompletionContext(void* ptr) {
 inline void XOverlappedSetExtendedError(void* ptr, uint32_t value) {
   auto p = reinterpret_cast<uint32_t*>(ptr);
   xe::store_and_swap<uint32_t>(&p[6], value);
+}
+
+// Completes an XAM_OVERLAPPED structure in guest memory, returning the
+// previously stashed InternalContext (requesting thread handle) and clearing
+// InternalContext before publishing result (InternalLow) with release
+// semantics, matching Xbox 360 XAM behavior.
+inline X_HANDLE XOverlappedCompleteFields(void* ptr, X_RESULT result,
+                                          uint32_t extended_error,
+                                          uint32_t length) {
+  const X_HANDLE context = XOverlappedGetContext(ptr);
+  XOverlappedSetExtendedError(ptr, extended_error);
+  XOverlappedSetLength(ptr, length);
+  XOverlappedSetContext(ptr, 0);
+  std::atomic_thread_fence(std::memory_order_release);
+  XOverlappedSetResult(ptr, result);
+  return context;
 }
 
 struct X_ANSI_STRING {

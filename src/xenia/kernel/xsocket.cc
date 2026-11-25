@@ -210,8 +210,62 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
     }
   }
 
+  // Translate guest option payloads (big-endian and Winsock/Xbox 360 widths)
+  // into host-native layouts. Xbox 360/Winsock allows 1-byte boolean values
+  // (e.g. F.E.A.R. 3 passes optlen=1 for SO_BROADCAST), whereas POSIX/macOS
+  // setsockopt() requires a host-endian int (4 bytes) and fails with EINVAL
+  // otherwise; timeouts are big-endian ms uint32_t rather than struct timeval.
+  const void* native_optval = optval_ptr;
+  socklen_t native_optlen = optlen;
+  int int_val = 0;
+#ifndef XE_PLATFORM_WIN32
+  struct timeval tv_val = {};
+  struct linger linger_val = {};
+#endif
+
+  if (optval_ptr) {
+    const bool is_bool_opt =
+        (level == 0xFFFF && (optname == 0x0004 || optname == 0x0020)) ||
+        (level == IPPROTO_TCP && optname == 0x0001);
+    const bool is_int_opt =
+        level == 0xFFFF && (optname == 0x1001 || optname == 0x1002);
+    const bool is_timeo_opt =
+        level == 0xFFFF && (optname == 0x1005 || optname == 0x1006);
+    const bool is_linger_opt = level == 0xFFFF && optname == 0x0080;
+
+    if (is_bool_opt && optlen == 1) {
+      int_val = *static_cast<const uint8_t*>(optval_ptr) ? 1 : 0;
+      native_optval = &int_val;
+      native_optlen = sizeof(int_val);
+    } else if ((is_bool_opt || is_int_opt) && optlen == 4) {
+      int_val = static_cast<int>(xe::load_and_swap<uint32_t>(optval_ptr));
+      native_optval = &int_val;
+      native_optlen = sizeof(int_val);
+    } else if (is_timeo_opt && optlen == 4) {
+      const uint32_t ms = xe::load_and_swap<uint32_t>(optval_ptr);
+#ifdef XE_PLATFORM_WIN32
+      int_val = static_cast<int>(ms);
+      native_optval = &int_val;
+      native_optlen = sizeof(int_val);
+#else
+      tv_val.tv_sec = static_cast<decltype(tv_val.tv_sec)>(ms / 1000);
+      tv_val.tv_usec = static_cast<decltype(tv_val.tv_usec)>((ms % 1000) * 1000);
+      native_optval = &tv_val;
+      native_optlen = sizeof(tv_val);
+#endif
+    } else if (is_linger_opt && optlen == 4) {
+#ifndef XE_PLATFORM_WIN32
+      const auto* raw = static_cast<const uint8_t*>(optval_ptr);
+      linger_val.l_onoff = xe::load_and_swap<uint16_t>(raw);
+      linger_val.l_linger = xe::load_and_swap<uint16_t>(raw + 2);
+      native_optval = &linger_val;
+      native_optlen = sizeof(linger_val);
+#endif
+    }
+  }
+
   int ret = setsockopt(native_handle_, native_level, native_optname,
-                       static_cast<char*>(optval_ptr), optlen);
+                       static_cast<const char*>(native_optval), native_optlen);
   if (ret < 0) {
     // TODO: WSAGetLastError()
     XELOGE("XSocket::SetOption: failed with error {:08X}", GetLastWSAError());
@@ -220,7 +274,7 @@ X_STATUS XSocket::SetOption(uint32_t level, uint32_t optname, void* optval_ptr,
 
   // SO_BROADCAST
   if (level == 0xFFFF && optname == 0x0020) {
-    broadcast_socket_ = true;
+    broadcast_socket_ = (int_val != 0);
   }
 
   return X_STATUS_SUCCESS;
@@ -260,6 +314,21 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
   xe::store_and_swap<uint32_t>(arg_ptr, value);
   return X_STATUS_SUCCESS;
 #endif
+}
+
+X_STATUS XSocket::EventSelect(uint32_t event_handle, uint32_t network_events) {
+  // Per Winsock WSAEventSelect semantics, associating (or clearing) an event
+  // mask automatically places the socket into non-blocking mode.
+  uint32_t nonblocking_be = xe::byte_swap<uint32_t>(1);
+  X_STATUS status =
+      IOControl(0x8004667E /* FIONBIO */,
+                reinterpret_cast<uint8_t*>(&nonblocking_be));
+  if (XFAILED(status)) {
+    return status;
+  }
+  event_select_handle_ = network_events ? event_handle : X_INVALID_HANDLE_VALUE;
+  event_select_mask_ = network_events;
+  return X_STATUS_SUCCESS;
 }
 
 X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {

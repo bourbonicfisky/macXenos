@@ -541,6 +541,34 @@ dword_result_t NetDll_WSASetEvent_entry(dword_t event_handle) {
 }
 DECLARE_XAM_EXPORT1(NetDll_WSASetEvent, kNetworking, kImplemented);
 
+dword_result_t NetDll_WSAEventSelect_entry(dword_t caller,
+                                           dword_t socket_handle,
+                                           dword_t event_handle,
+                                           dword_t network_events) {
+  auto socket =
+      kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
+  if (!socket) {
+    XThread::SetLastError(uint32_t(X_WSAError::X_WSAENOTSOCK));
+    return -1;
+  }
+
+  if (network_events) {
+    auto ev = kernel_state()->object_table()->LookupObject<XEvent>(event_handle);
+    if (!ev) {
+      XThread::SetLastError(uint32_t(X_WSAError::X_WSAEINVAL));
+      return -1;
+    }
+  }
+
+  X_STATUS status = socket->EventSelect(event_handle, network_events);
+  if (XFAILED(status)) {
+    XThread::SetLastError(socket->GetLastWSAError());
+    return -1;
+  }
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_WSAEventSelect, kNetworking, kStub);
+
 struct XnAddrStatus {
   // Address acquisition is not yet complete
   static constexpr uint32_t XNET_GET_XNADDR_PENDING = 0x00000000;
@@ -929,7 +957,11 @@ dword_result_t NetDll_setsockopt_entry(dword_t caller, dword_t socket_handle,
   }
 
   X_STATUS status = socket->SetOption(level, optname, optval_ptr, optlen);
-  return XSUCCEEDED(status) ? 0 : -1;
+  if (XFAILED(status)) {
+    XThread::SetLastError(socket->GetLastWSAError());
+    return -1;
+  }
+  return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_setsockopt, kNetworking, kImplemented);
 

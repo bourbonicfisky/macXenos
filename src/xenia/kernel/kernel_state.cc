@@ -1596,11 +1596,12 @@ void KernelState::CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
                                        uint32_t extended_error,
                                        uint32_t length) {
   auto ptr = memory()->TranslateVirtual(overlapped_ptr);
-  // Result last, so a caller polling it for completion reads a valid length.
-  XOverlappedSetExtendedError(ptr, extended_error);
-  XOverlappedSetLength(ptr, length);
-  std::atomic_thread_fence(std::memory_order_release);
-  XOverlappedSetResult(ptr, result);
+  // Capture the requesting thread handle before clearing InternalContext.
+  // XAM clears InternalContext when an overlapped operation completes; leaving
+  // the stashed thread handle behind breaks titles (such as F.E.A.R. 3) that
+  // check for an all-zero XOVERLAPPED after a successful completion.
+  const X_HANDLE thread_handle =
+      XOverlappedCompleteFields(ptr, result, extended_error, length);
   X_HANDLE event_handle = XOverlappedGetEvent(ptr);
   if (event_handle) {
     auto ev = object_table()->LookupObject<XEvent>(event_handle);
@@ -1610,7 +1611,6 @@ void KernelState::CompleteOverlappedEx(uint32_t overlapped_ptr, X_RESULT result,
     }
   }
   if (XOverlappedGetCompletionRoutine(ptr)) {
-    X_HANDLE thread_handle = XOverlappedGetContext(ptr);
     auto thread = object_table()->LookupObject<XThread>(thread_handle);
     if (thread) {
       // Queue APC on the thread that requested the overlapped operation.
