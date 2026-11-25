@@ -118,6 +118,38 @@ struct EdramSurfaceParams {
   uint32_t format_ints_log2;
   uint32_t words;
 };
+
+// Whether a canonical EDRAM materialize range [start_tiles, end_tiles) safely
+// allows MTLLoadActionDontCare on a tight materialize render pass of height
+// `work_height` targeting an attachment of `texture_height`.
+//
+// On Apple Silicon TBDR GPUs, render passes load and store attachments in
+// hardware tiles (e.g. 32 px tall). When work_height < texture_height and
+// lands mid-tile, MTLLoadActionDontCare leaves rows [work_height,
+// next_tile_boundary) undefined in tile memory and MTLStoreActionStore writes
+// them back over live rows below the pass. Require work_height ==
+// texture_height so DontCare is only used when the pass covers the entire
+// attachment; partial-height passes keep MTLLoadActionLoad while still
+// bounding pass.renderTargetHeight to work_height.
+constexpr bool CanonicalMaterializeRangeAllowsDontCare(
+    uint32_t base_tiles, uint32_t pitch_tiles, uint32_t msaa_samples,
+    uint32_t start_tiles, uint32_t end_tiles, uint64_t work_height,
+    uint64_t texture_height, uint32_t scale_y) {
+  if (!pitch_tiles || !work_height || work_height != texture_height ||
+      start_tiles > base_tiles) {
+    return false;
+  }
+  const EdramMsaaShifts shifts = GetEdramMsaaShifts(msaa_samples);
+  const uint64_t tile_row_height =
+      uint64_t(xenos::kEdramTileHeightSamples >> shifts.y) * scale_y;
+  if (!tile_row_height) {
+    return false;
+  }
+  const uint64_t tile_rows =
+      (work_height + tile_row_height - 1u) / tile_row_height;
+  return uint64_t(end_tiles) >=
+         uint64_t(base_tiles) + tile_rows * uint64_t(pitch_tiles);
+}
 static_assert(sizeof(EdramSurfaceParams) == 6u * sizeof(uint32_t));
 
 }  // namespace gpu

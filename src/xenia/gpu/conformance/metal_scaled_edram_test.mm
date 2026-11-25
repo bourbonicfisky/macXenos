@@ -916,6 +916,283 @@ TEST_CASE("Direct depth and fused depth resolves match canonical at scale",
   }
 }
 
+TEST_CASE("Tight materialize pass preserves rows below misaligned work_height",
+          "[l1][metal][tight_materialize]") {
+  // Unit contract: MTLLoadActionDontCare is only allowed when the pass covers
+  // the full attachment height (work_height == texture_height) and the tile
+  // range covers every row from base_tiles. Any partial-height pass (including
+  // 16 px EDRAM tile heights that land mid-32 px TBDR tile) must keep Load.
+  const uint32_t pitch_tiles = 2;  // 160 px wide at 1x (2 * 80)
+  const uint32_t tex_height = 160;
+  for (uint32_t partial_rows : {1u, 3u, 5u, 7u}) {
+    const uint32_t work_height = partial_rows * xenos::kEdramTileHeightSamples;
+    const uint32_t end_tiles = partial_rows * pitch_tiles;
+    CHECK_FALSE(CanonicalMaterializeRangeAllowsDontCare(
+        0u, pitch_tiles, 0u, 0u, end_tiles, work_height, tex_height, 1u));
+    // Even if end_tiles covers the whole texture, a truncated pass height must
+    // still refuse DontCare.
+    CHECK_FALSE(CanonicalMaterializeRangeAllowsDontCare(
+        0u, pitch_tiles, 0u, 0u, 10u * pitch_tiles, work_height, tex_height,
+        1u));
+  }
+  // MSAA 2x (8 px tile rows) partial heights must also refuse DontCare.
+  CHECK_FALSE(CanonicalMaterializeRangeAllowsDontCare(
+      0u, pitch_tiles, uint32_t(xenos::MsaaSamples::k2X), 0u, 3u * pitch_tiles,
+      24u, tex_height, 1u));
+  // Non-zero start_tiles past base_tiles refuses DontCare even at full height.
+  CHECK_FALSE(CanonicalMaterializeRangeAllowsDontCare(
+      0u, pitch_tiles, 0u, pitch_tiles, 10u * pitch_tiles, tex_height,
+      tex_height, 1u));
+  // Full attachment height with full tile coverage allows DontCare.
+  CHECK(CanonicalMaterializeRangeAllowsDontCare(
+      0u, pitch_tiles, 0u, 0u, 10u * pitch_tiles, tex_height, tex_height, 1u));
+
+  // Live Metal GPU check on private (compressible on Apple Silicon) color and
+  // depth attachments: pre-clear to a sentinel value, then run the production
+  // range materialize fragment passes with pass.renderTargetHeight =
+  // work_height for misaligned heights (16, 48, 80, 112 px) and full height
+  // (160 px). Every row in [work_height, tex_height) must retain the sentinel.
+  ScaledMsl msl;
+  REQUIRE(msl.Init(1u, 1u));
+
+  const uint32_t width = 160;
+  const uint32_t height = tex_height;
+  const uint32_t total_tiles = (height / xenos::kEdramTileHeightSamples) *
+                               pitch_tiles;
+  const uint32_t edram_words = total_tiles * xenos::kEdramTileWidthSamples *
+                               xenos::kEdramTileHeightSamples;
+
+  // Color payload: R=0x22, G=0x99, B=0xEE, A=0xFF (0xFFEE9922 in RGBA8).
+  const uint32_t color_word = PackEdramColor8888(0x22u, 0x99u, 0xEEu, 0xFFu);
+  const uint32_t color_sentinel =
+      PackEdramColor8888(0xCCu, 0x66u, 0x33u, 0xFFu);
+  std::vector<uint32_t> color_edram(edram_words, color_word);
+  id<MTLBuffer> color_canonical =
+      [msl.device newBufferWithBytes:color_edram.data()
+                              length:color_edram.size() * sizeof(uint32_t)
+                             options:MTLResourceStorageModeShared];
+  REQUIRE(color_canonical != nil);
+
+  // Depth payload: D24UNORM = 0xC00000 (0.75f); sentinel clear = 0.25f.
+  const uint32_t depth_word = PackEdramDepthStencil(0xC00000u, 0u);
+  const float expected_depth = float(0xC00000u) / float(0xFFFFFFu);
+  const float sentinel_depth = 0.25f;
+  std::vector<uint32_t> depth_edram(edram_words, depth_word);
+  id<MTLBuffer> depth_canonical =
+      [msl.device newBufferWithBytes:depth_edram.data()
+                              length:depth_edram.size() * sizeof(uint32_t)
+                             options:MTLResourceStorageModeShared];
+  REQUIRE(depth_canonical != nil);
+  id<MTLBuffer> dummy_lane =
+      [msl.device newBufferWithLength:sizeof(float)
+                              options:MTLResourceStorageModeShared];
+  REQUIRE(dummy_lane != nil);
+
+  // Build production fragment materialize render pipelines.
+  NSError* err = nil;
+  MTLRenderPipelineDescriptor* color_pipe_desc =
+      [[MTLRenderPipelineDescriptor alloc] init];
+  color_pipe_desc.vertexFunction =
+      [msl.library newFunctionWithName:@"xe_color_vs"];
+  color_pipe_desc.fragmentFunction =
+      [msl.library newFunctionWithName:@"materialize_color_ms_range_fs"];
+  color_pipe_desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+  id<MTLRenderPipelineState> color_pipe =
+      [msl.device newRenderPipelineStateWithDescriptor:color_pipe_desc
+                                                 error:&err];
+  REQUIRE(color_pipe != nil);
+  REQUIRE(err == nil);
+
+  MTLRenderPipelineDescriptor* depth_pipe_desc =
+      [[MTLRenderPipelineDescriptor alloc] init];
+  depth_pipe_desc.vertexFunction =
+      [msl.library newFunctionWithName:@"xe_depth_vs"];
+  depth_pipe_desc.fragmentFunction =
+      [msl.library newFunctionWithName:@"materialize_depth_ms_range_fs"];
+  depth_pipe_desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+  id<MTLRenderPipelineState> depth_pipe =
+      [msl.device newRenderPipelineStateWithDescriptor:depth_pipe_desc
+                                                 error:&err];
+  REQUIRE(depth_pipe != nil);
+  REQUIRE(err == nil);
+
+  MTLDepthStencilDescriptor* ds_desc = [[MTLDepthStencilDescriptor alloc] init];
+  ds_desc.depthCompareFunction = MTLCompareFunctionAlways;
+  ds_desc.depthWriteEnabled = YES;
+  id<MTLDepthStencilState> depth_always =
+      [msl.device newDepthStencilStateWithDescriptor:ds_desc];
+  REQUIRE(depth_always != nil);
+
+  MTLTextureDescriptor* color_tex_desc = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                   width:width
+                                  height:height
+                               mipmapped:NO];
+  color_tex_desc.storageMode = MTLStorageModePrivate;
+  color_tex_desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+  id<MTLTexture> color_tex =
+      [msl.device newTextureWithDescriptor:color_tex_desc];
+  REQUIRE(color_tex != nil);
+
+  MTLTextureDescriptor* depth_tex_desc = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                   width:width
+                                  height:height
+                               mipmapped:NO];
+  depth_tex_desc.storageMode = MTLStorageModePrivate;
+  depth_tex_desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+  id<MTLTexture> depth_tex =
+      [msl.device newTextureWithDescriptor:depth_tex_desc];
+  REQUIRE(depth_tex != nil);
+
+  const NSUInteger readback_bytes = width * height * sizeof(uint32_t);
+  id<MTLBuffer> color_readback =
+      [msl.device newBufferWithLength:readback_bytes
+                              options:MTLResourceStorageModeShared];
+  id<MTLBuffer> depth_readback =
+      [msl.device newBufferWithLength:readback_bytes
+                              options:MTLResourceStorageModeShared];
+  REQUIRE(color_readback != nil);
+  REQUIRE(depth_readback != nil);
+
+  struct RangeParams {
+    uint32_t start_tiles;
+    uint32_t end_tiles;
+  };
+  const uint32_t color_format = 0u;  // k_8_8_8_8
+  const uint32_t hl_mode = 0u;
+
+  for (uint32_t tile_rows : {1u, 3u, 5u, 7u, 10u}) {
+    const NSUInteger work_height =
+        NSUInteger(tile_rows) * xenos::kEdramTileHeightSamples;
+    const uint32_t end_tiles = tile_rows * pitch_tiles;
+    const bool full_cover = CanonicalMaterializeRangeAllowsDontCare(
+        0u, pitch_tiles, 0u, 0u, end_tiles, work_height, height, 1u);
+    CHECK(full_cover == (work_height == height));
+
+    id<MTLCommandBuffer> cb = [msl.queue commandBuffer];
+    // 1) Pre-fill full attachments with sentinel values.
+    {
+      MTLRenderPassDescriptor* clear_pass =
+          [MTLRenderPassDescriptor renderPassDescriptor];
+      clear_pass.colorAttachments[0].texture = color_tex;
+      clear_pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+      clear_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+      clear_pass.colorAttachments[0].clearColor =
+          MTLClearColorMake(double(0xCC) / 255.0, double(0x66) / 255.0,
+                            double(0x33) / 255.0, 1.0);
+      clear_pass.depthAttachment.texture = depth_tex;
+      clear_pass.depthAttachment.loadAction = MTLLoadActionClear;
+      clear_pass.depthAttachment.storeAction = MTLStoreActionStore;
+      clear_pass.depthAttachment.clearDepth = sentinel_depth;
+      id<MTLRenderCommandEncoder> enc =
+          [cb renderCommandEncoderWithDescriptor:clear_pass];
+      [enc endEncoding];
+    }
+    // 2) Tight color fragment materialize pass.
+    {
+      EdramSurfaceParams sp{0u, pitch_tiles, 0u, 0u, 0u, edram_words};
+      RangeParams range{0u, end_tiles};
+      MTLRenderPassDescriptor* pass =
+          [MTLRenderPassDescriptor renderPassDescriptor];
+      pass.renderTargetWidth = width;
+      pass.renderTargetHeight = work_height;
+      pass.colorAttachments[0].texture = color_tex;
+      pass.colorAttachments[0].loadAction =
+          full_cover ? MTLLoadActionDontCare : MTLLoadActionLoad;
+      pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+      id<MTLRenderCommandEncoder> enc =
+          [cb renderCommandEncoderWithDescriptor:pass];
+      [enc setScissorRect:MTLScissorRect{0, 0, width, work_height}];
+      [enc setRenderPipelineState:color_pipe];
+      [enc setFragmentBuffer:color_canonical offset:0 atIndex:0];
+      [enc setFragmentBytes:&sp length:sizeof(sp) atIndex:1];
+      [enc setFragmentBytes:&color_format length:sizeof(color_format) atIndex:2];
+      [enc setFragmentBytes:&range length:sizeof(range) atIndex:3];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      [enc endEncoding];
+    }
+    // 3) Tight depth fragment materialize pass.
+    {
+      EdramSurfaceParams sp{0u, pitch_tiles, 0u, 1u, 0u, edram_words};
+      RangeParams range{0u, end_tiles};
+      MTLRenderPassDescriptor* pass =
+          [MTLRenderPassDescriptor renderPassDescriptor];
+      pass.renderTargetWidth = width;
+      pass.renderTargetHeight = work_height;
+      pass.depthAttachment.texture = depth_tex;
+      pass.depthAttachment.loadAction =
+          full_cover ? MTLLoadActionDontCare : MTLLoadActionLoad;
+      pass.depthAttachment.storeAction = MTLStoreActionStore;
+      id<MTLRenderCommandEncoder> enc =
+          [cb renderCommandEncoderWithDescriptor:pass];
+      [enc setScissorRect:MTLScissorRect{0, 0, width, work_height}];
+      [enc setRenderPipelineState:depth_pipe];
+      [enc setDepthStencilState:depth_always];
+      [enc setFragmentBuffer:depth_canonical offset:0 atIndex:0];
+      [enc setFragmentBytes:&sp length:sizeof(sp) atIndex:1];
+      [enc setFragmentBytes:&range length:sizeof(range) atIndex:2];
+      [enc setFragmentBytes:&hl_mode length:sizeof(hl_mode) atIndex:3];
+      [enc setFragmentBuffer:dummy_lane offset:0 atIndex:4];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      [enc endEncoding];
+    }
+    // 4) Blit both attachments to shared readback buffers.
+    {
+      id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+      [blit copyFromTexture:color_tex
+                sourceSlice:0
+                sourceLevel:0
+               sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(width, height, 1)
+                   toBuffer:color_readback
+          destinationOffset:0
+     destinationBytesPerRow:width * sizeof(uint32_t)
+   destinationBytesPerImage:readback_bytes];
+      [blit copyFromTexture:depth_tex
+                sourceSlice:0
+                sourceLevel:0
+               sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:MTLSizeMake(width, height, 1)
+                   toBuffer:depth_readback
+          destinationOffset:0
+     destinationBytesPerRow:width * sizeof(float)
+   destinationBytesPerImage:readback_bytes];
+      [blit endEncoding];
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    REQUIRE(cb.error == nil);
+
+    const auto* color_px = static_cast<const uint32_t*>(color_readback.contents);
+    const auto* depth_px = static_cast<const float*>(depth_readback.contents);
+    uint32_t color_mismatches_in = 0, color_mismatches_below = 0;
+    uint32_t depth_mismatches_in = 0, depth_mismatches_below = 0;
+    for (uint32_t y = 0; y < height; ++y) {
+      const bool in_range = y < work_height;
+      for (uint32_t x = 0; x < width; ++x) {
+        const uint32_t idx = y * width + x;
+        if (in_range) {
+          if (color_px[idx] != color_word) ++color_mismatches_in;
+          if (std::abs(depth_px[idx] - expected_depth) > 1e-5f) {
+            ++depth_mismatches_in;
+          }
+        } else {
+          if (color_px[idx] != color_sentinel) ++color_mismatches_below;
+          if (std::abs(depth_px[idx] - sentinel_depth) > 1e-5f) {
+            ++depth_mismatches_below;
+          }
+        }
+      }
+    }
+    INFO("tile_rows=" << tile_rows << " work_height=" << work_height);
+    CHECK(color_mismatches_in == 0);
+    CHECK(color_mismatches_below == 0);
+    CHECK(depth_mismatches_in == 0);
+    CHECK(depth_mismatches_below == 0);
+  }
+}
+
 }  // namespace test
 }  // namespace gpu
 }  // namespace xe

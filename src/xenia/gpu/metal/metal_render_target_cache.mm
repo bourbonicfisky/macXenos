@@ -193,9 +193,10 @@ NSUInteger GetCanonicalRangeTextureRowStart(
 // Tight materialize render passes (XE_METAL_MATERIALIZE_TIGHT_PASS=0 rolls
 // back): bound pass.renderTargetWidth/Height to [0, work_height) so Apple TBDR
 // never loads/stores rows below the materialized range, switch loadAction to
-// DontCare when [start_tiles, end_tiles) covers every pixel in [0, work_height)
-// without discard, and fold a full-span single two-source depth reconcile into
-// the base draw.
+// DontCare only when work_height == texture_height and [start_tiles, end_tiles)
+// covers every pixel in the full attachment (partial-height passes must keep
+// Load so TBDR tiles spanning work_height do not clobber rows below the pass),
+// and fold a full-span single two-source depth reconcile into the base draw.
 bool MaterializeTightPassEnabled() {
   static const bool s_enabled = ParseMetalEnvironmentFlag(
       std::getenv("XE_METAL_MATERIALIZE_TIGHT_PASS"), true);
@@ -204,22 +205,10 @@ bool MaterializeTightPassEnabled() {
 bool CanonicalRangeCoversWorkArea(uint32_t base_tiles, uint32_t pitch_tiles,
                                   uint32_t msaa_samples, uint32_t start_tiles,
                                   uint32_t end_tiles, NSUInteger work_height,
-                                  uint32_t scale_y) {
-  if (!pitch_tiles || !work_height || start_tiles > base_tiles) {
-    return false;
-  }
-  uint32_t x_shift = 0, y_shift = 0;
-  GetMsaaShifts(msaa_samples, x_shift, y_shift);
-  (void)x_shift;
-  const uint64_t tile_row_height =
-      uint64_t(xenos::kEdramTileHeightSamples >> y_shift) * scale_y;
-  if (!tile_row_height) {
-    return false;
-  }
-  const uint64_t tile_rows =
-      (uint64_t(work_height) + tile_row_height - 1u) / tile_row_height;
-  return uint64_t(end_tiles) >=
-         uint64_t(base_tiles) + tile_rows * uint64_t(pitch_tiles);
+                                  NSUInteger texture_height, uint32_t scale_y) {
+  return CanonicalMaterializeRangeAllowsDontCare(
+      base_tiles, pitch_tiles, msaa_samples, start_tiles, end_tiles,
+      work_height, texture_height, scale_y);
 }
 // Compile options defining the scaled EDRAM tile geometry for the canonical
 // EDRAM MSL (kEdramMsl's XE_EDRAM_TILE_WIDTH/HEIGHT_SAMPLES). At 1x they equal
@@ -3846,7 +3835,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMaterialize(
                                    target->key().GetPitchTiles(),
                                    uint32_t(target->key().msaa_samples),
                                    start_tiles, end_tiles, work_height,
-                                   draw_resolution_scale_y());
+                                   texture.height, draw_resolution_scale_y());
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   if (tight_pass) {
@@ -4099,7 +4088,7 @@ bool MetalRenderTargetCache::EncodeCanonicalDepthMsaaMaterialize(
                                    target->key().GetPitchTiles(),
                                    uint32_t(target->key().msaa_samples),
                                    start_tiles, end_tiles, work_height,
-                                   draw_resolution_scale_y());
+                                   texture.height, draw_resolution_scale_y());
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   if (tight_pass) {
@@ -9143,20 +9132,23 @@ bool MetalRenderTargetCache::EncodeCanonicalColorFragmentMaterialize(
   const NSUInteger row_start = GetCanonicalRangeTextureRowStart(
       target->key().base_tiles, target->key().GetPitchTiles(), 0u, start_tiles,
       work_height, texture.height, draw_resolution_scale_y());
+  const bool tight_pass = MaterializeTightPassEnabled();
   const bool full_cover =
-      MaterializeTightPassEnabled() &&
+      tight_pass &&
       CanonicalRangeCoversWorkArea(target->key().base_tiles,
                                    target->key().GetPitchTiles(), 0u,
                                    start_tiles, end_tiles, work_height,
-                                   draw_resolution_scale_y());
+                                   texture.height, draw_resolution_scale_y());
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
+  if (tight_pass) {
+    pass.renderTargetWidth = texture.width;
+    pass.renderTargetHeight = work_height;
+  }
   pass.colorAttachments[0].texture = texture;
   pass.colorAttachments[0].loadAction =
       full_cover ? MTLLoadActionDontCare : MTLLoadActionLoad;
   pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-  pass.renderTargetWidth = texture.width;
-  pass.renderTargetHeight = work_height;
   id<MTLRenderCommandEncoder> encoder =
       [command renderCommandEncoderWithDescriptor:pass];
   encoder.label = is_64bpp ? @"rtcache:canonical-color64-materialize-range-fs"
@@ -9229,7 +9221,7 @@ bool MetalRenderTargetCache::EncodeCanonicalColorMsaaMaterialize(
                                    target->key().GetPitchTiles(),
                                    uint32_t(target->key().msaa_samples),
                                    start_tiles, end_tiles, work_height,
-                                   draw_resolution_scale_y());
+                                   texture.height, draw_resolution_scale_y());
   MTLRenderPassDescriptor* pass =
       [MTLRenderPassDescriptor renderPassDescriptor];
   if (tight_pass) {
