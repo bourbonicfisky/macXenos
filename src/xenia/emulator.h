@@ -374,6 +374,9 @@ class Emulator {
   std::filesystem::path storage_root_;
   std::filesystem::path content_root_;
   std::filesystem::path cache_root_;
+  // Host folder of the shared cache: partition as xenia_main mounted it; each
+  // title's cache: is a subfolder named by its title ID.
+  std::filesystem::path cache_partition_base_;
   std::filesystem::path default_save_root_;
 
   std::string title_name_;

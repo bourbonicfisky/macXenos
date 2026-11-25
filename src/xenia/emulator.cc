@@ -2297,6 +2297,41 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
       }
       XELOGI("Cache devices unmounted for title {} (mount_cache=false)",
              title_id);
+    } else if (file_system_ && module->title_id()) {
+      // cache: belongs to one title, as the console's utility partition does
+      // (it is reformatted when another title mounts it). One shared folder
+      // let titles read each other's files: EA titles all use cache:\
+      // data0.big, cache0-8.big and friends, and NHL 15 (454109DC) loaded
+      // SSX's archives from it, missed its own animation names and called a
+      // null vtable 108 s in. Each title gets <cache>/<title ID>; files left
+      // in the shared folder by earlier builds are no longer seen.
+      if (cache_partition_base_.empty()) {
+        vfs::Entry* entry = file_system_->ResolvePath("\\CACHE");
+        auto* device = entry ? dynamic_cast<vfs::HostPathDevice*>(
+                                   entry->device())
+                             : nullptr;
+        if (device) {
+          cache_partition_base_ = device->host_path();
+        }
+      }
+      if (!cache_partition_base_.empty()) {
+        const std::filesystem::path title_cache =
+            cache_partition_base_ / title_id;
+        std::error_code ec;
+        std::filesystem::create_directories(title_cache, ec);
+        auto device = std::make_unique<vfs::HostPathDevice>(
+            "\\CACHE", title_cache, false);
+        if (ec || !device->Initialize()) {
+          XELOGW("Per-title cache {} is unavailable; cache: stays shared",
+                 title_cache);
+        } else {
+          // Registered last, after \CACHE0 and \CACHE1, which ResolvePath's
+          // prefix match needs; the cache: link still names \CACHE.
+          file_system_->UnregisterDevice("\\CACHE");
+          file_system_->RegisterDevice(std::move(device));
+          XELOGI("cache: for title {} is {}", title_id, title_cache);
+        }
+      }
     }
 
     const auto db = kernel_state_->module_xdbf(module);
