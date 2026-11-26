@@ -1,9 +1,11 @@
 # Game compatibility
 
+> **2x and 3x:** every game in this list should work at 2x and 3x resolution. To see how demanding each game is on each Mac at those scales, see the [2x and 3x benchmarks](scaling.md).
+
 These are the games macXenos is tested with regularly: 305 of them, plus the
 54 Xbox Live Arcade games further down. Each one is started automatically,
 played to the point shown with a scripted controller, and measured. The four
-columns are four Macs: a base M4 Mac mini, an M4 Pro Mac mini, an M1 Max
+columns are four Macs: a base M4 Mac mini, an M4 Pro MacBook Pro, an M1 Max
 MacBook Pro with 32 GB and an M5 Max Mac Studio, all at the original
 resolution (1x) with the Metal renderer. A dash means that Mac hasn't measured
 the game yet.
@@ -22,8 +24,7 @@ build it was measured with:
 | **d** | earlier 1.0.x builds | November 2–15, 2026 |
 
 A figure keeps its letter until a newer build measures that game on that Mac
-again; new builds are added to the top of the key. (2x and 3x figures for the
-1.1 builds are in `docs/dev/scaling_1_1_benchmarks_20261124.md`.)
+again; new builds are added to the top of the key.
 
 **"Test reaches" is only how far the automated test goes, not how far the
 game can be played.** Each test plays the opening of the game with a scripted
