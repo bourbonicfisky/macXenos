@@ -53,18 +53,18 @@ smoother.
 | 2010 FIFA World Cup South Africa | Quick Match, USA v Mexico, CPU vs CPU | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | – |  |
 | 2014 FIFA World Cup Brazil | Kick Off, Brazil v Argentina at the Maracanã | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | – | Runs 30 when the test ends on a Brazil set piece waiting for the player; open play holds 60 |
 | 50 Cent: Blood on the Sand | Mission 1, the opening street | 102 <sup>a</sup> | 179 <sup>b</sup> | 136 <sup>a</sup> | 128 <sup>d</sup> | Doesn't cap its own frame rate (see below) |
-| Ace Combat 6: Fires of Liberation | Mission 1, the take-off sequence | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | 30 <sup>e</sup> |  |
-| Ace Combat: Assault Horizon | Mission 1, over Miami | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> | 30 <sup>d</sup> |  |
+| Ace Combat 6: Fires of Liberation | Mission 1, the take-off sequence | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>e</sup> |  |
+| Ace Combat: Assault Horizon | Mission 1, over Miami | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Adventure Time: Explore the Dungeon Because I Don't Know! | New game, the Candy Kingdom hub | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | – |  |
 | Adventure Time: Finn & Jake Investigations | The tutorial prompt in the treehouse | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | – |  |
 | AFL Live | Single match, CPU vs CPU at the MCG | 122 <sup>a</sup> | 136 <sup>a</sup> | 93 <sup>a</sup> | 134 <sup>b</sup> | Doesn't cap its own frame rate (see below) |
 | AFL Live 2 | Single match, CPU vs CPU (random teams and venue) | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | – |  |
-| Afro Samurai | Village tutorial fight | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> | 30 <sup>e</sup> |  |
+| Afro Samurai | Village tutorial fight | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>e</sup> |  |
 | Alan Wake | Opening nightmare on the mountain road | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
 | Assassin's Creed | The Animus tutorial crowd | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | – |  |
-| Assassin's Creed II | Story mode opening | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>c</sup> | 30 <sup>d</sup> |  |
-| Assassin's Creed III | Opening, Desmond at the cave entrance | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>c</sup> | 60 <sup>d</sup> | This scene runs at 60 |
-| Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> | 30 <sup>d</sup> | Occasionally freezes at the boot logo or after the menu loads |
+| Assassin's Creed II | Story mode opening | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Assassin's Creed III | Opening, Desmond at the cave entrance | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | This scene runs at 60 |
+| Banjo-Kazooie: Nuts & Bolts | Spiral Mountain | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> | Occasionally freezes at the boot logo or after the menu loads |
 | Batman: Arkham Asylum | Intensive Treatment, escorting the Joker | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>c</sup> | 30 <sup>d</sup> |  |
 | Batman: Arkham Origins | Blackgate rooftop | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
 | Battlefield 3 | Semper Fidelis, the pause menu over the train fight | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>c</sup> | – | Tested on Easy, ending on the pause menu because the idle player dies quickly |
@@ -104,7 +104,7 @@ smoother.
 | Call of Duty: Modern Warfare 3 | First mission, Black Tuesday | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>c</sup> | 60 <sup>d</sup> |  |
 | Call of Juarez: Bound in Blood | Chapter 1, the trenches | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | 60 <sup>d</sup> |  |
 | Capcom Digital Collection | 1942: Joint Strike, mission 1, picked from the launcher | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>c</sup> | – | Tested as the trial of 1942: Joint Strike |
-| Captain America: Super Soldier | The trench at first control | 60 <sup>d</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>e</sup> | Occasionally starts to a black screen (one start in four in testing); starting the game again gets past it |
+| Captain America: Super Soldier | The trench at first control | 60 <sup>d</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>e</sup> | Occasionally starts to a black screen (one start in four in testing); starting the game again gets past it. Can crash while starting on some Macs, most often the M4 mini (3 of 4 tries there; no crash in 3 tries each on the M1 Max and M4 Pro); starting it again can get past it |
 | Carrier Command: Gaea Mission | Campaign, first control at the crash site | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | – |  |
 | Cartoon Network: Punch Time Explosion XL | Story mode, the first level | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | – |  |
 | Champion Jockey: G1 Jockey & Gallop Racer | Free Race, Greenfield 3200 m | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – |  |
@@ -124,11 +124,11 @@ smoother.
 | The Conveni 200X | Scenario 1, the store placement map | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | – | Japanese release |
 | Crackdown | Campaign, first control in the Agency hangar | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | Runs a little under its 30 limit |
 | Crackdown 2 | The training room after the opening movie | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>c</sup> |  |
-| Crash Time 4: The Syndicate | Career, the first patrol in the city | 30 <sup>b</sup> | 30 <sup>c</sup> | 30 <sup>a</sup> | – |  |
-| Crash Time 5: Undercover | Career, the first mission on an Alpine pass | 30 <sup>a</sup> | 30 <sup>c</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> |  |
-| Crash Time: Autobahn Pursuit | The Cases, the first chase | 30 <sup>a</sup> | 30 <sup>c</sup> | 30 <sup>b</sup> | – |  |
+| Crash Time 4: The Syndicate | Career, the first patrol in the city | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – |  |
+| Crash Time 5: Undercover | Career, the first mission on an Alpine pass | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> |  |
+| Crash Time: Autobahn Pursuit | The Cases, the first chase | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | – |  |
 | Crash: Mind over Mutant | First control in Crash's house | – | 30 <sup>c</sup> | – | – |  |
-| Create | The first-run tutorial stage | 30 <sup>a</sup> | 30 <sup>c</sup> | 30 <sup>b</sup> | – |  |
+| Create | The first-run tutorial stage | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | – |  |
 | Cross Channel: In Memory of All People | New game, the first story line | 60 <sup>b</sup> | – | 60 <sup>c</sup> | – | Japanese release |
 | Crysis 2 | First mission | 31 <sup>a</sup> | 31 <sup>b</sup> | 31 <sup>c</sup> | 31 <sup>a</sup> |  |
 | Crysis 3 | First mission, inside the Liberty Dome | 31 <sup>b</sup> | 31 <sup>c</sup> | 31 <sup>c</sup> | 31 <sup>a</sup> |  |
@@ -211,10 +211,10 @@ smoother.
 | Halo 4 | Main menu | 30 <sup>b</sup> | 30 <sup>c</sup> | 30 <sup>c</sup> | 30 <sup>d</sup> |  |
 | Halo 4 (campaign) | Mission Dawn, the cryo bay | 30 <sup>a</sup> | 30 <sup>d</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | Cortana's face is black in the opening cutscene |
 | Halo: Reach | Campaign, Winter Contingency | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>c</sup> | 30 <sup>d</sup> |  |
-| Harry Potter and the Order of the Phoenix | Opening tutorial | – | 30 <sup>b</sup> | 30 <sup>d</sup> | 30 <sup>d</sup> |  |
+| Harry Potter and the Order of the Phoenix | Opening tutorial | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | 30 <sup>d</sup> |  |
 | Hitman: Absolution | Prologue, the grounds of Diana's estate | 30 <sup>b</sup> | 30 <sup>d</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Hitman: Blood Money | Training mission, the pier | 30 <sup>b</sup> | 30 <sup>d</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| The Incredible Hulk | First story scene | 30 <sup>d</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | 30 <sup>d</sup> | The Hulk isn't visible and doesn't respond in this scene; may be by design |
+| The Incredible Hulk | First story scene | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | 30 <sup>d</sup> | The Hulk isn't visible and doesn't respond in this scene; may be by design |
 | Infinite Undiscovery | Opening scene in the dungeon | – | 30 <sup>b</sup> | 30 <sup>d</sup> | 30 <sup>d</sup> |  |
 | Iron Man | First mission, Escape | – | 60 <sup>d</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> |  |
 | JASF: Jane's Advanced Strike Fighters | Campaign mission 1, the jet on the runway | – | – | 30 <sup>c</sup> | 30 <sup>b</sup> |  |
