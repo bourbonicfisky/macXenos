@@ -2,8 +2,8 @@
 
 > **2x and 3x:** every game in this list should work at 2x and 3x resolution. To see how demanding each game is on each Mac at those scales, see the [2x and 3x benchmarks](scaling.md).
 
-These are the games macXenos is tested with regularly: 305 of them, plus the
-54 Xbox Live Arcade games further down. Each one is started automatically,
+These are the games macXenos is tested with regularly: 333 of them, plus the
+56 Xbox Live Arcade games further down. Each one is started automatically,
 played to the point shown with a scripted controller, and measured. The four
 columns are four Macs: a base M4 Mac mini, an M4 Pro MacBook Pro, an M1 Max
 MacBook Pro with 32 GB and an M5 Max Mac Studio, all at the original
@@ -50,6 +50,7 @@ smoother.
 | 007 Legends | Opening level | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
 | 007: Blood Stone | Athens harbour, in the speedboat | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>e</sup> |  |
 | 007: Quantum of Solace | First level | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| 2006 FIFA World Cup Germany | Play Now, USA v Mexico | – | – | 60 <sup>a</sup> | – | Green and black streaks cross the stadium during the walk-out; play is clean |
 | 2010 FIFA World Cup South Africa | Quick Match, USA v Mexico, CPU vs CPU | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | – |  |
 | 2014 FIFA World Cup Brazil | Kick Off, Brazil v Argentina at the Maracanã | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | – | Runs 30 when the test ends on a Brazil set piece waiting for the player; open play holds 60 |
 | 50 Cent: Blood on the Sand | Mission 1, the opening street | 102 <sup>a</sup> | 179 <sup>b</sup> | 136 <sup>a</sup> | 128 <sup>d</sup> | Doesn't cap its own frame rate (see below) |
@@ -181,6 +182,10 @@ smoother.
 | Far Cry 2 | Opening taxi ride | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Far Cry 3 | Opening (the cage) | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | At 2x internal resolution a magenta band can smear down from the top of the picture |
 | Far Cry 4 | Opening, dinner with Pagan Min | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> |  |
+| FIFA 06: Road to FIFA World Cup | Friendly, England v Germany | – | – | 60 <sup>a</sup> | – |  |
+| FIFA 07 | The practice arena | – | – | 60 <sup>a</sup> | – | Loading a match can crash (the game runs out of memory), so the test stays in the practice arena |
+| FIFA 09 | Exhibition, Arsenal v Tottenham | – | – | 60 <sup>a</sup> | – |  |
+| FIFA 10 | Exhibition, Arsenal v Tottenham | – | – | 60 <sup>a</sup> | – |  |
 | FIFA 14 | Kick Off match, CPU vs CPU | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
 | FIFA 16 | Kick Off match, CPU vs CPU | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
 | FIFA Street 3 | Play Now match | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> | Can stall on the EA SPORTS BIG logo at start-up |
@@ -188,6 +193,8 @@ smoother.
 | Fight Night Round 4 | Fight Now, Ali vs Tyson, round 1 | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Boxers' skin can show a foil-like sparkle for a whole session |
 | Final Fantasy XIII | The Hanging Edge, after the first battle | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – | After a Game Over and Retry in the first battle, Lightning's skin and the walkway can render wrongly |
 | Fist of the North Star: Ken's Rage | Legend Mode, first chapter fight | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
+| Football Manager 2007 | New game, the Manager Overview | – | – | – | – | Runs; the test measures a 2D management screen, so no frame rate is listed |
+| Football Manager 2008 | New game, the Manager Overview | – | – | – | – | Runs; the test measures a 2D management screen, so no frame rate is listed |
 | Forza Horizon | Opening drive | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
 | Forza Horizon 2 | Drive to the Festival | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
 | Forza Motorsport 2 | Exhibition race, on the grid | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> | Some menu text is missing letters |
@@ -195,23 +202,44 @@ smoother.
 | Forza Motorsport 4 | First race, cockpit view | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | In cockpit view the windshield and side windows are flat grey |
 | Frontlines: Fuel of War | First mission, defending the crash site | 47 <sup>a</sup> | 46 <sup>b</sup> | 50 <sup>a</sup> | 49 <sup>d</sup> | The game paces itself at about 46-50, in menus and videos too |
 | Fuel | Career, The Leap of Faith | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
+| Full Auto | A Gauntlet race | – | – | 30 <sup>a</sup> | – |  |
+| Fuzion Frenzy 2 | Electric Rumble mini-game, paused | 60 <sup>a</sup> | – | – | – |  |
+| G.I. Joe: The Rise of Cobra | Mission 1, the pause menu over the snow canyon | – | 30 <sup>a</sup> | – | – | Drops to about 7 fps for a few seconds as each movie starts; rarely hangs at the first logo |
+| Game of Thrones: A Telltale Games Series | Episode 1, the dark tent | – | 30 <sup>a</sup> | – | – |  |
 | Gears of War | Campaign, Ashes | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Gears of War 2 | Campaign, Act I | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Gears of War 3 | Campaign prologue | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Gears of War: Judgment | Survival, Estate | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Ghost Recon Advanced Warfighter | Training mission, first street | 60 <sup>b</sup> | – | – | 60 <sup>d</sup> | Not measured on the M4 Pro and M1 Max: their tests don't reach this scene |
+| The Godfather | The Little Italy alley tutorial | – | 30 <sup>a</sup> | – | – |  |
 | The Godfather II | Havana rooftop party | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | GoldenEye 007: Reloaded | First mission | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Grand Slam Tennis 2 | Centre Court, waiting to serve | – | – | 60 <sup>a</sup> | – | Can stop on the "Loading..." controls screen (2 of 4 tests) |
 | Grand Theft Auto IV | Opening drive | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | Now holds the console's 60 refresh rate (54-55 in October) |
 | Grand Theft Auto V | Prologue, first control in the bank | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | Runs from Disc 2; Disc 1 is read from the image beside it |
+| Gray Matter | New game, Sam's bedroom | – | 294 <sup>a</sup> | – | – | Doesn't cap its own frame rate (see below) |
+| Green Lantern: Rise of the Manhunters | First control on the Oa plaza | – | 30 <sup>a</sup> | – | – |  |
+| Greg Hastings Paintball 2 | The tutorial field | – | – | 60 <sup>a</sup> | – |  |
+| Grid 2 | First race, Chicago Riverside | – | – | – | 30 <sup>a</sup> |  |
+| Grid Autosport | Career, the first race | – | – | – | 30 <sup>a</sup> |  |
 | Guitar Hero II | Practice, a full song | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Gun | First control in the forest | – | 30 <sup>a</sup> | – | – |  |
+| Gundam Musou International | Mission 1, the Odessa battle | – | 60 <sup>a</sup> | – | – |  |
 | Half-Life 2 (The Orange Box) | Main menu over its live map | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> | Starting the first chapter can stop at the loading screen |
 | Halo 3 | Campaign, Arrival | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Halo 3: ODST | Campaign, Prepare to Drop | 30 <sup>a</sup> | 29 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Halo 4 | Main menu | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Halo 4 (campaign) | Mission Dawn, the cryo bay | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | Cortana's face is black in the opening cutscene |
 | Halo: Reach | Campaign, Winter Contingency | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Handball 16 | Local match, PSG v Kiel | – | – | 73 <sup>a</sup> | – | Doesn't cap its own frame rate (see below) |
+| Hannah Montana: The Movie | Story mode, the "try again?" prompt over the 3D stage | 30 <sup>a</sup> | – | – | – | 3D scenes draw as stretched flat polygons with blocky texture noise (open) |
+| Happy Feet Two | Level 1, the first dialogue over the live level | 60 <sup>a</sup> | – | – | – |  |
+| Harry Potter and the Deathly Hallows – Part 1 | In the motorbike sidecar above the clouds | – | 30 <sup>a</sup> | – | – |  |
+| Harry Potter and the Deathly Hallows – Part 2 | The Gringotts caverns ledge | – | 30 <sup>a</sup> | – | – |  |
 | Harry Potter and the Order of the Phoenix | Opening tutorial | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Hasbro Family Game Night | Battleship, "Press A to fire!" over the board | 30 <sup>a</sup> | – | – | – | The other board games show as trials or locked when run from the disc; Battleship's trial plays |
+| Hellboy: The Science of Evil | The dark forest, "Follow the Ravens" | – | 30 <sup>a</sup> | – | – |  |
+| The History Channel: Battle for the Pacific | The Wake Island trench | – | 30 <sup>a</sup> | – | – |  |
 | Hitman: Absolution | Prologue, the grounds of Diana's estate | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Hitman: Blood Money | Training mission, the pier | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | The Incredible Hulk | First story scene | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> | The Hulk isn't visible and doesn't respond in this scene; may be by design |
@@ -355,7 +383,7 @@ smoother.
 
 ## Xbox Live Arcade
 
-54 Xbox Live Arcade games are tested too, in the same way, with the same
+56 Xbox Live Arcade games are tested too, in the same way, with the same
 columns and the same build letters.
 
 | Game | Test reaches | M4 mini | M4 Pro | M1 Max | M5 Max | Notes |
@@ -402,6 +430,7 @@ columns and the same build letters.
 | RISK | World Domination, a game between three computer players | 60 <sup>c</sup> | – | – | – | Tested as the trial |
 | RoboBlitz | Karl's workshop, first control | – | – | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
 | Sam & Max: Beyond Time and Space | Episode 1, first control in the office | 60 <sup>b</sup> | – | 60 <sup>a</sup> | – | Tested as the trial |
+| Samurai Shodown II | Round 1, paused | 60 <sup>a</sup> | – | – | – |  |
 | Scarygirl | Scarygirl's tree house, first control | 30 <sup>c</sup> | – | 30 <sup>b</sup> | – | Tested as the trial |
 | SEGA Bass Fishing | Arcade Mode, the Lodge | – | – | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
 | Serious Sam 3: BFE | Broken Wings demo, the Cairo park | 16 <sup>b</sup> | 14 <sup>d</sup> | 6 <sup>d</sup> | 11 <sup>d</sup> | Tested as the trial. The buildings behind the park can render solid black, and the level runs at about 15 on the M4 Macs and 6 on the M1 Max |
@@ -414,6 +443,7 @@ columns and the same build letters.
 | Trials Fusion | Training Program 1, at the start line | 60 <sup>d</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> | 60 <sup>d</sup> | A flat brown patch covers part of the track, and white specks show along some edges |
 | Trials HD | Tutorial track, at the start gate | – | – | 60 <sup>b</sup> | – |  |
 | Virtua Fighter 2 | Pause menu over the first Arcade fight | – | 60 <sup>b</sup> | 60 <sup>d</sup> | 60 <sup>d</sup> |  |
+| Virtual-On Oratorio Tangram | Observer mode CPU match, paused | 60 <sup>a</sup> | – | – | – |  |
 
 Every figure in the tables comes from a test where the game was still running
 at the end and hit no GPU error. Notes list the problems still open in these games;
@@ -421,7 +451,7 @@ problems fixed before these runs are not listed.
 
 Mafia II, Saints Row IV, 50 Cent: Blood on the Sand, Juiced 2: Hot Import
 Nights, Blood Bowl, AFL Live, Dark, Darkest of Days, Darksiders and Darksiders
-II don't limit their own frame rate, so they run as fast as the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
+II, Gray Matter and Handball 16 don't limit their own frame rate, so they run as fast as the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
 Graphics settings. Frogger: Hyper Arcade Edition doesn't limit its frame rate
 either. The game-select screen of Worms Collection is uncapped in
 the same way, but the Worms menu the test measures holds 60.
