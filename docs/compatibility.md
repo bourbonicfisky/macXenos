@@ -2,7 +2,7 @@
 
 > **2x and 3x:** every game in this list should work at 2x and 3x resolution. To see how demanding each game is on each Mac at those scales, see the [2x and 3x benchmarks](scaling.md).
 
-These are the games macXenos is tested with regularly: 333 of them, plus the
+These are the games macXenos is tested with regularly: 338 of them, plus the
 56 Xbox Live Arcade games further down. Each one is started automatically,
 played to the point shown with a scripted controller, and measured. The four
 columns are four Macs: a base M4 Mac mini, an M4 Pro MacBook Pro, an M1 Max
@@ -177,7 +177,7 @@ smoother.
 | F.E.A.R. | Instant Action, Distribution | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | F1 2011 | Time Trial, Melbourne | 30 <sup>b</sup> | – | 30 <sup>d</sup> | 30 <sup>d</sup> |  |
 | Fable II | Childhood, Bowerstone at night | 30 <sup>a</sup> | 30 <sup>b</sup> | 28 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Fable III | New game, the Prince's bedroom | 30 <sup>c</sup> | 30 <sup>c</sup> | 30 <sup>c</sup> | – | Can stop on a black screen loading after character select, most often on M5 Macs (also in 1.0.x) |
+| Fable III | New game, the Prince's bedroom | 30 <sup>c</sup> | 30 <sup>c</sup> | 30 <sup>c</sup> | – | Can stop on a black screen loading after character select (also in 1.0.x) |
 | Fallout: New Vegas | Doc Mitchell's house | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
 | Far Cry 2 | Opening taxi ride | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Far Cry 3 | Opening (the cage) | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | At 2x internal resolution a magenta band can smear down from the top of the picture |
@@ -205,6 +205,7 @@ smoother.
 | Full Auto | A Gauntlet race | – | – | 30 <sup>a</sup> | – |  |
 | Fuzion Frenzy 2 | Electric Rumble mini-game, paused | 60 <sup>a</sup> | – | – | – |  |
 | G.I. Joe: The Rise of Cobra | Mission 1, the pause menu over the snow canyon | – | 30 <sup>a</sup> | – | – | Drops to about 7 fps for a few seconds as each movie starts; rarely hangs at the first logo |
+| Game of Thrones | Castle Black yard, the first dialogue choice | – | – | – | 30 <sup>a</sup> |  |
 | Game of Thrones: A Telltale Games Series | Episode 1, the dark tent | – | 30 <sup>a</sup> | – | – |  |
 | Gears of War | Campaign, Ashes | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Gears of War 2 | Campaign, Act I | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
@@ -222,14 +223,17 @@ smoother.
 | Greg Hastings Paintball 2 | The tutorial field | – | – | 60 <sup>a</sup> | – |  |
 | Grid 2 | First race, Chicago Riverside | – | – | – | 30 <sup>a</sup> |  |
 | Grid Autosport | Career, the first race | – | – | – | 30 <sup>a</sup> |  |
+| Guilty Gear 2: Overture | The tutorial chapter | – | – | – | 60 <sup>a</sup> |  |
 | Guitar Hero II | Practice, a full song | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
 | Gun | First control in the forest | – | 30 <sup>a</sup> | – | – |  |
+| Gundam Musou 3 | The first mission | – | – | – | 60 <sup>a</sup> |  |
 | Gundam Musou International | Mission 1, the Odessa battle | – | 60 <sup>a</sup> | – | – |  |
 | Half-Life 2 (The Orange Box) | Main menu over its live map | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> | Starting the first chapter can stop at the loading screen |
 | Halo 3 | Campaign, Arrival | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Halo 3: ODST | Campaign, Prepare to Drop | 30 <sup>a</sup> | 29 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Halo 4 | Main menu | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Halo 4 (campaign) | Mission Dawn, the cryo bay | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | Cortana's face is black in the opening cutscene |
+| Halo Wars | Campaign mission 1, first control | – | – | – | 30 <sup>a</sup> | The terrain and minimap draw black (a fix is being tested) |
 | Halo: Reach | Campaign, Winter Contingency | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Handball 16 | Local match, PSG v Kiel | – | – | 73 <sup>a</sup> | – | Doesn't cap its own frame rate (see below) |
 | Hannah Montana: The Movie | Story mode, the "try again?" prompt over the 3D stage | 30 <sup>a</sup> | – | – | – | 3D scenes draw as stretched flat polygons with blocky texture noise (open) |
@@ -280,6 +284,7 @@ smoother.
 | Medal of Honor: Warfighter | First mission, the harbour in Karachi | 30 <sup>a</sup> | 30 <sup>d</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | Can crash about 25 seconds into the first mission |
 | Mercenaries 2: World in Flames | New game, the speedboat off the coast | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
 | Metal Gear Solid HD Collection | Metal Gear Solid 3, Virtuous Mission, the jungle at first control | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | Disc 1 of the collection |
+| Metal Gear Solid HD Collection (Peace Walker) | Disc 2, Peace Walker's opening beach tutorial | 60 <sup>a</sup> | – | – | – | Disc 2 of the collection |
 | Metal Gear Solid V: Ground Zeroes | Camp Omega, the cliff at first control | 59 <sup>a</sup> | 56 <sup>a</sup> | 57 <sup>d</sup> | 60 <sup>d</sup> | Some textures show wrong colours or coloured noise, Snake's suit among them. Not yet measured on the M4 Macs: their tests stop short of this scene |
 | Metal Gear Solid V: The Phantom Pain | Prologue, the hospital ward at first control | 60 <sup>a</sup> | 58 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | Runs from Disc 2; Disc 1 is read from the image beside it |
 | Metro 2033 | Prologue, first control | 30 <sup>b</sup> | 30 <sup>a</sup> | 29 <sup>a</sup> | 30 <sup>d</sup> |  |
@@ -352,7 +357,7 @@ smoother.
 | Star Trek | First corridor as Kirk | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Star Trek: Legacy | Skirmish battle | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
 | Stranglehold | Hong Kong marketplace | 30 <sup>b</sup> | 31 <sup>a</sup> | 32 <sup>a</sup> | 32 <sup>e</sup> | Runs a little above its 30 limit, not yet explained |
-| Surf's Up | Championship, the first surf run | 30 <sup>e</sup> | 30 <sup>e</sup> | – | – | The M1 Max test stops short of this scene |
+| Surf's Up | Championship, the first surf run | 30 <sup>e</sup> | 30 <sup>e</sup> | – | – | In 1.1, Create Game can stop on the menu background; the test continues without saving |
 | Tales of Vesperia | Zaphias, the Lower Quarter | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Tekken Tag Tournament 2 | Practice mode | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | VS screens show one name over all four portraits. Can stop during a load (rare) |
 | Test Drive Unlimited | O'ahu, the first rental car | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
