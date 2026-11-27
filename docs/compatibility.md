@@ -201,20 +201,20 @@ smoother.
 | Forza Motorsport 3 | The opening race, the Audi R8 on the start straight | 60 <sup>a</sup> | 60 <sup>a</sup> | 58 <sup>a</sup> | 60 <sup>b</sup> |  |
 | Forza Motorsport 4 | First race, cockpit view | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | In cockpit view the windshield and side windows are flat grey |
 | Frontlines: Fuel of War | First mission, defending the crash site | 47 <sup>a</sup> | 46 <sup>b</sup> | 50 <sup>a</sup> | 47 <sup>a</sup> | The game paces itself at about 46-50, in menus and videos too |
-| Fuel | Career, The Leap of Faith | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
+| Fuel | Career, The Leap of Faith | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
 | Full Auto | A Gauntlet race | 54 <sup>a</sup> | – | 30 <sup>a</sup> | – |  |
 | Fuzion Frenzy 2 | Electric Rumble mini-game, paused | 60 <sup>a</sup> | – | 60 <sup>a</sup> | – |  |
 | G.I. Joe: The Rise of Cobra | Mission 1, the pause menu over the snow canyon | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – | Drops to about 7 fps for a few seconds as each movie starts; rarely hangs at the first logo |
 | Game of Thrones | Castle Black yard, the first dialogue choice | – | – | – | 30 <sup>a</sup> |  |
 | Game of Thrones: A Telltale Games Series | Episode 1, the dark tent | – | 30 <sup>a</sup> | – | – |  |
-| Gears of War | Campaign, Ashes | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Gears of War | Campaign, Ashes | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Gears of War 2 | Campaign, Act I | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Gears of War 3 | Campaign prologue | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Gears of War: Judgment | Survival, Estate | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Ghost Recon Advanced Warfighter | Training mission, first street | 60 <sup>b</sup> | – | – | 60 <sup>d</sup> | Not measured on the M4 Pro and M1 Max: their tests don't reach this scene |
 | The Godfather | The Little Italy alley tutorial | 25 <sup>a</sup> | 30 <sup>a</sup> | 25 <sup>a</sup> | – |  |
-| The Godfather II | Havana rooftop party | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| GoldenEye 007: Reloaded | First mission | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| The Godfather II | Havana rooftop party | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| GoldenEye 007: Reloaded | First mission | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | Grand Slam Tennis 2 | Centre Court, waiting to serve | 60 <sup>a</sup> | – | 60 <sup>a</sup> | – | Can stop on the "Loading..." controls screen (2 of 4 tests) |
 | Grand Theft Auto IV | Opening drive | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | Now holds the console's 60 refresh rate (54-55 in October) |
 | Grand Theft Auto V | Prologue, first control in the bank | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | Runs from Disc 2; Disc 1 is read from the image beside it |
@@ -224,15 +224,15 @@ smoother.
 | Grid 2 | First race, Chicago Riverside | 30 <sup>a</sup> | – | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Grid Autosport | Career, the first race | 30 <sup>a</sup> | – | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Guilty Gear 2: Overture | The tutorial chapter | – | – | – | 60 <sup>a</sup> |  |
-| Guitar Hero II | Practice, a full song | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Guitar Hero II | Practice, a full song | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | Gun | First control in the forest | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – |  |
 | Gundam Musou 3 | The first mission | – | – | – | 60 <sup>a</sup> |  |
 | Gundam Musou International | Mission 1, the Odessa battle | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | – |  |
-| Half-Life 2 (The Orange Box) | Main menu over its live map | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> | Starting the first chapter can stop at the loading screen |
+| Half-Life 2 (The Orange Box) | Main menu over its live map | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | Starting the first chapter can stop at the loading screen |
 | Halo 3 | Campaign, Arrival | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Halo 3: ODST | Campaign, Prepare to Drop | 30 <sup>a</sup> | 29 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Halo 4 | Main menu | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Halo 4 (campaign) | Mission Dawn, the cryo bay | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | Cortana's face is black in the opening cutscene |
+| Halo 4 (campaign) | Mission Dawn, the cryo bay | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | Cortana's face is black in the opening cutscene |
 | Halo Wars | Campaign mission 1, first control | – | – | – | 30 <sup>a</sup> | The terrain and minimap draw black (a fix is being tested) |
 | Halo: Reach | Campaign, Winter Contingency | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Handball 16 | Local match, PSG v Kiel | 115 <sup>a</sup> | – | 75 <sup>a</sup> | – | Doesn't cap its own frame rate (see below) |
@@ -240,66 +240,66 @@ smoother.
 | Happy Feet Two | Level 1, the first dialogue over the live level | 60 <sup>a</sup> | – | 60 <sup>a</sup> | – |  |
 | Harry Potter and the Deathly Hallows – Part 1 | In the motorbike sidecar above the clouds | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – |  |
 | Harry Potter and the Deathly Hallows – Part 2 | The Gringotts caverns ledge | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – |  |
-| Harry Potter and the Order of the Phoenix | Opening tutorial | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Harry Potter and the Order of the Phoenix | Opening tutorial | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Hasbro Family Game Night | Battleship, "Press A to fire!" over the board | 30 <sup>a</sup> | – | 30 <sup>a</sup> | – | The other board games show as trials or locked when run from the disc; Battleship's trial plays |
 | Hellboy: The Science of Evil | The dark forest, "Follow the Ravens" | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – |  |
 | The History Channel: Battle for the Pacific | The Wake Island trench | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – |  |
-| Hitman: Absolution | Prologue, the grounds of Diana's estate | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Hitman: Blood Money | Training mission, the pier | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| The Incredible Hulk | First story scene | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> | The Hulk isn't visible and doesn't respond in this scene; may be by design |
-| Infinite Undiscovery | Opening scene in the dungeon | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Hitman: Absolution | Prologue, the grounds of Diana's estate | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Hitman: Blood Money | Training mission, the pier | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| The Incredible Hulk | First story scene | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | The Hulk isn't visible and doesn't respond in this scene; may be by design |
+| Infinite Undiscovery | Opening scene in the dungeon | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Iron Man | First mission, Escape | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> |  |
 | JASF: Jane's Advanced Strike Fighters | Campaign mission 1, the jet on the runway | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> |  |
 | Juiced 2: Hot Import Nights | Career start, the driver intro before the first challenge | 109 <sup>a</sup> | 136 <sup>a</sup> | 82 <sup>b</sup> | 139 <sup>a</sup> | Doesn't cap its own frame rate (see below) |
-| Jumper: Griffin's Story | The courtyard fight tutorial | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>e</sup> |  |
-| Jurassic Park: The Game | Episode 1 opening | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| Jurassic: The Hunted | First level, the jungle path | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> | In the opening walk, a vertical seam in the lighting runs down the right of the picture |
+| Jumper: Griffin's Story | The courtyard fight tutorial | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Jurassic Park: The Game | Episode 1 opening | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| Jurassic: The Hunted | First level, the jungle path | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | In the opening walk, a vertical seam in the lighting runs down the right of the picture |
 | Just Cause 2 | Open world | 28 <sup>a</sup> | 28 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Kameo: Elements of Power | Thorn's Castle | – | – | 30 <sup>d</sup> | 30 <sup>d</sup> |  |
-| Kane & Lynch 2: Dog Days | Shanghai opening | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>e</sup> |  |
-| Kane & Lynch: Dead Men | The breakout, beside the van | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>e</sup> |  |
-| The King of Fighters XII | Arcade fight | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>e</sup> |  |
-| Kingdoms of Amalur: Reckoning | First control in the Well of Souls | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>c</sup> |  |
+| Kane & Lynch 2: Dog Days | Shanghai opening | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| Kane & Lynch: Dead Men | The breakout, beside the van | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| The King of Fighters XII | Arcade fight | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| Kingdoms of Amalur: Reckoning | First control in the Well of Souls | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
 | Knights Contract | New game, the prologue in the plague village | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
-| L.A. Noire | Upon Reflection, the patrol car | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| L.A. Noire | Upon Reflection, the patrol car | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | The Legend of Spyro: Dawn of the Dragon | First control in the arena, the Basic moves tutorial | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
-| LEGO Batman: The Videogame | Episode 1-1, Gotham street | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| LEGO Indiana Jones 2: The Adventure Continues | The college hub | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| LEGO Indiana Jones: The Original Adventures | The Lost Temple, first control | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
+| LEGO Batman: The Videogame | Episode 1-1, Gotham street | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| LEGO Indiana Jones 2: The Adventure Continues | The college hub | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| LEGO Indiana Jones: The Original Adventures | The Lost Temple, first control | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
 | LEGO Star Wars II | Mos Eisley Cantina | 60 <sup>a</sup> | 60 <sup>a</sup> | 59 <sup>b</sup> | 60 <sup>d</sup> |  |
-| Lost Planet: Colonies | Mission 1, the hangar | 43 <sup>b</sup> | 30 <sup>a</sup> | 49 <sup>d</sup> | 30 <sup>d</sup> | A late beta of the game. Runs above 30 on the M4 mini and M1 Max, not yet explained. Rarely crashes in play |
+| Lost Planet: Colonies | Mission 1, the hangar | 43 <sup>b</sup> | 30 <sup>a</sup> | 49 <sup>d</sup> | 30 <sup>a</sup> | A late beta of the game. Runs above 30 on the M4 mini and M1 Max, not yet explained. Rarely crashes in play |
 | Madden NFL 10 | The coin toss, then the first play call or the kickoff | 60 <sup>b</sup> | 60 <sup>d</sup> | 60 <sup>d</sup> | 60 <sup>d</sup> | The test ends on the play call (30) or the kickoff (60), depending on the coin toss |
-| Madden NFL 13 | Play Now, CPU vs CPU | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> | 60 <sup>d</sup> |  |
-| Madden NFL 15 | Play Now, CPU vs CPU | 60 <sup>a</sup> | 30 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Madden NFL 13 | Play Now, CPU vs CPU | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> | 60 <sup>a</sup> |  |
+| Madden NFL 15 | Play Now, CPU vs CPU | 60 <sup>a</sup> | 30 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | Madden NFL 17 | Play Now, CPU vs CPU | 60 <sup>a</sup> | 60 <sup>d</sup> | 60 <sup>d</sup> | 60 <sup>d</sup> |  |
-| Madden NFL 25 | Play Now, CPU vs CPU | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| Mafia II | Story opening | 137 <sup>b</sup> | 164 <sup>a</sup> | 109 <sup>a</sup> | 180 <sup>d</sup> | Doesn't cap its own frame rate (see below). Rarely crashes in play |
-| Major League Baseball 2K13 | Demo game, CPU vs CPU | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 59 <sup>d</sup> | Dips to about 30 in some camera shots |
-| Major League Baseball 2K7 | Demo game, CPU vs CPU | 60 <sup>a</sup> | 58 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> | Dips to 30 in the busiest camera shots |
-| Marvel: Ultimate Alliance | First mission, the Helicarrier deck | 31 <sup>a</sup> | 31 <sup>b</sup> | 31 <sup>a</sup> | 31 <sup>d</sup> |  |
-| Marvel: Ultimate Alliance 2 | First mission, the bridge fight in Latveria | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | 30 <sup>d</sup> |  |
+| Madden NFL 25 | Play Now, CPU vs CPU | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| Mafia II | Story opening | 137 <sup>b</sup> | 164 <sup>a</sup> | 109 <sup>a</sup> | 174 <sup>a</sup> | Doesn't cap its own frame rate (see below). Rarely crashes in play |
+| Major League Baseball 2K13 | Demo game, CPU vs CPU | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Dips to about 30 in some camera shots |
+| Major League Baseball 2K7 | Demo game, CPU vs CPU | 60 <sup>a</sup> | 58 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | Dips to 30 in the busiest camera shots |
+| Marvel: Ultimate Alliance | First mission, the Helicarrier deck | 31 <sup>a</sup> | 31 <sup>b</sup> | 31 <sup>a</sup> | 31 <sup>a</sup> |  |
+| Marvel: Ultimate Alliance 2 | First mission, the bridge fight in Latveria | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | 30 <sup>a</sup> |  |
 | Mass Effect | First conversation | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
 | Mass Effect 3 | Prologue, the Reapers reach Earth | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
 | Max Payne 3 | Chapter 1, the bullet-time tutorial | 33 <sup>a</sup> | 33 <sup>b</sup> | 33 <sup>a</sup> | 33 <sup>a</sup> |  |
-| Medal of Honor: Warfighter | First mission, the harbour in Karachi | 30 <sup>a</sup> | 30 <sup>d</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | Can crash about 25 seconds into the first mission |
-| Mercenaries 2: World in Flames | New game, the speedboat off the coast | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
+| Medal of Honor: Warfighter | First mission, the harbour in Karachi | 30 <sup>a</sup> | 30 <sup>d</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | Can crash about 25 seconds into the first mission |
+| Mercenaries 2: World in Flames | New game, the speedboat off the coast | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
 | Metal Gear Solid HD Collection | Metal Gear Solid 3, Virtuous Mission, the jungle at first control | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | Disc 1 of the collection |
 | Metal Gear Solid HD Collection (Peace Walker) | Disc 2, Peace Walker's opening beach tutorial | 60 <sup>a</sup> | – | – | – | Disc 2 of the collection |
-| Metal Gear Solid V: Ground Zeroes | Camp Omega, the cliff at first control | 59 <sup>a</sup> | 56 <sup>a</sup> | 57 <sup>d</sup> | 60 <sup>d</sup> | Some textures show wrong colours or coloured noise, Snake's suit among them. Not yet measured on the M4 Macs: their tests stop short of this scene |
+| Metal Gear Solid V: Ground Zeroes | Camp Omega, the cliff at first control | 59 <sup>a</sup> | 56 <sup>a</sup> | 57 <sup>d</sup> | 60 <sup>a</sup> | Some textures show wrong colours or coloured noise, Snake's suit among them. Not yet measured on the M4 Macs: their tests stop short of this scene |
 | Metal Gear Solid V: The Phantom Pain | Prologue, the hospital ward at first control | 60 <sup>a</sup> | 58 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | Runs from Disc 2; Disc 1 is read from the image beside it |
-| Metro 2033 | Prologue, first control | 30 <sup>b</sup> | 30 <sup>a</sup> | 29 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Midnight Club: Los Angeles | Free roam | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Metro 2033 | Prologue, first control | 30 <sup>b</sup> | 30 <sup>a</sup> | 29 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Midnight Club: Los Angeles | Free roam | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Mirror's Edge | Story, first chapter | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
-| Mortal Kombat vs. DC Universe | Practice mode | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| Mortal Kombat: Komplete Edition | Practice mode | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| MotoGP 08 | Quick Race, Losail at night, on the grid | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
-| MX vs. ATV Reflex | Career, the first race start | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
-| MX vs. ATV Supercross | Single race, Anaheim | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| NASCAR 09 | On the grid | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>e</sup> |  |
-| NBA 2K11 | The Jordan intro game, Lakers at Bulls | 60 <sup>b</sup> | 60 <sup>a</sup> | 17 <sup>d</sup> | 60 <sup>d</sup> |  |
+| Mortal Kombat vs. DC Universe | Practice mode | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| Mortal Kombat: Komplete Edition | Practice mode | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| MotoGP 08 | Quick Race, Losail at night, on the grid | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
+| MX vs. ATV Reflex | Career, the first race start | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
+| MX vs. ATV Supercross | Single race, Anaheim | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| NASCAR 09 | On the grid | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
+| NBA 2K11 | The Jordan intro game, Lakers at Bulls | 60 <sup>b</sup> | 60 <sup>a</sup> | 17 <sup>d</sup> | 60 <sup>a</sup> |  |
 | NBA 2K14 | Quick Game, CPU vs CPU | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| NBA 2K18 | CPU vs CPU game | 60 <sup>b</sup> | 60 <sup>a</sup> | 52 <sup>a</sup> | 60 <sup>d</sup> |  |
-| NBA Ballers: Chosen One | 1-on-1 game | 60 <sup>a</sup> | 60 <sup>b</sup> | 59 <sup>a</sup> | 60 <sup>d</sup> | A built-in game patch fixes the game's own loading hang |
+| NBA 2K18 | CPU vs CPU game | 60 <sup>b</sup> | 60 <sup>a</sup> | 52 <sup>a</sup> | 60 <sup>a</sup> |  |
+| NBA Ballers: Chosen One | 1-on-1 game | 60 <sup>a</sup> | 60 <sup>b</sup> | 59 <sup>a</sup> | 60 <sup>a</sup> | A built-in game patch fixes the game's own loading hang |
 | NBA Live 09 | Practice gym | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | 60 <sup>d</sup> | Can crash loading the practice gym if buttons are pressed during the opening movies |
 | NBA Street Homecourt | Venice Beach game | 58 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | Can stall on the EA SPORTS BIG logo at start-up |
 | NCAA Football 14 | Exhibition, the opening coin toss | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
@@ -309,65 +309,65 @@ smoother.
 | Need for Speed: The Run | Stage 1, the car-crusher escape | 30 <sup>a</sup> | 30 <sup>d</sup> | 29 <sup>b</sup> | 30 <sup>a</sup> | Sometimes stops in this opening scene |
 | NHL 10 | Play Now, CPU vs CPU | – | – | 60 <sup>d</sup> | 60 <sup>d</sup> |  |
 | NHL 15 | Play Now, CPU vs CPU | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | Replays and goal cut-ins run at 30 |
-| Ninja Gaiden II | First fight, the shop balcony in Tokyo | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| The Outfit | Mission 1, the Allied base | 29 <sup>b</sup> | 29 <sup>a</sup> | 29 <sup>a</sup> | 29 <sup>d</sup> |  |
+| Ninja Gaiden II | First fight, the shop balcony in Tokyo | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| The Outfit | Mission 1, the Allied base | 29 <sup>b</sup> | 29 <sup>a</sup> | 29 <sup>a</sup> | 29 <sup>a</sup> |  |
 | Overlord | New game, the tower pit | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Overlord II | New game, the snowy woods of Nordberg | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Overlord II | New game, the snowy woods of Nordberg | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Painkiller: Hell & Damnation | First level, the cemetery gate | 30 <sup>b</sup> | – | 30 <sup>d</sup> | 30 <sup>d</sup> |  |
-| Perfect Dark Zero | Mission 0, Datacore | 30 <sup>a</sup> | 29 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Persona 4 Arena | Training mode | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| Pinball Hall of Fame: The Williams Collection | Medieval Madness table, first ball | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Perfect Dark Zero | Mission 0, Datacore | 30 <sup>a</sup> | 29 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Persona 4 Arena | Training mode | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| Pinball Hall of Fame: The Williams Collection | Medieval Madness table, first ball | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | Portal 2 | Relaxation Vault | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
-| Prince of Persia: The Forgotten Sands | Opening | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Project Gotham Racing 3 | Street race in Tokyo, on the grid | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
+| Prince of Persia: The Forgotten Sands | Opening | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Project Gotham Racing 3 | Street race in Tokyo, on the grid | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
 | Project Sylpheed: Arc of Deception | Stage 1, the asteroid field | – | – | 60 <sup>a</sup> | 60 <sup>b</sup> |  |
-| Pure | Tutorial ride | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
-| Quantum Theory | First control in the Tower | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Pure | Tutorial ride | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
+| Quantum Theory | First control in the Tower | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Rage | Campaign opening | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
 | Rayman Legends | Teensies in Trouble | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| Rayman Origins | Opening clearing | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Rayman Origins | Opening clearing | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | Red Dead Redemption | Opening cutscene | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | Disc 1 of the Game of the Year Edition |
-| Red Dead Redemption: Undead Nightmare | Opening cinematic | 30 <sup>a</sup> | 30 <sup>b</sup> | 29 <sup>a</sup> | 30 <sup>d</sup> | Disc 2 of the Game of the Year Edition |
+| Red Dead Redemption: Undead Nightmare | Opening cinematic | 30 <sup>a</sup> | 30 <sup>b</sup> | 29 <sup>a</sup> | 30 <sup>a</sup> | Disc 2 of the Game of the Year Edition |
 | Resident Evil 5 | Chapter 1-1 | 29 <sup>a</sup> | 27 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
-| Ridge Racer 6 | Single race | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Ridge Racer Unbounded | Domination race | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Rio | Story mode, the first minigame | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Rise of the Tomb Raider | Ascension, the mountain | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>e</sup> | The white flashes and rings in play are fixed. A single false-colour frame can still flash by now and then on M4 and newer Macs (about twice a minute on an M4 Pro). Only the opening mountain has been checked |
-| Rock Band | Main menu | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> | Every mode asks for a microphone when played with a controller, so the test stops at the menu |
-| Rockstar Games Presents Table Tennis | Training, the serve drill | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Rogue Warrior | First level, the night forest | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Saints Row | Campaign opening, outside the church | 29 <sup>a</sup> | 28 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Saints Row 2 | First mission, the prison infirmary | 29 <sup>b</sup> | 28 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Saints Row IV | Opening mission, the bunker tunnel | 63 <sup>a</sup> | 112 <sup>a</sup> | 51 <sup>b</sup> | 119 <sup>d</sup> | Doesn't cap its own frame rate (see below) |
-| Shadowrun | Training, chapter 1 | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Sid Meier's Civilization Revolution | Play Now, the first turn | 60 <sup>a</sup> | 60 <sup>b</sup> | 47 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Silent Hill: Homecoming | Opening nightmare, the operating room | 28 <sup>a</sup> | 28 <sup>a</sup> | 29 <sup>b</sup> | 29 <sup>d</sup> | The gurney mattress shows a blocky green and magenta texture |
-| Singularity | Katorga-12, the pier | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
+| Ridge Racer 6 | Single race | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Ridge Racer Unbounded | Domination race | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Rio | Story mode, the first minigame | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Rise of the Tomb Raider | Ascension, the mountain | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | The white flashes and rings in play are fixed. A single false-colour frame can still flash by now and then on M4 and newer Macs (about twice a minute on an M4 Pro). Only the opening mountain has been checked |
+| Rock Band | Main menu | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | Every mode asks for a microphone when played with a controller, so the test stops at the menu |
+| Rockstar Games Presents Table Tennis | Training, the serve drill | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Rogue Warrior | First level, the night forest | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Saints Row | Campaign opening, outside the church | 29 <sup>a</sup> | 28 <sup>b</sup> | 30 <sup>a</sup> | 27 <sup>a</sup> |  |
+| Saints Row 2 | First mission, the prison infirmary | 29 <sup>b</sup> | 28 <sup>a</sup> | 30 <sup>a</sup> | 27 <sup>a</sup> |  |
+| Saints Row IV | Opening mission, the bunker tunnel | 63 <sup>a</sup> | 112 <sup>a</sup> | 51 <sup>b</sup> | 113 <sup>a</sup> | Doesn't cap its own frame rate (see below) |
+| Shadowrun | Training, chapter 1 | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Sid Meier's Civilization Revolution | Play Now, the first turn | 60 <sup>a</sup> | 60 <sup>b</sup> | 47 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Silent Hill: Homecoming | Opening nightmare, the operating room | 28 <sup>a</sup> | 28 <sup>a</sup> | 29 <sup>b</sup> | 28 <sup>a</sup> | The gurney mattress shows a blocky green and magenta texture |
+| Singularity | Katorga-12, the pier | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
 | Skate 2 | Skating | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Skate 3 | Free skate, the first plaza | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| Skate. | Freeskate, Downtown library plaza | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Snoopy's Grand Adventure | New game, the backyard | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Skate 3 | Free skate, the first plaza | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| Skate. | Freeskate, Downtown library plaza | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Snoopy's Grand Adventure | New game, the backyard | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Sonic Generations | First stage | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Sonic the Hedgehog (2006) | Sonic's story, the town of Soleanna | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Sonic the Hedgehog (2006) | Sonic's story, the town of Soleanna | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | Sonic Unleashed | Windmill Isle, Act 1 | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
-| Space Chimps | First level | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Spider-Man: Friend or Foe | The Helicarrier hub | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Spider-Man: Web of Shadows | Manhattan, after the opening | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| SSX | World Tour, the first drop | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
-| Star Trek | First corridor as Kirk | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Star Trek: Legacy | Skirmish battle | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Stranglehold | Hong Kong marketplace | 30 <sup>b</sup> | 31 <sup>a</sup> | 32 <sup>a</sup> | 32 <sup>e</sup> | Runs a little above its 30 limit, not yet explained |
+| Space Chimps | First level | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Spider-Man: Friend or Foe | The Helicarrier hub | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Spider-Man: Web of Shadows | Manhattan, after the opening | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| SSX | World Tour, the first drop | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
+| Star Trek | First corridor as Kirk | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Star Trek: Legacy | Skirmish battle | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Stranglehold | Hong Kong marketplace | 30 <sup>b</sup> | 31 <sup>a</sup> | 32 <sup>a</sup> | 29 <sup>a</sup> | Runs a little above its 30 limit, not yet explained |
 | Surf's Up | Championship, the first surf run | 30 <sup>e</sup> | 30 <sup>e</sup> | – | – | In 1.1, Create Game can stop on the menu background; the test continues without saving |
 | Tales of Vesperia | Zaphias, the Lower Quarter | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Tekken Tag Tournament 2 | Practice mode | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | VS screens show one name over all four portraits. Can stop during a load (rare) |
 | Test Drive Unlimited | O'ahu, the first rental car | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
-| Tetris Evolution | Marathon game | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| Tiger Woods PGA Tour 06 | Play Now, the 1st tee | 53 <sup>a</sup> | 52 <sup>a</sup> | 54 <sup>b</sup> | 55 <sup>d</sup> |  |
-| Tiger Woods PGA Tour 08 | Play Now, the 1st tee | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
+| Tetris Evolution | Marathon game | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| Tiger Woods PGA Tour 06 | Play Now, the 1st tee | 53 <sup>a</sup> | 52 <sup>a</sup> | 54 <sup>b</sup> | 50 <sup>a</sup> |  |
+| Tiger Woods PGA Tour 08 | Play Now, the 1st tee | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
 | Tiger Woods PGA Tour 13 | Augusta, the 1st tee | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
 | Tiger Woods PGA Tour 14 | Augusta, the 1st tee | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | Some menu text is missing letters. Can crash about 10 minutes in |
-| TMNT | Mystical Jungle, first level | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Tomb Raider: Anniversary | Peru, the mountain caves | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| TMNT | Mystical Jungle, first level | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Tomb Raider: Anniversary | Peru, the mountain caves | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Tomb Raider: Legend | Bolivia, the jungle path | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
 | Tony Hawk's American Wasteland | Free Skate, Hollywood | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
 | Tony Hawk's Project 8 | Free Skate, first level | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
