@@ -461,6 +461,34 @@ Graphics settings. Frogger: Hyper Arcade Edition doesn't limit its frame rate
 either. The game-select screen of Worms Collection is uncapped in
 the same way, but the Worms menu the test measures holds 60.
 
+## Games that don't work yet
+
+These games were tried and stop before they can be played. They are tracked
+as open problems; once one works it moves into the tables above.
+
+| Game | What happens |
+| --- | --- |
+| Thrillville: Off the Rails | Never shows a picture: the screen stays black from start-up |
+| The Golden Compass | Freezes on its first loading screen, about 25 seconds after start-up |
+| Madden NFL 06 | Stays on its loading screen and never responds to the controller |
+| Supreme Commander 2 | The main menu appears but doesn't respond to the controller |
+| Qubed | The game-select menu works, but picking Lumines Live or Rez HD leaves a black screen (the separate Xbox Live Arcade release of Rez HD works; see above) |
+| Family Games (demo disc) | The menu works, but no demo starts: Continue on the age-rating screen does nothing |
+| Blazing Birds (Xbox Live Arcade) | Never shows a picture. It is built on Microsoft's XNA framework, which macXenos doesn't support yet |
+| Darts VS Zombies (Xbox Live Arcade) | Stays on its Loading screen |
+
+## Games that need hardware macXenos doesn't have
+
+These games can't be played with a controller, so they aren't tested.
+Kinect: ABC Wipeout 3, Wipeout 2, Adidas miCoach, Body and Brain Connection,
+Carnival Games: Monkey See, Monkey Do, Crossboard 7, Fable: The Journey, The
+Gunstringer, NBA Baller Beats, Power Rangers Super Samurai and Intel
+Discovered (Xbox Live Arcade). Each one stops at its Kinect setup or "Kinect
+Tuner" screen, or says a Kinect sensor is required. Skylanders: Trap Team
+needs its Portal of Power and Tony Hawk: Ride its skateboard controller.
+World of Tanks and Call of Duty: Black Ops III need an Xbox Live connection
+to start.
+
 A game not listed here may still work; these are only the ones tested on every
 build. If one of them, or another game, misbehaves, see
 [Troubleshooting](troubleshooting.md).
