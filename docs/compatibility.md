@@ -368,22 +368,22 @@ smoother.
 | Tiger Woods PGA Tour 14 | Augusta, the 1st tee | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | Some menu text is missing letters. Can crash about 10 minutes in |
 | TMNT | Mystical Jungle, first level | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | Tomb Raider: Anniversary | Peru, the mountain caves | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
-| Tomb Raider: Legend | Bolivia, the jungle path | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Tony Hawk's American Wasteland | Free Skate, Hollywood | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Tony Hawk's Project 8 | Free Skate, first level | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Tomb Raider: Legend | Bolivia, the jungle path | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Tony Hawk's American Wasteland | Free Skate, Hollywood | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Tony Hawk's Project 8 | Free Skate, first level | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | Ultra Street Fighter IV | Arcade fight | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>c</sup> | 60 <sup>d</sup> | Rarely crashes while starting |
 | Vanquish | Chapter 1, the opening tutorial aboard the ship | 22 <sup>b</sup> | 28 <sup>a</sup> | 16 <sup>a</sup> | 30 <sup>a</sup> | Runs at about 21, below its 30 limit |
-| Virtua Tennis 4 | Exhibition match, first serve | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
+| Virtua Tennis 4 | Exhibition match, first serve | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
 | Viva Piñata | Garden | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| WALL-E | First level | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Wanted: Weapons of Fate | Combat training, target practice | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Warhammer 40,000: Space Marine | First fight with the orks | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Warriors Orochi 3 | Free Mode, the camp | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>c</sup> |  |
-| WET | First level, the tea house | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| WALL-E | First level | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Wanted: Weapons of Fate | Combat training, target practice | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Warhammer 40,000: Space Marine | First fight with the orks | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Warriors Orochi 3 | Free Mode, the camp | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
+| WET | First level, the tea house | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Wolfenstein | Train station, first control | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
-| Worms Collection | Worms, main menu | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| WWE SmackDown vs. Raw 2007 | Exhibition match, CPU vs CPU | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| WWE SmackDown vs. Raw 2011 | One on One match, CPU vs CPU | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Worms Collection | Worms, main menu | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| WWE SmackDown vs. Raw 2007 | Exhibition match, CPU vs CPU | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| WWE SmackDown vs. Raw 2011 | One on One match, CPU vs CPU | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | X-Men: Destiny | First control in the wrecked street | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
 
 ## Xbox Live Arcade
@@ -393,61 +393,61 @@ columns and the same build letters.
 
 | Game | Test reaches | M4 mini | M4 Pro | M1 Max | M5 Max | Notes |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| Awesomenauts | First-run tutorial, Lonestar at his base | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| Blade Kitten | First control, after the opening cutscene | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> | Half the screen can flash white in the opening cutscene |
+| Awesomenauts | First-run tutorial, Lonestar at his base | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| Blade Kitten | First control, after the opening cutscene | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | Half the screen can flash white in the opening cutscene |
 | Bliss Island | Adventure game, the Fruit Smoothie mini-game | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Tested as the trial |
 | Brain Challenge | Brain Test, the Balance rule demo | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Tested as the trial |
-| Brothers: A Tale of Two Sons | The village lane at dusk | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
-| Call of Duty Classic | Camp Toccoa, the training ground | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
+| Brothers: A Tale of Two Sons | The village lane at dusk | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
+| Call of Duty Classic | Camp Toccoa, the training ground | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
 | Call of Juarez: Gunslinger | Episode 1, the road by the ruined barn | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> |  |
 | Castle Crashers | The castle bar, after the opening cutscene | 55 <sup>b</sup> | 56 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | Runs a little under its 60 limit, not yet explained |
-| DeathSpank: Thongs of Virtue | The prison camp kitchen | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
+| DeathSpank: Thongs of Virtue | The prison camp kitchen | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
 | Earthworm Jim HD | New Junk City, the start of the level | 57 <sup>b</sup> | 56 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Ecco the Dolphin | Home Bay, the first level | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Flashback | The Titan jungle, by the waterfall | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| Ecco the Dolphin | Home Bay, the first level | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Flashback | The Titan jungle, by the waterfall | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Frogger | The arcade game, the frog waiting on the bank | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Tested as the trial |
 | Frogger 2 | Story mode, the first jungle island | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | Tested as the trial |
 | Frogger: Hyper Arcade Edition | Tile Capture, a party game against three CPU frogs | 247 <sup>a</sup> | 238 <sup>a</sup> | 167 <sup>b</sup> | 256 <sup>a</sup> | Tested as the trial. Doesn't cap its own frame rate (see below) |
-| From Dust | The first scene, the tribe on the night shore | 31 <sup>a</sup> | 32 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| From Dust | The first scene, the tribe on the night shore | 31 <sup>a</sup> | 32 <sup>b</sup> | 30 <sup>a</sup> | 41 <sup>a</sup> |  |
 | Guardian Heroes | Story mode, the tavern at the start of stage 1 | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | Tested as the trial |
 | Guardians of Middle-Earth | Training match, first lesson card | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
-| Halo: Spartan Assault | Mission A-1, the outpost on an icy moon | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | Tested as the trial |
-| Haunted House | The first room, Jacob on Spooky difficulty | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>c</sup> |  |
+| Halo: Spartan Assault | Mission A-1, the outpost on an icy moon | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Tested as the trial |
+| Haunted House | The first room, Jacob on Spooky difficulty | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | Heavy Weapon: Atomic Tank | Mission 1, Tundra Flats | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Tested as the trial |
-| Hydrophobia | Kate's apartment, first control | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| I Am Alive | First control on the ruined highway | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
-| Ion Assault | Echelon Territory, stage 1 | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| The King of Fighters '98 Ultimate Match | Arcade Play, the first fight | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Hydrophobia | Kate's apartment, first control | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| I Am Alive | First control on the ruined highway | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
+| Ion Assault | Echelon Territory, stage 1 | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| The King of Fighters '98 Ultimate Match | Arcade Play, the first fight | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | The King of Fighters 2002 Unlimited Match | Team Play, a CPU vs CPU team match | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Tested as the trial |
 | KOF SKY STAGE | Pause menu over stage 1 | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Tested as the trial |
 | Lara Croft and the Guardian of Light | The Temple of Light entrance, the first bomb prompt | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
-| Marvel Puzzle Quest: Dark Reign | The first match board | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
-| Matt Hazard: Blood Bath and Beyond | The Hate Boat, the pool deck | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
+| Marvel Puzzle Quest: Dark Reign | The first match board | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Matt Hazard: Blood Bath and Beyond | The Hate Boat, the pool deck | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
 | Mega Man 10 | Solar Man's stage, the first room | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | Tested as the trial |
-| Mortal Kombat Arcade Kollection | Mortal Kombat, the attract loop | 54 <sup>a</sup> | 54 <sup>b</sup> | 54 <sup>a</sup> | 54 <sup>d</sup> | Runs at 54, the original arcade board's rate |
+| Mortal Kombat Arcade Kollection | Mortal Kombat, the attract loop | 54 <sup>a</sup> | 54 <sup>b</sup> | 54 <sup>a</sup> | 52 <sup>a</sup> | Runs at 54, the original arcade board's rate |
 | NBA Jam | Play Now, Celtics vs Lakers in a live game | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | Tested as the trial |
-| NBA Jam: On Fire Edition | Jam Now, a game in the Heat arena | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Orcs Must Die! | The Hallway, the first level | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>d</sup> |  |
+| NBA Jam: On Fire Edition | Jam Now, a game in the Heat arena | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Orcs Must Die! | The Hallway, the first level | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | PAC-MAN Championship Edition | Championship Mode, the replay after the run | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Tested as the trial |
 | Prison Architect: Xbox 360 Edition | Prison Stories chapter 1, the canteen | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | Tested as the trial |
-| R-Type Dimensions | R-Type stage 1, in 3D | 43 <sup>a</sup> | 60 <sup>b</sup> | 41 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Rez HD | Pause menu over Area 1 | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
+| R-Type Dimensions | R-Type stage 1, in 3D | 43 <sup>a</sup> | 60 <sup>b</sup> | 41 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Rez HD | Pause menu over Area 1 | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
 | RISK | World Domination, a game between three computer players | 60 <sup>c</sup> | – | – | – | Tested as the trial |
-| RoboBlitz | Karl's workshop, first control | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>d</sup> |  |
+| RoboBlitz | Karl's workshop, first control | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> |  |
 | Sam & Max: Beyond Time and Space | Episode 1, first control in the office | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | Tested as the trial |
 | Samurai Shodown II | Round 1, paused | 60 <sup>a</sup> | – | 60 <sup>a</sup> | – |  |
 | Scarygirl | Scarygirl's tree house, first control | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | Tested as the trial |
-| SEGA Bass Fishing | Arcade Mode, the Lodge | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
+| SEGA Bass Fishing | Arcade Mode, the Lodge | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
 | Serious Sam 3: BFE | Broken Wings demo, the Cairo park | 16 <sup>b</sup> | 14 <sup>a</sup> | 6 <sup>d</sup> | 11 <sup>d</sup> | Tested as the trial. The buildings behind the park can render solid black, and the level runs at about 15 on the M4 Macs and 6 on the M1 Max |
 | Snoopy Flying Ace | Mission 1, the Frozen Fjord ring race | 31 <sup>a</sup> | 31 <sup>a</sup> | 31 <sup>b</sup> | 31 <sup>a</sup> | Tested as the trial |
-| Sonic & Knuckles | Mushroom Hill Zone, act 1 | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| SoulCalibur II HD Online | Arcade fight, Mitsurugi vs Cassandra | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Super Street Fighter II Turbo HD Remix | Training mode, Ryu vs Ken | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>d</sup> |  |
-| Teenage Mutant Ninja Turtles 1989 Arcade | Pause menu over Scene 1 | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Trials Evolution | First career event, on the start ramp | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
-| Trials Fusion | Training Program 1, at the start line | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> | A flat brown patch covers part of the track, and white specks show along some edges |
+| Sonic & Knuckles | Mushroom Hill Zone, act 1 | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| SoulCalibur II HD Online | Arcade fight, Mitsurugi vs Cassandra | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Super Street Fighter II Turbo HD Remix | Training mode, Ryu vs Ken | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
+| Teenage Mutant Ninja Turtles 1989 Arcade | Pause menu over Scene 1 | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Trials Evolution | First career event, on the start ramp | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| Trials Fusion | Training Program 1, at the start line | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | A flat brown patch covers part of the track, and white specks show along some edges |
 | Trials HD | Tutorial track, at the start gate | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> |  |
-| Virtua Fighter 2 | Pause menu over the first Arcade fight | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>d</sup> |  |
+| Virtua Fighter 2 | Pause menu over the first Arcade fight | 60 <sup>a</sup> | 60 <sup>b</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
 | Virtual-On Oratorio Tangram | Observer mode CPU match, paused | 60 <sup>a</sup> | – | 60 <sup>a</sup> | – |  |
 
 Every figure in the tables comes from a test where the game was still running
