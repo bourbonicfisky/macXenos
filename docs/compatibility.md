@@ -2,7 +2,7 @@
 
 > **2x and 3x:** every game in this list should work at 2x and 3x resolution. To see how demanding each game is on each Mac at those scales, see the [2x and 3x benchmarks](scaling.md).
 
-These are the games macXenos is tested with regularly: 338 of them, plus the
+These are the games macXenos is tested with regularly: 346 of them, plus the
 56 Xbox Live Arcade games further down. Each one is started automatically,
 played to the point shown with a scripted controller, and measured. The four
 columns are four Macs: a base M4 Mac mini, an M4 Pro MacBook Pro, an M1 Max
@@ -246,6 +246,14 @@ smoother.
 | The History Channel: Battle for the Pacific | The Wake Island trench | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – |  |
 | Hitman: Absolution | Prologue, the grounds of Diana's estate | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Hitman: Blood Money | Training mission, the pier | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
+| Hot Wheels: Beat That! | Quick race on the bedroom track, the idle car on the start line | 30 <sup>a</sup> | – | – | – |  |
+| Hot Wheels: World's Best Driver | First event, the buggy idling on the desert lot | – | 30 <sup>a</sup> | – | – |  |
+| Hunted: The Demon's Forge | The opening cave, Caddoc with a torch | – | 30 <sup>a</sup> | – | – |  |
+| Hunter's Trophy 2: Europa | Academy shooting range, waiting on the next turn | – | – | 104 <sup>a</sup> | – | Doesn't cap its own frame rate (see below). Trees and foliage draw as striped noise (open) |
+| Ice Age: Dawn of the Dinosaurs | New story, Sid in the snowy valley at first control | 60 <sup>a</sup> | – | – | – |  |
+| The Idolmaster 2 | Stage for You!, a concert with the default unit (Japanese release) | – | – | 60 <sup>a</sup> | – |  |
+| IHF Handball Challenge 14 | Friendly match, Barcelona v Montpellier, CPU vs CPU | – | – | 60 <sup>a</sup> | – |  |
+| IL-2 Sturmovik: Birds of Prey | Flight tutorial, the Spitfire over the Channel | – | 60 <sup>a</sup> | – | – |  |
 | The Incredible Hulk | First story scene | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | The Hulk isn't visible and doesn't respond in this scene; may be by design |
 | Infinite Undiscovery | Opening scene in the dungeon | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Iron Man | First mission, Escape | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> |  |
@@ -456,7 +464,7 @@ problems fixed before these runs are not listed.
 
 Mafia II, Saints Row IV, 50 Cent: Blood on the Sand, Juiced 2: Hot Import
 Nights, Blood Bowl, AFL Live, Dark, Darkest of Days, Darksiders and Darksiders
-II, Gray Matter and Handball 16 don't limit their own frame rate, so they run as fast as the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
+II, Gray Matter, Handball 16 and Hunter's Trophy 2 don't limit their own frame rate, so they run as fast as the Mac allows, and the table measures them that way. To hold them at 60, set **Uncapped games** to **60 FPS** in the
 Graphics settings. Frogger: Hyper Arcade Edition doesn't limit its frame rate
 either. The game-select screen of Worms Collection is uncapped in
 the same way, but the Worms menu the test measures holds 60.
@@ -476,13 +484,15 @@ as open problems; once one works it moves into the tables above.
 | Family Games (demo disc) | The menu works, but no demo starts: Continue on the age-rating screen does nothing |
 | Blazing Birds (Xbox Live Arcade) | Never shows a picture. It is built on Microsoft's XNA framework, which macXenos doesn't support yet |
 | Darts VS Zombies (Xbox Live Arcade) | Stays on its Loading screen |
+| Hitman HD Trilogy (Disc 1) | The menu works, but picking Hitman 2 or Hitman: Contracts leaves a black screen that ignores the controller |
 
 ## Games that need hardware macXenos doesn't have
 
 These games can't be played with a controller, so they aren't tested.
 Kinect: ABC Wipeout 3, Wipeout 2, Adidas miCoach, Body and Brain Connection,
 Carnival Games: Monkey See, Monkey Do, Crossboard 7, Fable: The Journey, The
-Gunstringer, NBA Baller Beats, Power Rangers Super Samurai and Intel
+Gunstringer, Hole in the Wall: Deluxe Edition, Hulk Hogan's Main Event, NBA
+Baller Beats, Power Rangers Super Samurai and Intel
 Discovered (Xbox Live Arcade). Each one stops at its Kinect setup or "Kinect
 Tuner" screen, or says a Kinect sensor is required. Skylanders: Trap Team
 needs its Portal of Power and Tony Hawk: Ride its skateboard controller.
