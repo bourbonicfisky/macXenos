@@ -246,14 +246,14 @@ smoother.
 | The History Channel: Battle for the Pacific | The Wake Island trench | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | – |  |
 | Hitman: Absolution | Prologue, the grounds of Diana's estate | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Hitman: Blood Money | Training mission, the pier | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
-| Hot Wheels: Beat That! | Quick race on the bedroom track, the idle car on the start line | 30 <sup>a</sup> | – | – | – |  |
-| Hot Wheels: World's Best Driver | First event, the buggy idling on the desert lot | – | 30 <sup>a</sup> | – | – |  |
-| Hunted: The Demon's Forge | The opening cave, Caddoc with a torch | – | 30 <sup>a</sup> | – | – |  |
-| Hunter's Trophy 2: Europa | Academy shooting range, waiting on the next turn | – | – | 104 <sup>a</sup> | – | Doesn't cap its own frame rate (see below). Trees and foliage draw as striped noise (open) |
-| Ice Age: Dawn of the Dinosaurs | New story, Sid in the snowy valley at first control | 60 <sup>a</sup> | – | – | – |  |
-| The Idolmaster 2 | Stage for You!, a concert with the default unit (Japanese release) | – | – | 60 <sup>a</sup> | – |  |
-| IHF Handball Challenge 14 | Friendly match, Barcelona v Montpellier, CPU vs CPU | – | – | 60 <sup>a</sup> | – |  |
-| IL-2 Sturmovik: Birds of Prey | Flight tutorial, the Spitfire over the Channel | – | 60 <sup>a</sup> | – | – |  |
+| Hot Wheels: Beat That! | Quick race on the bedroom track, the idle car on the start line | 30 <sup>a</sup> | – | – | 30 <sup>a</sup> |  |
+| Hot Wheels: World's Best Driver | First event, the buggy idling on the desert lot | – | 30 <sup>a</sup> | – | 30 <sup>a</sup> |  |
+| Hunted: The Demon's Forge | The opening cave, Caddoc with a torch | – | 30 <sup>a</sup> | – | 30 <sup>a</sup> |  |
+| Hunter's Trophy 2: Europa | Academy shooting range, waiting on the next turn | – | – | 104 <sup>a</sup> | 118 <sup>a</sup> | Doesn't cap its own frame rate (see below). Trees and foliage draw as striped noise (open) |
+| Ice Age: Dawn of the Dinosaurs | New story, Sid in the snowy valley at first control | 60 <sup>a</sup> | – | – | 60 <sup>a</sup> |  |
+| The Idolmaster 2 | Stage for You!, a concert with the default unit (Japanese release) | – | – | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| IHF Handball Challenge 14 | Friendly match, Barcelona v Montpellier, CPU vs CPU | – | – | 60 <sup>a</sup> | 60 <sup>a</sup> |  |
+| IL-2 Sturmovik: Birds of Prey | Flight tutorial, the Spitfire over the Channel | – | 60 <sup>a</sup> | – | 60 <sup>a</sup> |  |
 | The Incredible Hulk | First story scene | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> | The Hulk isn't visible and doesn't respond in this scene; may be by design |
 | Infinite Undiscovery | Opening scene in the dungeon | 30 <sup>a</sup> | 30 <sup>b</sup> | 30 <sup>a</sup> | 30 <sup>a</sup> |  |
 | Iron Man | First mission, Escape | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>a</sup> | 60 <sup>b</sup> |  |
